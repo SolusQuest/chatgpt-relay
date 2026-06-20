@@ -1,7 +1,7 @@
 const express = require('express');
 const path = require('path');
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
 const DEFAULT_TIMEOUT = 180000;
 const SESSION_ACTIVE_MS = 30000;

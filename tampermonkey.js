@@ -24,13 +24,44 @@
     const ACTION_DELAY_MAX_MS = 900;
     const REPLY_STABLE_MS = 2000;
     const SAFETY_PATTERNS = [
-        { reason: '页面要求人机验证', pattern: /captcha|verify (that )?(you('|’)?re|you are) human|verify you are human|human verification|请验证|人机验证|验证码/i },
+        { reason: '页面要求人机验证', pattern: /captcha|verify (that )?(you'?re|you are) human|verify you are human|human verification|请验证|人机验证|验证码/i },
         { reason: '页面提示异常活动', pattern: /unusual activity|suspicious activity|异常活动|可疑活动/i },
         { reason: '页面提示请求过多', pattern: /too many requests|request limit|rate limit|频率限制|请求过多/i },
-        { reason: '页面提示使用限制', pattern: /message cap|usage limit|(you('|’)?ve|you have) reached (the )?(current )?(usage )?limit|reached.*limit|使用上限|消息上限|达到.*限制/i },
+        { reason: '页面提示使用限制', pattern: /message cap|usage limit|(you'?ve|you have) reached (the )?(current )?(usage )?limit|reached.*limit|使用上限|消息上限|达到.*限制/i },
         { reason: '页面提示稍后再试', pattern: /try again later|please try again later|稍后再试|请稍后/i },
         { reason: '页面提示账号或访问受限', pattern: /access denied|account.*disabled|account.*deactivated|访问被拒绝|账号.*停用|账户.*停用/i }
     ];
+
+    // ── DOM 选择器集中配置 ──
+    const SELECTORS = {
+        input: [
+            '#prompt-textarea',
+            '[contenteditable="true"][data-testid]',
+            'div[contenteditable="true"]'
+        ],
+        sendButton: [
+            '[data-testid="send-button"]',
+            'button[aria-label*="Send"], button[aria-label*="发送"]'
+        ],
+        stopButton: [
+            '[data-testid="stop-button"]',
+            'button[aria-label*="Stop"], button[aria-label*="停止"]'
+        ],
+        assistantMessage: '[data-message-author-role="assistant"]',
+        userMessage: '[data-message-author-role="user"]',
+        safetyAlerts: [
+            '[role="alert"]',
+            '[role="dialog"]',
+            '[aria-live="assertive"]',
+            '[aria-live="polite"]',
+            '[data-testid*="toast"]',
+            '[data-testid*="error"]',
+            '[data-testid*="banner"]',
+            '[class*="toast"]',
+            '[class*="error"]',
+            '[class*="banner"]'
+        ]
+    };
 
     function delay(ms) {
         return new Promise(resolve => setTimeout(resolve, ms));
@@ -71,11 +102,11 @@
     }
 
     function getAssistantMessages() {
-        return Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+        return Array.from(document.querySelectorAll(SELECTORS.assistantMessage));
     }
 
     function getUserMessages() {
-        return Array.from(document.querySelectorAll('[data-message-author-role="user"]'));
+        return Array.from(document.querySelectorAll(SELECTORS.userMessage));
     }
 
     function getLastMessageText(messages) {
@@ -89,20 +120,8 @@
     }
 
     function findSafetyBlock({ includeBodyFallback = false } = {}) {
-        const selectors = [
-            '[role="alert"]',
-            '[role="dialog"]',
-            '[aria-live="assertive"]',
-            '[aria-live="polite"]',
-            '[data-testid*="toast"]',
-            '[data-testid*="error"]',
-            '[data-testid*="banner"]',
-            '[class*="toast"]',
-            '[class*="error"]',
-            '[class*="banner"]'
-        ];
         const texts = [];
-        for (const selector of selectors) {
+        for (const selector of SELECTORS.safetyAlerts) {
             document.querySelectorAll(selector).forEach(el => {
                 const text = getVisibleText(el);
                 if (text) texts.push(text);
@@ -135,14 +154,19 @@
     }
 
     function findInput() {
-        return document.getElementById('prompt-textarea')
-            || document.querySelector('[contenteditable="true"][data-testid]')
-            || document.querySelector('div[contenteditable="true"]');
+        for (const sel of SELECTORS.input) {
+            const el = document.querySelector(sel);
+            if (el) return el;
+        }
+        return null;
     }
 
     function findSendButton() {
-        let btn = document.querySelector('[data-testid="send-button"]');
-        if (!btn) btn = document.querySelector('button[aria-label*="Send"], button[aria-label*="发送"]');
+        let btn = null;
+        for (const sel of SELECTORS.sendButton) {
+            btn = document.querySelector(sel);
+            if (btn) break;
+        }
         if (!btn) {
             const input = findInput();
             if (input) {
@@ -164,8 +188,7 @@
     }
 
     function isGenerating() {
-        return Boolean(document.querySelector('[data-testid="stop-button"]')
-            || document.querySelector('button[aria-label*="Stop"], button[aria-label*="停止"]'));
+        return Boolean(SELECTORS.stopButton.some(sel => document.querySelector(sel)));
     }
 
     async function waitForInput(timeoutMs = 15000) {
@@ -310,8 +333,8 @@
                     return;
                 }
 
-                const stopBtn = document.querySelector('[data-testid="stop-button"]')
-                    || document.querySelector('button[aria-label*="Stop"]');
+                const stopBtn = SELECTORS.stopButton.reduce((found, sel) =>
+                    found || document.querySelector(sel), null);
                 if (stopBtn) {
                     if (stableTimer) {
                         clearTimeout(stableTimer);
