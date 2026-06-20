@@ -1,0 +1,15 @@
+{
+  "name": "cgcon",
+  "version": "1.0.0",
+  "description": "ChatGPT 网页自动 Relay 工具 - 让 AI coding agent 自动与 ChatGPT web 交互",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
