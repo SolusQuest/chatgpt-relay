@@ -23,11 +23,12 @@
     const ACTION_DELAY_MIN_MS = 250;
     const ACTION_DELAY_MAX_MS = 900;
     const REPLY_STABLE_MS = 2000;
+    const HEARTBEAT_MS = 25000;
     const SAFETY_PATTERNS = [
-        { reason: '页面要求人机验证', pattern: /captcha|verify (that )?(you'?re|you are) human|verify you are human|human verification|请验证|人机验证|验证码/i },
+        { reason: '页面要求人机验证', pattern: /captcha|verify (that )?(you['’]?re|you are) human|verify you are human|human verification|请验证|人机验证|验证码/i },
         { reason: '页面提示异常活动', pattern: /unusual activity|suspicious activity|异常活动|可疑活动/i },
         { reason: '页面提示请求过多', pattern: /too many requests|request limit|rate limit|频率限制|请求过多/i },
-        { reason: '页面提示使用限制', pattern: /message cap|usage limit|(you'?ve|you have) reached (the )?(current )?(usage )?limit|reached.*limit|使用上限|消息上限|达到.*限制/i },
+        { reason: '页面提示使用限制', pattern: /message cap|usage limit|(you['’]?ve|you have) reached (the )?(current )?(usage )?limit|reached.*limit|使用上限|消息上限|达到.*限制/i },
         { reason: '页面提示稍后再试', pattern: /try again later|please try again later|稍后再试|请稍后/i },
         { reason: '页面提示账号或访问受限', pattern: /access denied|account.*disabled|account.*deactivated|访问被拒绝|账号.*停用|账户.*停用/i }
     ];
@@ -73,6 +74,17 @@
 
     function pacedDelay(min = ACTION_DELAY_MIN_MS, max = ACTION_DELAY_MAX_MS) {
         return delay(randomBetween(min, max));
+    }
+
+    let heartbeatTimer = null;
+    function startHeartbeat() {
+        stopHeartbeat();
+        heartbeatTimer = setInterval(() => {
+            reportSessionStatus(false);
+        }, HEARTBEAT_MS);
+    }
+    function stopHeartbeat() {
+        if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
     }
 
     // ── Session ID 提取 ──
@@ -448,6 +460,7 @@
 
     async function processTask(taskId, text) {
         isProcessing = true;
+        startHeartbeat();
         console.log(`[Relay] 收到任务 ${taskId}, 文本长度 ${text.length}, 前20字: ${text.slice(0, 20)}`);
         updateBanner(`处理中: ${taskId}`, '#e67e22');
 
@@ -496,6 +509,7 @@
             updateBanner(`错误: ${e.message}`, '#e74c3c');
             setTimeout(() => updateBanner(`Relay: ${sessionId.slice(0, 8)}...`, '#10a37f'), 5000);
         } finally {
+            stopHeartbeat();
             isProcessing = false;
             schedulePoll(POLL_IDLE_MIN_MS, POLL_IDLE_MAX_MS);
         }
