@@ -3,7 +3,7 @@ const path = require('path');
 const app = express();
 app.use(express.json({ limit: '1mb' }));
 
-const DEFAULT_TIMEOUT = 180000;
+const DEFAULT_TIMEOUT = 300000;
 const SESSION_ACTIVE_MS = 30000;
 const ACTIVE_TASK_GRACE_MS = 30000;
 const HEARTBEAT_STALE_MS = 60000;
@@ -210,6 +210,15 @@ app.get('/tampermonkey.js', (req, res) => {
   res.sendFile(path.join(__dirname, 'tampermonkey.js'));
 });
 
+// 心跳：只更新 lastSeen，不修改 paused 状态
+app.post('/heartbeat', (req, res) => {
+  const { session } = req.body;
+  if (!session) return res.status(400).json({ error: 'Missing session' });
+  const s = getSession(session);
+  s.lastSeen = Date.now();
+  res.json({ status: 'ok' });
+});
+
 // ── 扩展端接口 ──
 
 // 扩展轮询获取任务
@@ -298,6 +307,14 @@ app.post('/session_status', (req, res) => {
   }
 
   res.json({ status: 'ok', session: sessionSnapshot(session, s, now) });
+});
+
+// 413 error handler
+app.use((err, req, res, next) => {
+  if (err && err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'PAYLOAD_TOO_LARGE', message: 'Request body exceeds 1MB limit' });
+  }
+  next(err);
 });
 
 const PORT = 8765;

@@ -23,7 +23,7 @@
     const ACTION_DELAY_MIN_MS = 250;
     const ACTION_DELAY_MAX_MS = 900;
     const REPLY_STABLE_MS = 2000;
-    const HEARTBEAT_MS = 25000;
+    const HEARTBEAT_MS = 12000;
     const SAFETY_PATTERNS = [
         { reason: '页面要求人机验证', pattern: /captcha|verify (that )?(you['’]?re|you are) human|verify you are human|human verification|请验证|人机验证|验证码/i },
         { reason: '页面提示异常活动', pattern: /unusual activity|suspicious activity|异常活动|可疑活动/i },
@@ -77,11 +77,18 @@
     }
 
     let heartbeatTimer = null;
+    function sendHeartbeat() {
+        GM_xmlhttpRequest({
+            method: 'POST',
+            url: `${BASE}/heartbeat`,
+            headers: { 'Content-Type': 'application/json; charset=utf-8' },
+            data: JSON.stringify({ session: sessionId })
+        });
+    }
     function startHeartbeat() {
         stopHeartbeat();
-        heartbeatTimer = setInterval(() => {
-            reportSessionStatus(false);
-        }, HEARTBEAT_MS);
+        sendHeartbeat();
+        heartbeatTimer = setInterval(sendHeartbeat, HEARTBEAT_MS);
     }
     function stopHeartbeat() {
         if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null; }
@@ -133,12 +140,16 @@
 
     function findSafetyBlock() {
         const inputEl = findInput();
+        const inputText = inputEl ? getVisibleText(inputEl) : '';
         for (const selector of SELECTORS.safetyAlerts) {
             for (const el of document.querySelectorAll(selector)) {
-                // 跳过包含输入框的容器，避免注入的 prompt 文本触发误报
-                if (inputEl && el.contains(inputEl)) continue;
-                const text = getVisibleText(el);
+                let text = getVisibleText(el);
                 if (!text) continue;
+                // 从容器文本中剔除输入框内容，避免注入的 prompt 触发误报
+                if (inputText && el.contains(inputEl)) {
+                    text = text.replace(inputText, '').trim();
+                    if (!text) continue;
+                }
                 for (const item of SAFETY_PATTERNS) {
                     if (item.pattern.test(text)) {
                         return {
