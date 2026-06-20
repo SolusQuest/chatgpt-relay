@@ -9,7 +9,7 @@
 在 Node.js 环境中使用 `agent-client.js`：
 
 ```javascript
-const { review, listSessions, healthCheck } = require('d:/code/cgcon/agent-client');
+const { review, listSessions, getSessionStatus, healthCheck } = require('d:/code/cgcon/agent-client');
 ```
 
 ## 基本调用
@@ -26,7 +26,12 @@ if (sessions.length === 0) {
   throw new Error('没有活跃的 ChatGPT session，请打开 chatgpt.com 并确认 Tampermonkey 脚本已启用');
 }
 
-const session = sessions[0].session;
+const readySession = sessions.find(s => !s.paused && !s.activeTaskId);
+if (!readySession) {
+  throw new Error(`没有可用的 ChatGPT session: ${JSON.stringify(sessions)}`);
+}
+
+const session = readySession.session;
 ```
 
 发送 review 请求：
@@ -39,6 +44,24 @@ const feedback = await review(prompt, {
 ```
 
 `prompt` 必须包含完整的 review 指令和待 review 内容。不要只发送一段裸文本让 ChatGPT 猜任务。
+
+`listSessions()` 会返回每个 ChatGPT tab 的状态：
+
+```javascript
+[
+  {
+    session: '6a36ae0d-f3fc-83ee-9e94-d8df448e429d',
+    pendingTasks: 0,
+    activeTaskId: null,
+    paused: false,
+    pauseReason: null
+  }
+]
+```
+
+- `paused: true`：页面检测到验证码、rate limit、异常活动、访问受限等提示。agent 必须停止并提示用户处理页面。
+- `activeTaskId` 非空：该 session 正在处理任务。agent 不要向同一个 session 并发发送新任务。
+- `pendingTasks > 0`：已有排队任务。除非用户明确要求排队，否则优先选择空闲 session。
 
 ## 避免中文乱码
 
@@ -134,6 +157,20 @@ const feedback = await review(prompt, { session, timeout: 180000 });
 - `listSessions()` 为空：提示用户打开 ChatGPT 页面并确认 Tampermonkey 脚本启用。
 - `review()` 超时：检查 ChatGPT 页面是否在生成、是否被 rate limit、session 是否还在线。
 - 回复明显错位：检查是否有多个 agent 同时向同一个 session 发送任务；必要时重启 relay server 并刷新 ChatGPT 页面。
+- 返回限制、验证码、异常活动或访问受限错误：停止自动操作，提示用户检查 ChatGPT 页面；不要尝试绕过、自动重试或切换账号。
+- 返回 `Session paused`：不要重试同一任务，先让用户处理 ChatGPT 页面。页面恢复后再重新发起 review。
+- 返回 `任务已过期`：说明任务排队太久没有被页面领取；重新确认 session 在线且空闲后，再由用户决定是否重发。
+- 返回 `任务处理超时，已释放 session lock`：说明页面领取任务后长时间没有回包；检查页面是否卡住或刷新后再继续。
+
+## 可靠性边界
+
+Relay server 会做三类保护：
+
+1. **Session lock**：同一个 session 同一时间只派发一个 active task。active task 未回复前，server 不会再给该页面派发新任务。
+2. **Task TTL**：任务入队后如果超过 `timeout` 仍未被页面领取，会自动过期并返回错误，避免很久以后误处理旧任务。
+3. **Paused status**：Tampermonkey 检测到验证码、rate limit、异常活动、访问受限等页面提示时，会上报 paused。server 会拒绝新任务，并把已排队或 active 的任务转成错误返回给 agent。
+
+agent 必须把这些错误当成停止信号，不要自动绕过、自动切换账号、自动刷新重试或提高频率。
 
 ## 完整示例：Issue Draft Review
 
@@ -167,8 +204,13 @@ async function reviewIssueDrafts(paths) {
 ${drafts.join('\n\n---\n\n')}
 `.trim();
 
+  const readySession = sessions.find(s => !s.paused && !s.activeTaskId);
+  if (!readySession) {
+    throw new Error(`没有空闲的 ChatGPT session: ${JSON.stringify(sessions)}`);
+  }
+
   return review(prompt, {
-    session: sessions[0].session,
+    session: readySession.session,
     timeout: 180000
   });
 }
@@ -198,8 +240,13 @@ async function reviewPullRequest(prUrl) {
 PR: ${prUrl}
 `.trim();
 
+  const readySession = sessions.find(s => !s.paused && !s.activeTaskId);
+  if (!readySession) {
+    throw new Error(`没有空闲的 ChatGPT session: ${JSON.stringify(sessions)}`);
+  }
+
   return review(prompt, {
-    session: sessions[0].session,
+    session: readySession.session,
     timeout: 180000
   });
 }

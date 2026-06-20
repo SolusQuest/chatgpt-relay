@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT Auto Relay
 // @namespace    cgcon
-// @version      2.2
+// @version      2.5
 // @description  自动接收本地中继服务的任务，填入 ChatGPT 并提交回复
 // @match        https://chatgpt.com/*
 // @match        https://chat.deepseek.com/*
@@ -12,8 +12,38 @@
     'use strict';
 
     const BASE = 'http://localhost:8765';
-    const POLL_INTERVAL = 3000;
+    const POLL_IDLE_MIN_MS = 2500;
+    const POLL_IDLE_MAX_MS = 5500;
+    const POLL_BUSY_MIN_MS = 5000;
+    const POLL_BUSY_MAX_MS = 9000;
+    const POLL_ERROR_MIN_MS = 8000;
+    const POLL_ERROR_MAX_MS = 20000;
+    const SAFETY_PAUSE_MIN_MS = 60000;
+    const SAFETY_PAUSE_MAX_MS = 120000;
+    const STATUS_REPORT_MIN_MS = 15000;
+    const ACTION_DELAY_MIN_MS = 250;
+    const ACTION_DELAY_MAX_MS = 900;
     const REPLY_STABLE_MS = 2000;
+    const SAFETY_PATTERNS = [
+        { reason: '页面要求人机验证', pattern: /captcha|verify (that )?(you('|’)?re|you are) human|verify you are human|human verification|请验证|人机验证|验证码/i },
+        { reason: '页面提示异常活动', pattern: /unusual activity|suspicious activity|异常活动|可疑活动/i },
+        { reason: '页面提示请求过多', pattern: /too many requests|request limit|rate limit|频率限制|请求过多/i },
+        { reason: '页面提示使用限制', pattern: /message cap|usage limit|(you('|’)?ve|you have) reached (the )?(current )?(usage )?limit|reached.*limit|使用上限|消息上限|达到.*限制/i },
+        { reason: '页面提示稍后再试', pattern: /try again later|please try again later|稍后再试|请稍后/i },
+        { reason: '页面提示账号或访问受限', pattern: /access denied|account.*disabled|account.*deactivated|访问被拒绝|账号.*停用|账户.*停用/i }
+    ];
+
+    function delay(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function randomBetween(min, max) {
+        return Math.floor(min + Math.random() * (max - min + 1));
+    }
+
+    function pacedDelay(min = ACTION_DELAY_MIN_MS, max = ACTION_DELAY_MAX_MS) {
+        return delay(randomBetween(min, max));
+    }
 
     // ── Session ID 提取 ──
     function getSessionId() {
@@ -32,6 +62,17 @@
 
     let sessionId = getSessionId();
     let isProcessing = false;
+    let isPolling = false;
+    let pollTimer = null;
+    let pollErrorCount = 0;
+    let lastStatusReportKey = '';
+    let lastStatusReportAt = 0;
+
+    function schedulePoll(min = POLL_IDLE_MIN_MS, max = POLL_IDLE_MAX_MS) {
+        if (pollTimer) clearTimeout(pollTimer);
+        pollTimer = setTimeout(pollTask, randomBetween(min, max));
+    }
+
     function getAssistantMessages() {
         return Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
     }
@@ -43,6 +84,125 @@
     function getLastMessageText(messages) {
         if (messages.length === 0) return '';
         return messages[messages.length - 1].innerText.trim();
+    }
+
+    function getVisibleText(el) {
+        if (!el || !isElementVisible(el)) return '';
+        return (el.innerText || el.textContent || '').trim();
+    }
+
+    function findSafetyBlock({ includeBodyFallback = false } = {}) {
+        const selectors = [
+            '[role="alert"]',
+            '[role="dialog"]',
+            '[aria-live="assertive"]',
+            '[aria-live="polite"]',
+            '[data-testid*="toast"]',
+            '[data-testid*="error"]',
+            '[data-testid*="banner"]',
+            '[class*="toast"]',
+            '[class*="error"]',
+            '[class*="banner"]'
+        ];
+        const texts = [];
+        for (const selector of selectors) {
+            document.querySelectorAll(selector).forEach(el => {
+                const text = getVisibleText(el);
+                if (text) texts.push(text);
+            });
+        }
+
+        if (includeBodyFallback || !findInput()) {
+            const bodyText = getVisibleText(document.body);
+            if (bodyText) texts.push(bodyText);
+        }
+
+        for (const text of texts) {
+            for (const item of SAFETY_PATTERNS) {
+                if (item.pattern.test(text)) {
+                    return {
+                        reason: item.reason,
+                        text: text.slice(0, 240).replace(/\s+/g, ' ')
+                    };
+                }
+            }
+        }
+        return null;
+    }
+
+    function assertNoSafetyBlock(context, options) {
+        const block = findSafetyBlock(options);
+        if (!block) return;
+        reportSessionStatus(true, `${block.reason}: ${block.text}`);
+        throw new Error(`${context}: ${block.reason}，已停止自动操作。提示: ${block.text}`);
+    }
+
+    function findInput() {
+        return document.getElementById('prompt-textarea')
+            || document.querySelector('[contenteditable="true"][data-testid]')
+            || document.querySelector('div[contenteditable="true"]');
+    }
+
+    function findSendButton() {
+        let btn = document.querySelector('[data-testid="send-button"]');
+        if (!btn) btn = document.querySelector('button[aria-label*="Send"], button[aria-label*="发送"]');
+        if (!btn) {
+            const input = findInput();
+            if (input) {
+                const form = input.closest('form');
+                if (form) btn = form.querySelector('button[type="submit"], button:last-of-type');
+            }
+        }
+        return btn;
+    }
+
+    function isElementVisible(el) {
+        if (!el) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 0
+            && rect.height > 0
+            && style.visibility !== 'hidden'
+            && style.display !== 'none';
+    }
+
+    function isGenerating() {
+        return Boolean(document.querySelector('[data-testid="stop-button"]')
+            || document.querySelector('button[aria-label*="Stop"], button[aria-label*="停止"]'));
+    }
+
+    async function waitForInput(timeoutMs = 15000) {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            assertNoSafetyBlock('等待输入框时检测到限制', { includeBodyFallback: true });
+            const input = findInput();
+            if (input && isElementVisible(input)) return input;
+            await delay(200);
+        }
+        throw new Error('找不到输入框');
+    }
+
+    async function waitForPageReady(timeoutMs = 30000) {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            assertNoSafetyBlock('等待页面空闲时检测到限制');
+            if (!isGenerating()) return;
+            await delay(500);
+        }
+        throw new Error('页面仍在生成上一条回复');
+    }
+
+    async function waitForSendButton(timeoutMs = 10000) {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            assertNoSafetyBlock('等待发送按钮时检测到限制');
+            const btn = findSendButton();
+            if (btn && isElementVisible(btn) && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true') {
+                return btn;
+            }
+            await delay(200);
+        }
+        return null;
     }
 
     // ── UI Banner ──
@@ -61,19 +221,41 @@
         banner.style.background = color || '#10a37f';
     }
 
+    function reportSessionStatus(paused, reason = null) {
+        const now = Date.now();
+        const key = `${sessionId}|${paused ? 'paused' : 'ready'}|${reason || ''}`;
+        if (key === lastStatusReportKey && now - lastStatusReportAt < STATUS_REPORT_MIN_MS) return;
+
+        lastStatusReportKey = key;
+        lastStatusReportAt = now;
+
+        GM_xmlhttpRequest({
+            method: 'POST',
+            url: `${BASE}/session_status`,
+            headers: { 'Content-Type': 'application/json; charset=utf-8' },
+            data: JSON.stringify({ session: sessionId, paused, reason }),
+            onerror: function() {
+                console.warn('[Relay] session 状态上报失败');
+            }
+        });
+    }
+
     // ── 文本注入（execCommand，正确处理 Unicode/CJK）──
     async function pasteIntoInput(text) {
-        const input = document.getElementById('prompt-textarea')
-            || document.querySelector('[contenteditable="true"][data-testid]')
-            || document.querySelector('div[contenteditable="true"]');
+        assertNoSafetyBlock('注入文本前检测到限制');
+        await waitForPageReady();
+        const input = await waitForInput();
 
-        if (!input) throw new Error('找不到输入框');
-
+        input.scrollIntoView({ block: 'center', inline: 'nearest' });
+        await pacedDelay(150, 450);
+        input.click();
         input.focus();
+        await pacedDelay(80, 220);
 
         // 选中所有已有内容
         const sel = window.getSelection();
-        sel.selectAllChildren(input);
+        if (sel) sel.selectAllChildren(input);
+        await pacedDelay(80, 200);
 
         // 用 execCommand 替换选区内容，正确处理 Unicode
         const ok = document.execCommand('insertText', false, text);
@@ -87,30 +269,29 @@
             }));
         }
 
-        await new Promise(r => setTimeout(r, 300));
+        try {
+            input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+        } catch {
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        await pacedDelay(300, 700);
 
         // 验证注入结果
-        if (input.innerText.trim().length < 10) {
+        const injected = input.innerText.trim();
+        if (injected.length < Math.min(10, text.trim().length)) {
             throw new Error('文本注入失败，输入框内容为空');
         }
+        assertNoSafetyBlock('注入文本后检测到限制');
     }
 
     // ── 点击发送 ──
-    function clickSend() {
-        let btn = document.querySelector('[data-testid="send-button"]');
-        if (!btn) btn = document.querySelector('button[aria-label*="Send"], button[aria-label*="发送"]');
-        if (!btn) {
-            const input = document.getElementById('prompt-textarea');
-            if (input) {
-                const form = input.closest('form');
-                if (form) btn = form.querySelector('button[type="submit"], button:last-of-type');
-            }
-        }
-        if (btn && !btn.disabled) {
-            btn.click();
-            return true;
-        }
-        return false;
+    async function clickSend() {
+        const btn = await waitForSendButton();
+        if (!btn) return false;
+        btn.scrollIntoView({ block: 'center', inline: 'nearest' });
+        await pacedDelay(250, 850);
+        btn.click();
+        return true;
     }
 
     // ── 检测回复完成 ──
@@ -125,6 +306,13 @@
             let lastCandidateText = '';
 
             function checkStable() {
+                try {
+                    assertNoSafetyBlock('等待回复时检测到限制');
+                } catch (e) {
+                    cleanupAndReject(e);
+                    return;
+                }
+
                 const stopBtn = document.querySelector('[data-testid="stop-button"]')
                     || document.querySelector('button[aria-label*="Stop"]');
                 if (stopBtn) {
@@ -186,13 +374,28 @@
 
     // ── 主循环：轮询任务 ──
     function pollTask() {
-        if (isProcessing) return;
+        if (isProcessing || isPolling) {
+            schedulePoll(POLL_BUSY_MIN_MS, POLL_BUSY_MAX_MS);
+            return;
+        }
+
+        const safetyBlock = findSafetyBlock();
+        if (safetyBlock) {
+            reportSessionStatus(true, `${safetyBlock.reason}: ${safetyBlock.text}`);
+            updateBanner(`暂停: ${safetyBlock.reason}`, '#8e44ad');
+            console.warn('[Relay] 检测到限制提示，暂停自动操作:', safetyBlock);
+            schedulePoll(SAFETY_PAUSE_MIN_MS, SAFETY_PAUSE_MAX_MS);
+            return;
+        }
 
         const newSid = getSessionId();
         if (newSid !== sessionId) {
             sessionId = newSid;
+            lastStatusReportKey = '';
             banner.textContent = `Relay: ${sessionId.slice(0, 8)}...`;
         }
+
+        reportSessionStatus(false);
 
         GM_xmlhttpRequest({
             method: 'GET',
@@ -200,17 +403,33 @@
             headers: { 'Accept': 'application/json; charset=utf-8' },
             overrideMimeType: 'application/json; charset=utf-8',
             onload: function(res) {
+                isPolling = false;
                 try {
                     const data = JSON.parse(res.responseText);
+                    pollErrorCount = 0;
+                    if (data.paused) {
+                        updateBanner(`暂停: ${data.pauseReason || 'server paused'}`, '#8e44ad');
+                        schedulePoll(POLL_IDLE_MIN_MS, POLL_IDLE_MAX_MS);
+                        return;
+                    }
                     if (data.text && data.taskId) {
                         processTask(data.taskId, data.text);
+                        return;
                     }
                 } catch (e) {
                     console.error('[Relay] 解析任务失败:', e);
+                    pollErrorCount++;
                 }
+                schedulePoll();
             },
-            onerror: function() {}
+            onerror: function() {
+                isPolling = false;
+                pollErrorCount++;
+                const backoff = Math.min(POLL_ERROR_MAX_MS, POLL_ERROR_MIN_MS + pollErrorCount * 2000);
+                schedulePoll(backoff, backoff + 4000);
+            }
         });
+        isPolling = true;
     }
 
     async function processTask(taskId, text) {
@@ -219,13 +438,13 @@
         updateBanner(`处理中: ${taskId}`, '#e67e22');
 
         try {
+            assertNoSafetyBlock('处理任务前检测到限制');
             await pasteIntoInput(text);
-            await new Promise(r => setTimeout(r, 500 + Math.random() * 1000));
+            await pacedDelay(700, 1600);
+            assertNoSafetyBlock('发送任务前检测到限制');
 
             // 验证注入内容
-            const inputEl = document.getElementById('prompt-textarea')
-                || document.querySelector('[contenteditable="true"][data-testid]')
-                || document.querySelector('div[contenteditable="true"]');
+            const inputEl = findInput();
             const injected = inputEl ? inputEl.innerText.slice(0, 30) : '(null)';
             console.log(`[Relay] 注入后输入框内容: "${injected}"`);
 
@@ -236,11 +455,12 @@
                 userCount: getUserMessages().length,
                 startedAt: Date.now()
             };
-            const sent = clickSend();
+            const sent = await clickSend();
             if (!sent) throw new Error('发送按钮不可用或已禁用');
 
             updateBanner(`等待回复: ${taskId}`, '#3498db');
             const reply = await waitForReply(baseline);
+            assertNoSafetyBlock('提交回复前检测到限制');
 
             GM_xmlhttpRequest({
                 method: 'POST',
@@ -248,6 +468,7 @@
                 headers: { 'Content-Type': 'application/json; charset=utf-8' },
                 data: JSON.stringify({ session: sessionId, taskId, text: reply })
             });
+            reportSessionStatus(false);
 
             updateBanner(`Relay: ${sessionId.slice(0, 8)}...`, '#10a37f');
 
@@ -262,9 +483,10 @@
             setTimeout(() => updateBanner(`Relay: ${sessionId.slice(0, 8)}...`, '#10a37f'), 5000);
         } finally {
             isProcessing = false;
+            schedulePoll(POLL_IDLE_MIN_MS, POLL_IDLE_MAX_MS);
         }
     }
 
-    setInterval(pollTask, POLL_INTERVAL);
+    schedulePoll(1000, 2000);
     console.log(`[Relay] 已启动, session: ${sessionId}`);
 })();

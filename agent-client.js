@@ -14,7 +14,7 @@ async function review(text, { session = 'default', timeout = DEFAULT_TIMEOUT } =
   // 1. 发送任务
   const sendRes = await fetch(`${RELAY_URL}/task`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json; charset=utf-8' },
     body: JSON.stringify({ session, text, timeout })
   });
 
@@ -28,11 +28,15 @@ async function review(text, { session = 'default', timeout = DEFAULT_TIMEOUT } =
   // 2. 轮询等待回复
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
-    const res = await fetch(`${RELAY_URL}/get_reply?session=${session}&taskId=${taskId}`);
+    const query = new URLSearchParams({ session, taskId });
+    const res = await fetch(`${RELAY_URL}/get_reply?${query}`);
     const data = await res.json();
 
     if (data.text) return data.text;
     if (data.error) throw new Error(`ChatGPT 错误: ${data.error}`);
+    if (data.paused) {
+      throw new Error(`ChatGPT session paused: ${data.pauseReason || 'unknown reason'}`);
+    }
 
     await new Promise(r => setTimeout(r, POLL_INTERVAL));
   }
@@ -42,12 +46,27 @@ async function review(text, { session = 'default', timeout = DEFAULT_TIMEOUT } =
 
 /**
  * 查询当前可用的 sessions（活跃的 ChatGPT 标签页）
- * @returns {Promise<Array<{session: string, pendingTasks: number}>>}
+ * @returns {Promise<Array<{
+ *   session: string,
+ *   pendingTasks: number,
+ *   activeTaskId?: string | null,
+ *   paused?: boolean,
+ *   pauseReason?: string | null
+ * }>>}
  */
 async function listSessions() {
   const res = await fetch(`${RELAY_URL}/sessions`);
   const data = await res.json();
   return data.sessions;
+}
+
+/**
+ * 查询单个 session 状态
+ * @param {string} session
+ */
+async function getSessionStatus(session) {
+  const sessions = await listSessions();
+  return sessions.find(s => s.session === session) || null;
 }
 
 /**
@@ -63,4 +82,4 @@ async function healthCheck() {
   }
 }
 
-module.exports = { review, listSessions, healthCheck };
+module.exports = { review, listSessions, getSessionStatus, healthCheck };
