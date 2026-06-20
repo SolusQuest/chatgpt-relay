@@ -119,35 +119,29 @@
         return (el.innerText || el.textContent || '').trim();
     }
 
-    function findSafetyBlock({ includeBodyFallback = false } = {}) {
-        const texts = [];
+    function findSafetyBlock() {
+        const inputEl = findInput();
         for (const selector of SELECTORS.safetyAlerts) {
-            document.querySelectorAll(selector).forEach(el => {
+            for (const el of document.querySelectorAll(selector)) {
+                // 跳过包含输入框的容器，避免注入的 prompt 文本触发误报
+                if (inputEl && el.contains(inputEl)) continue;
                 const text = getVisibleText(el);
-                if (text) texts.push(text);
-            });
-        }
-
-        if (includeBodyFallback || !findInput()) {
-            const bodyText = getVisibleText(document.body);
-            if (bodyText) texts.push(bodyText);
-        }
-
-        for (const text of texts) {
-            for (const item of SAFETY_PATTERNS) {
-                if (item.pattern.test(text)) {
-                    return {
-                        reason: item.reason,
-                        text: text.slice(0, 240).replace(/\s+/g, ' ')
-                    };
+                if (!text) continue;
+                for (const item of SAFETY_PATTERNS) {
+                    if (item.pattern.test(text)) {
+                        return {
+                            reason: item.reason,
+                            text: text.slice(0, 240).replace(/\s+/g, ' ')
+                        };
+                    }
                 }
             }
         }
         return null;
     }
 
-    function assertNoSafetyBlock(context, options) {
-        const block = findSafetyBlock(options);
+    function assertNoSafetyBlock(context) {
+        const block = findSafetyBlock();
         if (!block) return;
         reportSessionStatus(true, `${block.reason}: ${block.text}`);
         throw new Error(`${context}: ${block.reason}，已停止自动操作。提示: ${block.text}`);
@@ -194,7 +188,7 @@
     async function waitForInput(timeoutMs = 15000) {
         const deadline = Date.now() + timeoutMs;
         while (Date.now() < deadline) {
-            assertNoSafetyBlock('等待输入框时检测到限制', { includeBodyFallback: true });
+            assertNoSafetyBlock('等待输入框时检测到限制');
             const input = findInput();
             if (input && isElementVisible(input)) return input;
             await delay(200);
