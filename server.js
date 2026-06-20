@@ -6,6 +6,7 @@ app.use(express.json());
 const DEFAULT_TIMEOUT = 180000;
 const SESSION_ACTIVE_MS = 30000;
 const ACTIVE_TASK_GRACE_MS = 30000;
+const HEARTBEAT_STALE_MS = 60000;
 
 // session_id → relay session state
 const sessions = new Map();
@@ -87,9 +88,16 @@ function releaseStaleActiveTask(sessionId, s, now = Date.now()) {
   clearActiveTask(s);
 }
 
+function releaseHeartbeatLostTask(sessionId, s, now = Date.now()) {
+  if (!s.activeTask || now - s.lastSeen <= HEARTBEAT_STALE_MS) return;
+  pushTaskError(sessionId, s, s.activeTaskId, `Session 心跳丢失 (${Math.round((now - s.lastSeen) / 1000)}s 未响应)，可能已关闭或崩溃`);
+  clearActiveTask(s);
+}
+
 function maintainSession(sessionId, s, now = Date.now()) {
   expireQueuedTasks(sessionId, s, now);
   releaseStaleActiveTask(sessionId, s, now);
+  releaseHeartbeatLostTask(sessionId, s, now);
 }
 
 function failPendingTasks(sessionId, s, error) {
