@@ -4,7 +4,6 @@
 // @version      1.4
 // @description  通过 Tampermonkey @require 加载本地 ChatGPT Relay 脚本
 // @match        https://chatgpt.com/*
-// @match        https://chat.deepseek.com/*
 // @run-at       document-idle
 // @grant        GM_xmlhttpRequest
 // @connect      localhost

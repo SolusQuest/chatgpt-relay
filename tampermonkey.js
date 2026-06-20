@@ -4,7 +4,6 @@
 // @version      2.5
 // @description  自动接收本地中继服务的任务，填入 ChatGPT 并提交回复
 // @match        https://chatgpt.com/*
-// @match        https://chat.deepseek.com/*
 // @grant        GM_xmlhttpRequest
 // ==/UserScript==
 
@@ -50,8 +49,6 @@
         const url = window.location.pathname;
         const chatgptMatch = url.match(/\/c\/([a-f0-9-]+)/);
         if (chatgptMatch) return chatgptMatch[1];
-        const deepseekMatch = url.match(/\/s\/([a-f0-9-]+)/);
-        if (deepseekMatch) return deepseekMatch[1];
         let sid = sessionStorage.getItem('relay_session_id');
         if (!sid) {
             sid = crypto.randomUUID();
