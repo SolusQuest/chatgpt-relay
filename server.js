@@ -213,7 +213,9 @@ app.get('/tampermonkey.js', (req, res) => {
 // 心跳：只更新 lastSeen，不修改 paused 状态
 app.post('/heartbeat', (req, res) => {
   const { session } = req.body;
-  if (!session) return res.status(400).json({ error: 'Missing session' });
+  if (typeof session !== 'string' || session.length === 0 || session.length > 128) {
+    return res.status(400).json({ error: 'Invalid session' });
+  }
   const s = getSession(session);
   s.lastSeen = Date.now();
   res.json({ status: 'ok' });

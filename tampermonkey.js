@@ -53,14 +53,9 @@
         safetyAlerts: [
             '[role="alert"]',
             '[role="dialog"]',
-            '[aria-live="assertive"]',
-            '[aria-live="polite"]',
             '[data-testid*="toast"]',
             '[data-testid*="error"]',
-            '[data-testid*="banner"]',
-            '[class*="toast"]',
-            '[class*="error"]',
-            '[class*="banner"]'
+            '[data-testid*="banner"]'
         ]
     };
 
@@ -77,12 +72,19 @@
     }
 
     let heartbeatTimer = null;
+    let heartbeatInFlight = false;
     function sendHeartbeat() {
+        if (heartbeatInFlight) return;
+        heartbeatInFlight = true;
         GM_xmlhttpRequest({
             method: 'POST',
             url: `${BASE}/heartbeat`,
             headers: { 'Content-Type': 'application/json; charset=utf-8' },
-            data: JSON.stringify({ session: sessionId })
+            data: JSON.stringify({ session: sessionId }),
+            timeout: 5000,
+            onload: () => { heartbeatInFlight = false; },
+            onerror: () => { heartbeatInFlight = false; },
+            ontimeout: () => { heartbeatInFlight = false; }
         });
     }
     function startHeartbeat() {
@@ -139,23 +141,13 @@
     }
 
     function findSafetyBlock() {
-        const inputEl = findInput();
-        const inputText = inputEl ? getVisibleText(inputEl) : '';
         for (const selector of SELECTORS.safetyAlerts) {
             for (const el of document.querySelectorAll(selector)) {
-                let text = getVisibleText(el);
+                const text = getVisibleText(el);
                 if (!text) continue;
-                // 从容器文本中剔除输入框内容，避免注入的 prompt 触发误报
-                if (inputText && el.contains(inputEl)) {
-                    text = text.replace(inputText, '').trim();
-                    if (!text) continue;
-                }
                 for (const item of SAFETY_PATTERNS) {
                     if (item.pattern.test(text)) {
-                        return {
-                            reason: item.reason,
-                            text: text.slice(0, 240).replace(/\s+/g, ' ')
-                        };
+                        return { reason: item.reason, text: text.slice(0, 240).replace(/\s+/g, ' ') };
                     }
                 }
             }
