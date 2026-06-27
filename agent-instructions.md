@@ -39,7 +39,7 @@ const session = readySession.session;
 ```javascript
 const feedback = await review(prompt, {
   session,
-  timeout: 180000
+  timeout: 600000
 });
 ```
 
@@ -113,7 +113,7 @@ ${issueDraft1}
 ${issueDraft2}
 `.trim();
 
-const feedback = await review(prompt, { session, timeout: 180000 });
+const feedback = await review(prompt, { session, timeout: 600000 });
 ```
 
 处理反馈时，agent 自己理解 ChatGPT 的意见并修改 draft。不要用关键词匹配来判断是否通过。
@@ -134,19 +134,12 @@ const feedback = await review(prompt, { session, timeout: 180000 });
 const prompt = `
 请作为严格的代码 reviewer，review 下面这个 GitHub PR。
 
-重点检查：
-- 行为是否符合需求
-- 是否有 bug、边界条件、竞态或编码问题
-- 测试覆盖是否足够
-- 是否有不必要的复杂度或维护风险
-- PR 描述和实现是否一致
-
 请优先列出需要修改的问题；如果没有阻塞问题，请明确说明可以合并，并列出剩余风险。
 
 PR: ${prUrl}
 `.trim();
 
-const feedback = await review(prompt, { session, timeout: 180000 });
+const feedback = await review(prompt, { session, timeout: 600000 });
 ```
 
 如果 ChatGPT 指出需要修改的问题，agent 应修改代码、重新 commit/push，然后把同一个 PR 链接再次发给 ChatGPT 复审。
@@ -211,7 +204,7 @@ ${drafts.join('\n\n---\n\n')}
 
   return review(prompt, {
     session: readySession.session,
-    timeout: 180000
+    timeout: 600000
   });
 }
 ```
@@ -233,10 +226,6 @@ async function reviewPullRequest(prUrl) {
 
   const prompt = `
 请作为严格的代码 reviewer，review 下面这个 GitHub PR。
-
-请优先检查 bug、边界条件、测试缺口、行为回归和维护风险。
-如果没有阻塞问题，请明确说明可以合并，并列出剩余风险。
-
 PR: ${prUrl}
 `.trim();
 
@@ -247,7 +236,7 @@ PR: ${prUrl}
 
   return review(prompt, {
     session: readySession.session,
-    timeout: 180000
+    timeout: 600000
   });
 }
 ```

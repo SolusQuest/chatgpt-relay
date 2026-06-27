@@ -1,5 +1,5 @@
 const RELAY_URL = 'http://localhost:8765';
-const DEFAULT_TIMEOUT = 180000;
+const DEFAULT_TIMEOUT = 600000;
 const POLL_INTERVAL = 2000;
 
 /**
@@ -7,7 +7,7 @@ const POLL_INTERVAL = 2000;
  * @param {string} text - 要 review 的内容
  * @param {object} opts
  * @param {string} opts.session - 目标 session ID（从 ChatGPT URL 或 /sessions 获取）
- * @param {number} opts.timeout - 超时毫秒数，默认 180000 (3分钟)
+ * @param {number} opts.timeout - 超时毫秒数，默认 600000 (10分钟)
  * @returns {Promise<string>} ChatGPT 的回复
  */
 async function review(text, { session = 'default', timeout = DEFAULT_TIMEOUT } = {}) {

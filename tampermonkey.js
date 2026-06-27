@@ -328,8 +328,8 @@
         return new Promise((resolve, reject) => {
             const timeout = setTimeout(() => {
                 observer.disconnect();
-                reject(new Error('等待回复超时 (3 分钟)'));
-            }, 180000);
+                reject(new Error('等待回复超时 (10 分钟)'));
+            }, 600000);
 
             let stableTimer = null;
             let lastCandidateText = '';
