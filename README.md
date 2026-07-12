@@ -143,6 +143,7 @@ rm ~/.gpt-relay/gpt-relay.db*         # 全清
 
 - `agent-instructions.md` — 给 agent 直接看的 API 说明
 - `skills/gpt-relay-review/SKILL.md` — Codex/Claude skill 定义
+- `workflows/` — 多步 orchestration 模板（例如 issue → PR 全链路）
 - `extension/README.md` — 扩展加载 + 恢复机制细节
 
 ## License

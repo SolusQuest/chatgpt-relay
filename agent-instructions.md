@@ -518,4 +518,5 @@ curl -sf http://127.0.0.1:8765/v1/sessions | jq '.sessions[] | select(.paused==f
 
 - `README.md` — 项目总览、CLI 用法
 - `skills/gpt-relay-review/SKILL.md` — Codex/Claude skill 定义（推荐给 skill runner 直接引用）
+- `workflows/` — 多步 orchestration 模板；本文件里的模式在那里被组合成端到端流程
 - `extension/README.md` — 扩展加载、恢复行为
