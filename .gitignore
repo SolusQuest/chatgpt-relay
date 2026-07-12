@@ -8,3 +8,7 @@ dist/
 # tsx / typescript build cache
 *.tsbuildinfo
 .test-data/
+
+srv.log
+srv.err
+*.tmp.log

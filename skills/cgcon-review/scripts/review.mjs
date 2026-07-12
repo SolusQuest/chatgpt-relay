@@ -1,0 +1,75 @@
+#!/usr/bin/env node
+// skills/cgcon-review/scripts/review.mjs
+// 提交一段文本给指定 session 的 ChatGPT，等待回复。
+// 用法：
+//   node review.mjs --session <id> --stdin
+//   node review.mjs --session <id> --text "..."
+//   node review.mjs --session <id> --file path/to/prompt.md
+//   node review.mjs --session <id> --stdin --no-wait   # fire-and-forget
+// 输出：成功时 stdout 是回复文本；失败非零退出，stderr 打印错误。
+import fs from "node:fs";
+import { randomUUID } from "node:crypto";
+import { httpJson, isTerminal, writePending, clearPending } from "./lib.mjs";
+
+function parseArgs(argv) {
+  const o = { wait: true, timeoutMs: 10 * 60_000 };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--session") o.session = argv[++i];
+    else if (a === "--text") o.text = argv[++i];
+    else if (a === "--stdin") o.stdin = true;
+    else if (a === "--file") o.file = argv[++i];
+    else if (a === "--no-wait") o.wait = false;
+    else if (a === "--timeout") o.timeoutMs = Number(argv[++i]);
+    else if (a === "--cri") o.clientRequestId = argv[++i];
+    else if (a === "-h" || a === "--help") o.help = true;
+  }
+  return o;
+}
+
+async function readStdin() {
+  const chunks = [];
+  for await (const c of process.stdin) chunks.push(c);
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+const args = parseArgs(process.argv.slice(2));
+if (args.help || !args.session) {
+  console.error("usage: review.mjs --session <id> (--text T | --stdin | --file F) [--no-wait] [--timeout ms] [--cri key]");
+  process.exit(64);
+}
+
+let text = args.text;
+if (args.stdin) text = await readStdin();
+if (args.file) text = fs.readFileSync(args.file, "utf8");
+if (!text) { console.error("no text provided"); process.exit(64); }
+
+const started = Date.now();
+const cri = args.clientRequestId ?? randomUUID();
+const created = await httpJson("POST", "/v1/tasks", {
+  session: args.session, text, timeout: args.timeoutMs, clientRequestId: cri,
+});
+const taskId = created.taskId;
+writePending({
+  taskId, session: args.session, submittedAt: started,
+  textPreview: text.slice(0, 80), clientRequestId: cri,
+});
+if (!args.wait) {
+  process.stdout.write(JSON.stringify({ taskId, status: "queued" }));
+  process.exit(0);
+}
+
+const deadline = started + args.timeoutMs;
+while (Date.now() < deadline) {
+  const remaining = deadline - Date.now();
+  const wait = Math.min(remaining, 30_000);
+  const t = await httpJson("GET", `/v1/tasks/${taskId}?wait=${wait}`);
+  if (isTerminal(t.status)) {
+    clearPending(taskId);
+    if (t.status === "done") { process.stdout.write(t.reply ?? ""); process.exit(0); }
+    console.error(`task ${taskId} ${t.status}: ${t.error ?? "(no error)"}`);
+    process.exit(2);
+  }
+}
+console.error(`timeout after ${args.timeoutMs}ms (taskId=${taskId} still pending; try 'resume')`);
+process.exit(3);

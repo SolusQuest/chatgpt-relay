@@ -1,0 +1,16 @@
+#!/usr/bin/env node
+// skills/cgcon-review/scripts/list.mjs
+// 列出最近的 tasks（默认 20 条）。
+import { httpJson } from "./lib.mjs";
+const args = process.argv.slice(2);
+const limit = Number(args[args.indexOf("--last") + 1]) || 20;
+const session = args[args.indexOf("--session") + 1];
+const url = new URLSearchParams({ limit: String(limit) });
+if (args.includes("--session") && session) url.set("session", session);
+const r = await httpJson("GET", `/v1/tasks?${url}`);
+console.log(["taskId","session","status","submittedAt","elapsedMs"].join("\t"));
+for (const t of r.tasks) {
+  const elapsed = t.completedAt ? t.completedAt - t.submittedAt : Date.now() - t.submittedAt;
+  console.log([t.taskId.slice(0,8), t.session.slice(0,10), t.status,
+    new Date(t.submittedAt).toISOString(), `${elapsed}ms`].join("\t"));
+}

@@ -16,7 +16,6 @@ let stopMaintenance: (() => void) | null = null;
 let baseUrl = "";
 let dataDir = "";
 let pendingDir = "";
-let fakeExtStop: (() => void) | null = null;
 
 /** Fake 扩展：轮询 /internal/next_task → 假装 ChatGPT 回复 → POST complete */
 function startFakeExtension(sessionId: string, replier: (prompt: string) => string) {
@@ -65,7 +64,6 @@ before(async () => {
 });
 
 after(async () => {
-  fakeExtStop?.();
   stopMaintenance?.();
   await new Promise<void>((resolve) => server?.close(() => resolve()));
   try { fs.rmSync(dataDir, { recursive: true, force: true }); } catch { /* */ }
