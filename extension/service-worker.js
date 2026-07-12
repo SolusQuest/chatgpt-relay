@@ -177,6 +177,7 @@ async function pollPendingReplies() {
   const map = await listPendingReplies();
   const ids = Object.keys(map);
   if (ids.length === 0) return;
+  console.log("[cgcon sw] pollPendingReplies pending=", ids.length);
 
   for (const taskId of ids) {
     const rec = map[taskId];
@@ -191,6 +192,7 @@ async function pollPendingReplies() {
 
 async function pollOnePending(taskId, rec) {
   const now = Date.now();
+  console.log("[cgcon sw] pollOnePending", taskId.slice(0,8), "tab=", rec.tabId, "session=", rec.session?.slice?.(0,8), "notStarted=", rec.notStartedCount, "stable=", rec.stableSampleCount);
   // 硬超时
   if (now - rec.submittedAt > POLL_HARD_TIMEOUT_MS) {
     console.warn("[cgcon sw] pending reply hard timeout", taskId);
@@ -227,6 +229,7 @@ async function pollOnePending(taskId, rec) {
   }
   rec.lastPollAt = now;
 
+  console.log("[cgcon sw] poll-reply snap", taskId.slice(0,8), "status=", snap?.status, "err=", snap?.error, "text=", (snap?.reply ?? snap?.lastText ?? "").slice(0,40));
   if (!snap || snap.error) {
     console.warn("[cgcon sw] poll-reply error", taskId, snap?.error);
     await setPendingReply(taskId, rec);
@@ -367,7 +370,10 @@ async function handleTab(tabId) {
   if (offlineSessions.has(session)) return;
 
   const inflight = await getInflight(session);
-  if (inflight) return;
+  if (inflight) {
+    console.log("[cgcon sw] handleTab skip: session", session.slice(0, 8), "has inflight task", inflight.taskId?.slice?.(0, 8));
+    return;
+  }
 
   let safety = null;
   try {
@@ -415,6 +421,7 @@ async function handleTab(tabId) {
     const runRes = await chrome.tabs.sendMessage(tabId, {
       type: "run-task", taskId, text,
     });
+    console.log("[cgcon sw] run-task response", taskId.slice(0,8), "status=", runRes?.status, "hasReply=", typeof runRes?.reply === "string", "error=", runRes?.error);
     if (runRes?.error) throw new Error(runRes.error);
     if (runRes?.status !== "submitted") {
       // content-script 老版本仍可能返回 { reply }，兼容一下
@@ -426,6 +433,7 @@ async function handleTab(tabId) {
       throw new Error("run-task did not acknowledge submission");
     }
     // 登记 pendingReply，让 SW 主动采样完成
+    console.log("[cgcon sw] registering pendingReply", taskId.slice(0,8), "baseline=", runRes.baseline);
     await setPendingReply(taskId, {
       session,
       tabId,
@@ -468,11 +476,27 @@ async function reconcileInflight() {
     const sid = await getTabSession(t.id);
     if (sid) liveSessions.add(sid);
   }
-  // 该 session 的 tab 消失了 → 清理 inflight（防止内存泄漏）
-  const stale = Object.keys(inflight).filter((s) => !liveSessions.has(s));
-  for (const s of stale) {
-    console.log("[cgcon sw] reconcile: dropping inflight for missing session", s);
-    await clearInflight(s);
+  // 1) 该 session 的 tab 消失了 → 清理 inflight
+  for (const s of Object.keys(inflight)) {
+    if (!liveSessions.has(s)) {
+      console.log("[cgcon sw] reconcile: dropping inflight for missing session", s.slice(0, 8));
+      await clearInflight(s);
+    }
+  }
+  // 2) 若 task 已经 terminal（server 判 failed/expired 等），也清 inflight + pending
+  const still = await getStorage(STORAGE_KEYS.INFLIGHT, {});
+  for (const [session, entry] of Object.entries(still)) {
+    if (!entry?.taskId) continue;
+    try {
+      const t = await httpJson("GET", `/v1/tasks/${entry.taskId}`);
+      if (t && ["done", "failed", "cancelled", "expired"].includes(t.status)) {
+        console.log("[cgcon sw] reconcile: task", entry.taskId.slice(0, 8), "already", t.status, "→ clearing inflight");
+        await clearInflight(session);
+        await deletePendingReply(entry.taskId);
+      }
+    } catch (e) {
+      // server 不可达就算了，下一轮再试
+    }
   }
 }
 
