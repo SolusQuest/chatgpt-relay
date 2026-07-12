@@ -142,6 +142,14 @@ async function getInflight(session) {
 // ── offline 标记 ──
 const offlineSessions = new Set();
 
+// 通知 content-script 清 sessionStorage 里的 inflight 并复位 banner。
+// task 完成 / 失败 / 服务端强制超时 均走这里，避免 banner 卡在"等待回复"蓝色。
+async function notifyTabCleared(tabId) {
+  if (!tabId) return;
+  try { await chrome.tabs.sendMessage(tabId, { type: "clear-inflight" }); } catch {}
+  try { await chrome.tabs.sendMessage(tabId, { type: "update-banner", text: "Relay", color: "#10a37f" }); } catch {}
+}
+
 // ── pending-reply state machine ──
 // Chrome 冻结后台 tab 的 MutationObserver / setInterval，因此不再让 content
 // script 长期挂 waitForReply。SW 每次 alarm 主动通过 chrome.tabs.sendMessage
@@ -265,11 +273,7 @@ async function pollOnePending(taskId, rec) {
       }
       await deletePendingReply(taskId);
       await clearInflight(rec.session);
-      // 顺便清 content-script 里的 sessionStorage inflight + 复位 banner
-      try {
-        await chrome.tabs.sendMessage(rec.tabId, { type: "clear-inflight" });
-        await chrome.tabs.sendMessage(rec.tabId, { type: "update-banner", text: "Relay", color: "#10a37f" });
-      } catch {}
+      await notifyTabCleared(rec.tabId);
       return;
     }
     await setPendingReply(taskId, rec);
@@ -316,6 +320,7 @@ async function failPending(taskId, rec, reason) {
   }
   await deletePendingReply(taskId);
   await clearInflight(rec.session);
+  await notifyTabCleared(rec.tabId);
   await setStorage(STORAGE_KEYS.LAST_ERROR, {
     taskId, session: rec.session, error: reason, at: Date.now(),
   });
@@ -329,6 +334,7 @@ async function requeuePending(taskId, rec) {
   }
   await deletePendingReply(taskId);
   await clearInflight(rec.session);
+  await notifyTabCleared(rec.tabId);
 }
 
 // ── 轮询 ──
@@ -491,8 +497,18 @@ async function reconcileInflight() {
       const t = await httpJson("GET", `/v1/tasks/${entry.taskId}`);
       if (t && ["done", "failed", "cancelled", "expired"].includes(t.status)) {
         console.log("[cgcon sw] reconcile: task", entry.taskId.slice(0, 8), "already", t.status, "→ clearing inflight");
+        // 找到对应 tabId（优先从 pendingReplies 拿，回退到反查 tab_session_map）
+        let tabId = null;
+        const pmap = await listPendingReplies();
+        if (pmap[entry.taskId]?.tabId) tabId = pmap[entry.taskId].tabId;
+        if (!tabId) {
+          for (const [tid, sid] of tabSessionCache.entries()) {
+            if (sid === session) { tabId = tid; break; }
+          }
+        }
         await clearInflight(session);
         await deletePendingReply(entry.taskId);
+        await notifyTabCleared(tabId);
       }
     } catch (e) {
       // server 不可达就算了，下一轮再试
