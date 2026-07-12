@@ -50,6 +50,28 @@ async function httpJson(method, url, body, timeoutMs = 30_000) {
   }
 }
 
+// 唤醒被 Chrome 丢弃的 tab（后台内存回收会把 tab discard，content-script 随之消失）
+async function reviveDiscardedTab(tab) {
+  if (!tab.id) return false;
+  if (!tab.discarded) return true;
+  console.log("[cgcon sw] reviving discarded tab", tab.id);
+  try {
+    await chrome.tabs.reload(tab.id);
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 200));
+      try {
+        const r = await chrome.tabs.sendMessage(tab.id, { type: "get-session-id" });
+        if (r?.session) { console.log("[cgcon sw] revived tab", tab.id, "session", r.session.slice(0, 8)); return true; }
+      } catch { /* still loading */ }
+    }
+    console.warn("[cgcon sw] revived tab did not report session in 8s", tab.id);
+    return false;
+  } catch (e) {
+    console.warn("[cgcon sw] reload failed", tab.id, e);
+    return false;
+  }
+}
+
 async function listChatGPTTabs() {
   return chrome.tabs.query({ url: "https://chatgpt.com/*" });
 }
@@ -87,8 +109,10 @@ let pollInProgress = false;
 async function pollOnce() {
   if (pollInProgress) return;
   pollInProgress = true;
+  console.log("[cgcon sw] pollOnce start");
   try {
     const tabs = await listChatGPTTabs();
+    console.log("[cgcon sw] pollOnce tabs=", tabs.length);
     for (const tab of tabs) {
       if (!tab.id) continue;
       try {
@@ -103,6 +127,14 @@ async function pollOnce() {
 }
 
 async function handleTab(tabId) {
+  // Chrome 可能把 chatgpt.com tab discard 掉；先 revive 再继续
+  const tabInfo = await chrome.tabs.get(tabId).catch(() => null);
+  if (!tabInfo) return;
+  if (tabInfo.discarded) {
+    const ok = await reviveDiscardedTab(tabInfo);
+    if (!ok) { console.warn("[cgcon sw] failed to revive tab", tabId); return; }
+  }
+
   const session = await getTabSession(tabId);
   if (!session) return;
   if (offlineSessions.has(session)) return;

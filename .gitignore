@@ -12,3 +12,5 @@ dist/
 srv.log
 srv.err
 *.tmp.log
+
+relay-test.*
