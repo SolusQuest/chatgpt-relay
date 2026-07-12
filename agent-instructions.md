@@ -52,7 +52,7 @@ cgcon 是本地 SQLite 队列服务，agent 提交 task → 浏览器扩展在 C
   "text": "…原始 prompt（仅 GET /v1/tasks/:id 返回）…",
   "reply": "…ChatGPT 回复（仅 done 时非 null）…",
   "error": null,                           // failed/cancelled/expired 时的原因
-  "timeoutMs": 300000,                     // 从 submittedAt 起算的软超时
+  "timeoutMs": 600000,                     // 从 submittedAt 起算的软超时
   "submittedAt": 1783846951352,
   "dispatchedAt": 1783846986252,           // 扩展 claim 的时间；null 表示还未 claim
   "completedAt": 1783847074944,            // terminal 时间
@@ -68,7 +68,7 @@ cgcon 是本地 SQLite 队列服务，agent 提交 task → 浏览器扩展在 C
 {
   "session": "<sessionId>",       // 必填。UUID 或 ChatGPT conversation id
   "text": "<prompt>",             // 必填。≤ 512 KB
-  "timeout": 300000,              // 可选。默认 CGCON_DEFAULT_TIMEOUT_MS (5min)
+  "timeout": 600000,              // 可选。默认 CGCON_DEFAULT_TIMEOUT_MS (10 min)
   "clientRequestId": "cli-abc"    // 可选。幂等 key，同 session 重复 POST 返回同一 taskId
 }
 ```
@@ -115,8 +115,8 @@ cgcon 是本地 SQLite 队列服务，agent 提交 task → 浏览器扩展在 C
 
 `expired` 是唯一**不可挽回**的失败：一旦 `Date.now() > expiresAt`
 （= `submittedAt + timeoutMs`）且仍未进入 terminal，服务端维护线程会把它标为
-expired，扩展也不会再处理它。所以 `timeoutMs` 要给足；默认 5 分钟对 review
-一般够用，长文档建议 10-15 分钟。
+expired，扩展也不会再处理它。所以 `timeoutMs` 要给足；默认 10 分钟对绝大多数 review 都够用；长 PR / 大文档可以显式传更大的
+`timeout`（例如 20-30 分钟）。
 
 ### 推荐拉取方式
 
@@ -213,7 +213,7 @@ Pause 后 `POST /v1/tasks` 会返回 409；已 in_progress 的会被 fail（`err
 SID=$(curl -s http://127.0.0.1:8765/v1/sessions | jq -r '.sessions[0].session')
 T=$(curl -s -X POST http://127.0.0.1:8765/v1/tasks \
       -H "Content-Type: application/json" \
-      -d "{\"session\":\"$SID\",\"text\":\"…prompt…\",\"timeout\":300000,\"clientRequestId\":\"$(uuidgen)\"}" \
+      -d "{\"session\":\"$SID\",\"text\":\"…prompt…\",\"timeout\":600000,\"clientRequestId\":\"$(uuidgen)\"}" \
       | jq -r .taskId)
 
 # 循环 wait=30000 到 terminal
@@ -312,7 +312,7 @@ curl -sf http://127.0.0.1:8765/v1/sessions | jq '.sessions[] | select(.paused==f
 | `CGCON_HOST` | `127.0.0.1` | server 监听地址 |
 | `CGCON_DATA_DIR` | `~/.cgcon` | 数据目录 |
 | `CGCON_DB_FILE` | `$DATA_DIR/cgcon.db` | SQLite 文件 |
-| `CGCON_DEFAULT_TIMEOUT_MS` | `300000` | 默认单 task 超时 |
+| `CGCON_DEFAULT_TIMEOUT_MS` | `600000` | 单 task 默认超时（**仅当 POST 未传 `timeout` 字段时生效**） |
 | `CGCON_MAX_TASK_BYTES` | `524288` | prompt 上限 |
 | `CGCON_MAX_QUEUED_PER_SESSION` | `50` | 单 session 队列上限 |
 | `CGCON_PENDING_DIR` | `$DATA_DIR/pending` | client-side pending files 目录 |

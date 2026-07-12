@@ -106,7 +106,7 @@ cgcon review --session <id> --stdin         # 提交 review
 | `CGCON_HOST`                | `127.0.0.1`                   | 监听地址                |
 | `CGCON_DATA_DIR`            | `~/.cgcon`                    | 数据目录                |
 | `CGCON_DB_FILE`             | `~/.cgcon/cgcon.db`           | SQLite 文件             |
-| `CGCON_DEFAULT_TIMEOUT_MS`  | `300000`                      | 单个 task 默认超时      |
+| `CGCON_DEFAULT_TIMEOUT_MS`  | `600000`                      | 单 task 默认超时（POST 未传 `timeout` 时的 fallback） |
 | `CGCON_MAX_TASK_BYTES`      | `524288`                      | prompt 上限             |
 | `CGCON_MAX_QUEUED_PER_SESSION` | `50`                       | 单 session 队列上限     |
 

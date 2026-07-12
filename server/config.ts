@@ -41,7 +41,7 @@ export function loadConfig(): Config {
     dataDir,
     dbFile: envStr("CGCON_DB_FILE", path.join(dataDir, "cgcon.db")),
     logDir: envStr("CGCON_LOG_DIR", path.join(dataDir, "logs")),
-    defaultTimeoutMs: envInt("CGCON_DEFAULT_TIMEOUT_MS", 5 * 60_000),
+    defaultTimeoutMs: envInt("CGCON_DEFAULT_TIMEOUT_MS", 10 * 60_000),
     activeTaskGraceMs: envInt("CGCON_ACTIVE_TASK_GRACE_MS", 30_000),
     heartbeatStaleMs: envInt("CGCON_HEARTBEAT_STALE_MS", 60_000),
     sessionActiveMs: envInt("CGCON_SESSION_ACTIVE_MS", 30_000),
