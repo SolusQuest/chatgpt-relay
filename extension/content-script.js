@@ -321,7 +321,14 @@
     return new Promise((resolve, reject) => {
       let stableTimer = null;
       let lastText = "";
+      let sawAnyActivity = false;
       const timeout = setTimeout(() => { cleanup(); reject(new Error(`waitForReply timeout ${REPLY_TIMEOUT_MS}ms`)); }, REPLY_TIMEOUT_MS);
+      const noActivityTimer = setTimeout(() => {
+        if (!sawAnyActivity) {
+          cleanup();
+          reject(new Error(`waitForReply: 提交后 ${REPLY_NO_ACTIVITY_MS}ms DOM 完全静止，可能 Lexical 没识别到 send 事件`));
+        }
+      }, REPLY_NO_ACTIVITY_MS);
 
       function check() {
         try {
@@ -329,11 +336,13 @@
           if (block) { cleanup(); reject(new Error(`waitForReply safety: ${block.reason}`)); return; }
         } catch (e) { cleanup(); reject(e); return; }
         if (isGenerating()) {
+          sawAnyActivity = true;
           if (stableTimer) { clearTimeout(stableTimer); stableTimer = null; }
           return;
         }
         const msgs = getAssistantMessages();
         const users = getUserMessages();
+        if (users.length > baseline.userCount || msgs.length > baseline.assistantCount) sawAnyActivity = true;
         if (msgs.length === 0) return;
         const last = getLastText(msgs);
         if (!last) return;
@@ -355,6 +364,7 @@
         observer.disconnect();
         clearInterval(iv);
         clearTimeout(timeout);
+        clearTimeout(noActivityTimer);
         if (stableTimer) clearTimeout(stableTimer);
       }
       check();
