@@ -488,9 +488,6 @@
     (async () => {
       try {
         if (msg.type === "poll-reply") {
-          // SW 驱动的单次 DOM 快照。不做长等待，立即返回当前状态。
-          // 后台 tab 的 MutationObserver 会被 Chrome 冻结，但主动 sendMessage
-          // 唤醒 content-script 时它仍能执行同步 DOM 读取。
           try {
             const block = findSafetyBlock();
             if (block) {
@@ -501,12 +498,29 @@
             const msgs = getAssistantMessages();
             const users = getUserMessages();
             const generating = isGenerating();
-
-            // 判断：是否有新内容出现（相对 baseline）
             const hasNewAssistant = msgs.length > baseline.assistantCount;
             const hasNewUser = users.length > baseline.userCount;
+            const lastEl = msgs.length ? msgs[msgs.length - 1] : null;
             const lastText = getLastText(msgs);
-            const changed = lastText && lastText !== baseline.lastAssistantText;
+            const rawTextContent = lastEl ? (lastEl.textContent ?? "") : "";
+            const rawInnerText = lastEl ? (lastEl.innerText ?? "") : "";
+            const outerLen = lastEl ? (lastEl.outerHTML?.length ?? 0) : 0;
+
+            // 诊断日志：探明 stop button / 各种 text 提取的实际情况
+            console.log("[cgcon content] poll-reply diag", {
+              assistantCount: msgs.length,
+              userCount: users.length,
+              baseline: baseline,
+              generating,
+              stopBtn: !!document.querySelector('[data-testid="stop-button"]'),
+              stopBtn2: !!document.querySelector('button[aria-label*="Stop"], button[aria-label*="停止"]'),
+              lastText_len: lastText.length,
+              textContent_len: rawTextContent.length,
+              innerText_len: rawInnerText.length,
+              outerHTML_len: outerLen,
+              docHidden: document.hidden,
+              visState: document.visibilityState,
+            });
 
             if (generating) {
               sendResponse({ status: "generating", lastText, assistantCount: msgs.length });
@@ -516,13 +530,10 @@
               sendResponse({ status: "not-started", lastText, assistantCount: msgs.length });
               return;
             }
-            // 关键：只要 assistant 消息数增加就是新回复，不比较文字（新旧回答文字
-            // 可能巧合相同——例如 review 同一段代码——那也是新的一条 assistant 消息）。
             if (hasNewAssistant) {
               sendResponse({ status: "reply-ready", reply: lastText, assistantCount: msgs.length });
               return;
             }
-            // 只有 user 变但 assistant 没变：说明 send 已发出但页面还没插入 assistant 占位
             sendResponse({ status: "posted-no-reply-yet", lastText, assistantCount: msgs.length });
           } catch (e) {
             sendResponse({ error: e.message });
