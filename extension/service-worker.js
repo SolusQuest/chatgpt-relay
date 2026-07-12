@@ -248,13 +248,13 @@ async function pollOnePending(taskId, rec) {
 
   if (snap.status === "reply-ready") {
     const text = snap.reply ?? "";
-    if (text && text === rec.lastSampleText) {
+    if (text === rec.lastSampleText) {
       rec.stableSampleCount = (rec.stableSampleCount ?? 0) + 1;
     } else {
       rec.stableSampleCount = 1;
       rec.lastSampleText = text;
     }
-    if (rec.stableSampleCount >= POLL_REPLY_STABLE_SAMPLES) {
+    if (rec.stableSampleCount >= POLL_REPLY_STABLE_SAMPLES && text.length > 0) {
       console.log("[cgcon sw] pending complete", taskId, "len=", text.length);
       try {
         await httpJson("POST", `/internal/tasks/${taskId}/complete`, { text });

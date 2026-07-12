@@ -133,7 +133,13 @@
 
   function getAssistantMessages() { return Array.from(document.querySelectorAll(SELECTORS.assistantMessage)); }
   function getUserMessages()      { return Array.from(document.querySelectorAll(SELECTORS.userMessage)); }
-  function getLastText(msgs)      { return msgs.length ? msgs[msgs.length - 1].innerText.trim() : ""; }
+  function getLastText(msgs) {
+    if (!msgs.length) return "";
+    const el = msgs[msgs.length - 1];
+    // 后台 tab 的 innerText 依赖 layout，Chrome 冻结后返回空串；textContent 不受影响。
+    const t = (el.textContent ?? el.innerText ?? "").replace(/\u00A0/g, " ").trim();
+    return t;
+  }
 
   function getSessionId() {
     const m = location.pathname.match(/\/c\/([a-f0-9-]+)/);
