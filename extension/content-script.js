@@ -306,24 +306,29 @@
     await pacedDelay(300, 600);
 
     const injected = inp.innerText.trim();
-    if (injected.length < Math.min(10, text.trim().length)) {
-      throw new Error(`文本注入失败 (method=${method})，输入框内容为空`);
-    }
-
-    // 校验 Lexical state 是否同步：send button 是否 enabled
+    // 长文本可能被 ChatGPT 自动转为文本附件（编辑器留空、附件 chip 出现、
+    // 上传完成后 send 按钮 enabled）。因此不再以"编辑器有文字"为通过标准，
+    // 改以 send 按钮是否 enabled 作为最终判据；上传耗时较久，wait 拉长到 15s。
     const sendReady = await waitForCondition(() => {
       const b = findSendButton();
       if (!b) return null;
       if (b.disabled) return null;
       if (b.getAttribute("aria-disabled") === "true") return null;
       return b;
-    }, 3000, 100, "check-send-enabled").catch(() => null);
+    }, 15000, 200, "check-send-enabled").catch(() => null);
 
     if (!sendReady) {
-      throw new Error(`文本注入方法 ${method} 未激活 send 按钮 (Lexical state 未同步)`);
+      const suffix = injected.length === 0
+        ? "（编辑器为空，也未上传附件）"
+        : `（编辑器 DOM len=${injected.length}，Lexical state 未同步）`;
+      throw new Error(`文本注入方法 ${method} 未激活 send 按钮 ${suffix}`);
     }
 
-    console.log(`[relay content] injected via ${method}, DOM len=${injected.length}`);
+    const asAttachment = injected.length < Math.min(10, text.trim().length);
+    console.log(
+      `[relay content] injected via ${method}, DOM len=${injected.length}` +
+        (asAttachment ? " (likely converted to attachment)" : ""),
+    );
   }
   async function clickSend() {
     const b = await waitForSendReady();
