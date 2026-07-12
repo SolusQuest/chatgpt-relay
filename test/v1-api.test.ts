@@ -35,22 +35,28 @@ after(async () => {
   try { fs.rmSync(dataDir, { recursive: true, force: true }); } catch { /* Windows may hold SQLite WAL files */ }
 });
 
-async function post(path: string, body: unknown): Promise<{ status: number; json: any }> {
-  const res = await fetch(`${baseUrl}${path}`, {
+async function post(p: string, body: unknown): Promise<{ status: number; json: any }> {
+  const res = await fetch(`${baseUrl}${p}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   return { status: res.status, json: await res.json() };
 }
-async function get(path: string): Promise<{ status: number; json: any }> {
-  const res = await fetch(`${baseUrl}${path}`);
+async function get(p: string): Promise<{ status: number; json: any }> {
+  const res = await fetch(`${baseUrl}${p}`);
   return { status: res.status, json: await res.json() };
 }
-async function del(path: string): Promise<{ status: number; json: any }> {
-  const res = await fetch(`${baseUrl}${path}`, { method: "DELETE" });
+async function del(p: string): Promise<{ status: number; json: any }> {
+  const res = await fetch(`${baseUrl}${p}`, { method: "DELETE" });
   return { status: res.status, json: await res.json() };
 }
+
+test("GET /health returns ok", async () => {
+  const r = await get("/health");
+  assert.equal(r.status, 200);
+  assert.equal(r.json.status, "ok");
+});
 
 test("POST /v1/tasks creates queued task", async () => {
   const r = await post("/v1/tasks", { session: "sA", text: "hello" });
@@ -68,7 +74,6 @@ test("GET /v1/tasks/:id long-polls until claim + complete", async () => {
   const created = await post("/v1/tasks", { session: "sB", text: "poll me" });
   const taskId = created.json.taskId as string;
 
-  // 后台 200ms 后完成
   setTimeout(async () => {
     const nx = await get("/internal/next_task?session=sB&wait=0");
     const t = nx.json.task;
@@ -147,46 +152,6 @@ test("clientRequestId dedup at HTTP layer", async () => {
     clientRequestId: "cri-42",
   });
   assert.equal(a.json.taskId, b.json.taskId);
-});
-
-test("legacy /task + /get_task + /reply + /get_reply flow", async () => {
-  const create = await post("/task", { session: "sL", text: "legacy prompt" });
-  assert.equal(create.json.status, "ok");
-  const taskId = create.json.taskId as string;
-
-  const getTask = await get("/get_task?session=sL");
-  assert.equal(getTask.json.taskId, taskId);
-  assert.equal(getTask.json.text, "legacy prompt");
-
-  const reply = await post("/reply", {
-    session: "sL",
-    taskId,
-    text: "legacy reply",
-  });
-  assert.equal(reply.json.status, "ok");
-
-  const getReply = await get(`/get_reply?session=sL&taskId=${taskId}`);
-  assert.equal(getReply.json.text, "legacy reply");
-  assert.equal(getReply.json.taskId, taskId);
-});
-
-test("legacy /session_status pause propagates", async () => {
-  await post("/task", { session: "sM", text: "pending" });
-  await post("/session_status", {
-    session: "sM",
-    paused: true,
-    reason: "limit",
-  });
-  const list = await get("/sessions");
-  const s = list.json.sessions.find((x: any) => x.session === "sM");
-  assert.equal(s.paused, true);
-  assert.equal(s.pauseReason, "limit");
-});
-
-test("legacy /health returns ok", async () => {
-  const r = await get("/health");
-  assert.equal(r.status, 200);
-  assert.equal(r.json.status, "ok");
 });
 
 test("recover endpoint completes an in-flight task with DOM-captured reply", async () => {

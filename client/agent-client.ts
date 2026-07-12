@@ -5,9 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { http, HttpError } from "./http.js";
 
-const DEFAULT_BASE = process.env.CGCON_URL ?? "http://127.0.0.1:8766";
+const DEFAULT_BASE = process.env.CGCON_URL ?? "http://127.0.0.1:8765";
 const PENDING_DIR = process.env.CGCON_PENDING_DIR ??
-  path.join(os.homedir(), ".cgcon-v3", "pending");
+  path.join(os.homedir(), ".cgcon", "pending");
 
 const TERMINAL = new Set(["done", "failed", "cancelled", "expired"]);
 

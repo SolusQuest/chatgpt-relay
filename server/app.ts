@@ -1,18 +1,12 @@
 // server/app.ts
 // 组装 Express app + 维护循环。
 import express from "express";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import type { Config } from "./config.js";
 import { openDatabase } from "./db.js";
 import { TaskStore } from "./task-store.js";
 import { createV1TasksRouter } from "./routes/v1-tasks.js";
 import { createV1SessionsRouter } from "./routes/v1-sessions.js";
 import { createInternalRouter } from "./routes/internal.js";
-import { createLegacyRouter } from "./routes/legacy.js";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const LEGACY_DIR = path.resolve(__dirname, "..", "legacy");
 
 export interface AppHandle {
   app: express.Express;
@@ -30,16 +24,13 @@ export function createApp(config: Config): AppHandle {
   // v1 API
   app.use("/v1", createV1TasksRouter(store));
   app.use("/v1", createV1SessionsRouter(store));
+
   // 扩展端内部 API
   app.use("/internal", createInternalRouter(store));
-  // 旧 API shim（Phase 5 删除）
-  app.use("/", createLegacyRouter(store));
 
-  // 兼容：油猴 loader 从 /tampermonkey.js 拉脚本
-  app.get("/tampermonkey.js", (_req, res) => {
-    res.set("Cache-Control", "no-store");
-    res.type("application/javascript; charset=utf-8");
-    res.sendFile(path.join(LEGACY_DIR, "tampermonkey.js"));
+  // 便捷别名（避免旧脚本调 /health 时 404；只保留一条无害的 alias）
+  app.get("/health", (_req, res) => {
+    res.json({ status: "ok", sessions: store.listSessions().length });
   });
 
   // 413 兜底
@@ -59,7 +50,6 @@ export function createApp(config: Config): AppHandle {
     },
   );
 
-  // 维护循环
   const timer = setInterval(() => {
     try {
       const now = Date.now();

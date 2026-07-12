@@ -1,7 +1,7 @@
 // extension/lib/config.js
 // SW 端共享配置。content-script 使用内联常量，不 import 此文件（content
 // scripts 是 classic scripts，不能用 ES import）。
-export const DEFAULT_BASE = "http://127.0.0.1:8766";
+export const DEFAULT_BASE = "http://127.0.0.1:8765";
 
 export const POLL_ALARM_NAME = "cgcon-poll";
 export const HEARTBEAT_ALARM_NAME = "cgcon-heartbeat";

@@ -1,5 +1,5 @@
 // test/smoke.test.ts
-// Phase 0 smoke test: 启动 v3 shell（默认端口 8766），验证 /health。
+// Smoke test: 启动 v3 relay（测试端口 18766），验证 /health。
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, ChildProcess } from 'node:child_process';
@@ -51,8 +51,8 @@ test('GET /health returns ok', async () => {
   assert.equal(typeof body.sessions, 'number');
 });
 
-test('GET /sessions returns array', async () => {
-  const res = await fetch(`${BASE}/sessions`);
+test('GET /v1/sessions returns array', async () => {
+  const res = await fetch(`${BASE}/v1/sessions`);
   assert.equal(res.status, 200);
   const body = (await res.json()) as { sessions: unknown[] };
   assert.ok(Array.isArray(body.sessions));

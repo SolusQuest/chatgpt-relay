@@ -6,7 +6,7 @@ import path from "node:path";
 
 export const BASE = process.env.CGCON_URL ?? `http://127.0.0.1:${process.env.CGCON_PORT ?? 8766}`;
 export const PENDING_DIR = process.env.CGCON_PENDING_DIR ??
-  path.join(os.homedir(), ".cgcon-v3", "pending");
+  path.join(os.homedir(), ".cgcon", "pending");
 
 const TERMINAL = new Set(["done", "failed", "cancelled", "expired"]);
 

@@ -21,7 +21,7 @@ Chrome/Edge/Brave 扩展。替代旧版 Tampermonkey 脚本，负责在 chatgpt.
 - 顶部状态灯：绿=relay 健康，红=不可达
 - Sessions 表：当前每个 chatgpt tab 的 session、server 视角状态（idle/pending/paused/offline）、in-flight taskId
 - Recent tasks 表：最近 8 个 task 状态和耗时
-- Relay URL：默认 `http://127.0.0.1:8766`，可改
+- Relay URL：默认 `http://127.0.0.1:8765`，可改
 - Poll now：立即触发一次 poll（跳过 alarm 间隔）
 - Clear inflight：应急清空扩展本地 inflight 记录
 

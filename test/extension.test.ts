@@ -16,7 +16,7 @@ test("manifest.json is valid MV3", () => {
   assert.equal(typeof m.name, "string");
   assert.match(m.version, /^\d+\.\d+\.\d+/);
   assert.ok(m.host_permissions?.some((h: string) => h.includes("chatgpt.com")));
-  assert.ok(m.host_permissions?.some((h: string) => h.includes("8766")));
+  assert.ok(m.host_permissions?.some((h: string) => h.includes("8765")));
   assert.equal(m.background?.service_worker, "service-worker.js");
   assert.equal(m.background?.type, "module");
   assert.ok(m.content_scripts?.[0]?.js?.includes("content-script.js"));

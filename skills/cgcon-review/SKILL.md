@@ -1,6 +1,6 @@
 ---
 name: cgcon-review
-description: Use when the user wants ChatGPT (web app) to review, critique, or provide a second opinion on content via the local cgcon relay running at http://127.0.0.1:8766. Ideal for design docs, PR diffs, ambiguous refactors, architecture choices, prompt drafts, or any high-stakes decision where the user already has an authenticated ChatGPT tab open. Do not use for quick self-review, when no ChatGPT tab is available, or when the user asked for a specific API-based model.
+description: Use when the user wants ChatGPT (web app) to review, critique, or provide a second opinion on content via the local cgcon relay running at http://127.0.0.1:8765. Ideal for design docs, PR diffs, ambiguous refactors, architecture choices, prompt drafts, or any high-stakes decision where the user already has an authenticated ChatGPT tab open. Do not use for quick self-review, when no ChatGPT tab is available, or when the user asked for a specific API-based model.
 ---
 
 # cgcon-review
@@ -35,7 +35,7 @@ fix it -- do not attempt further calls.
 
 ```bash
 node $SKILL_DIR/scripts/health.mjs
-# ok (http://127.0.0.1:8766, sessions=N)         -> proceed
+# ok (http://127.0.0.1:8765, sessions=N)         -> proceed
 # relay not reachable at ...                     -> ask user to run `cgcon start`
 
 node $SKILL_DIR/scripts/sessions.mjs
@@ -90,7 +90,7 @@ ChatGPT can take several minutes on large prompts. Defaults are:
 - Long-poll chunks of 30s -- the script never busy-loops.
 
 If the shell/agent is interrupted mid-wait, the taskId is preserved in
-`~/.cgcon-v3/pending/<taskId>.json`. Recover with:
+`~/.cgcon/pending/<taskId>.json`. Recover with:
 
 ```bash
 node $SKILL_DIR/scripts/resume.mjs
@@ -124,10 +124,10 @@ user has the cgcon binary installed.
 
 ## Environment variables
 
-- `CGCON_URL` - override relay URL (default `http://127.0.0.1:8766`).
+- `CGCON_URL` - override relay URL (default `http://127.0.0.1:8765`).
 - `CGCON_PORT` - alternative to CGCON_URL, sets port on localhost.
 - `CGCON_PENDING_DIR` - alt location for pending files (default
-  `~/.cgcon-v3/pending`).
+  `~/.cgcon/pending`).
 
 ## Multi-session parallel review
 
@@ -146,11 +146,11 @@ node scripts/resume.mjs
 ## Data & privacy
 
 All prompts and replies are stored **locally** in the relay's SQLite
-database (`~/.cgcon-v3/cgcon.db`) so tasks survive process restarts and
+database (`~/.cgcon/cgcon.db`) so tasks survive process restarts and
 allow post-hoc review. Nothing leaves the user's machine except the request
 to their own ChatGPT tab. If the user asks to purge history:
 
 ```bash
 cgcon tasks --last 100    # to see what is there
-rm ~/.cgcon-v3/cgcon.db*  # or, non-destructive: `cgcon prune` (planned)
+rm ~/.cgcon/cgcon.db*  # or, non-destructive: `cgcon prune` (planned)
 ```

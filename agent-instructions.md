@@ -6,8 +6,8 @@
 ## 一句话
 
 Relay 是一个 SQLite 队列服务，agent 提交 task → 浏览器扩展在 ChatGPT 页面执行 →
-回复回写到 SQLite → agent 拉回。默认地址 `http://127.0.0.1:8766`，数据落在
-`~/.cgcon-v3/`。所有 task 落盘、可续、可回查。
+回复回写到 SQLite → agent 拉回。默认地址 `http://127.0.0.1:8765`，数据落在
+`~/.cgcon/`。所有 task 落盘、可续、可回查。
 
 ## 何时用
 
@@ -25,11 +25,11 @@ Relay 是一个 SQLite 队列服务，agent 提交 task → 浏览器扩展在 C
 
 ```bash
 # 1. relay 是否在跑
-curl -s http://127.0.0.1:8766/health
+curl -s http://127.0.0.1:8765/health
 # → {"status":"ok","sessions":N}
 
 # 2. 是否有活跃的 ChatGPT tab
-curl -s http://127.0.0.1:8766/v1/sessions
+curl -s http://127.0.0.1:8765/v1/sessions
 # → {"sessions":[{"session":"...","paused":false,...}]}
 ```
 
@@ -40,7 +40,7 @@ curl -s http://127.0.0.1:8766/v1/sessions
 ## 提交 review（阻塞）
 
 ```bash
-curl -s -X POST http://127.0.0.1:8766/v1/tasks \
+curl -s -X POST http://127.0.0.1:8765/v1/tasks \
   -H "Content-Type: application/json" \
   -d @- <<EOF
 {"session":"$SESSION_ID","text":"...prompt...","timeout":600000,
@@ -49,7 +49,7 @@ EOF
 # → {"taskId":"abc123","status":"queued"}
 
 # 长轮询等结果（每次最多 wait 30000ms）
-curl -s "http://127.0.0.1:8766/v1/tasks/abc123?wait=30000"
+curl -s "http://127.0.0.1:8765/v1/tasks/abc123?wait=30000"
 # → {"taskId":"...","status":"done","reply":"...","error":null,...}
 ```
 
@@ -70,7 +70,7 @@ curl .../v1/tasks/<taskId>
 ## 取消
 
 ```bash
-curl -X DELETE http://127.0.0.1:8766/v1/tasks/<taskId>
+curl -X DELETE http://127.0.0.1:8765/v1/tasks/<taskId>
 ```
 
 queued task 立即变 cancelled；in_progress task 由扩展下次汇报时中止（best-effort）。
@@ -78,8 +78,8 @@ queued task 立即变 cancelled；in_progress task 由扩展下次汇报时中�
 ## 列出历史
 
 ```bash
-curl "http://127.0.0.1:8766/v1/tasks?limit=20"
-curl "http://127.0.0.1:8766/v1/tasks?session=$SID&status=done&limit=10"
+curl "http://127.0.0.1:8765/v1/tasks?limit=20"
+curl "http://127.0.0.1:8765/v1/tasks?session=$SID&status=done&limit=10"
 ```
 
 ## 状态含义
@@ -116,7 +116,7 @@ taskId，不产生新任务。用于网络重试、agent 崩溃后再次尝试�
 
 ```bash
 # 服务端一直保存 task；查询即得
-curl http://127.0.0.1:8766/v1/tasks/<taskId>
+curl http://127.0.0.1:8765/v1/tasks/<taskId>
 ```
 
 Node 里可以用 `client/agent-client.ts` 的 `resumePending()` 扫本地 pending 目录
@@ -127,4 +127,4 @@ Node 里可以用 `client/agent-client.ts` 的 `resumePending()` 扫本地 pendi
 1. **一定要传 session**：v3 强制 session id 有效（非空 ≤128 字符）。
 2. **不要短轮询**：用 `?wait=30000` 让服务端挂起，客户端 CPU 空转是错误做法。
 3. **taskId 是 UUID**：不要试图构造或猜 taskId。
-4. **别混用 v2/v3 端口**：v2 (8765) 和 v3 (8766) 数据完全隔离，互不认。
+4. **别混用旧 tampermonkey**：如果之前装过旧脚本，请在 Tampermonkey 面板停用后再用扩展。

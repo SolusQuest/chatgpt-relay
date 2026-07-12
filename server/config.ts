@@ -30,13 +30,13 @@ function envStr(name: string, fallback: string): string {
   return raw != null && raw !== "" ? raw : fallback;
 }
 
-// v3 期间使用 ~/.cgcon-v3 避免污染 v2 数据；Phase 5 收尾时改回 ~/.cgcon
-const DEFAULT_DATA_DIR = path.join(os.homedir(), ".cgcon-v3");
+// 默认数据目录 ~/.cgcon
+const DEFAULT_DATA_DIR = path.join(os.homedir(), ".cgcon");
 
 export function loadConfig(): Config {
   const dataDir = envStr("CGCON_DATA_DIR", DEFAULT_DATA_DIR);
   return {
-    port: envInt("CGCON_PORT", 8766),
+    port: envInt("CGCON_PORT", 8765),
     host: envStr("CGCON_HOST", "127.0.0.1"),
     dataDir,
     dbFile: envStr("CGCON_DB_FILE", path.join(dataDir, "cgcon.db")),

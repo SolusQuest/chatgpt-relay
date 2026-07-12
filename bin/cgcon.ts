@@ -16,7 +16,7 @@ import { http } from "../client/http.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
-const PORT = Number(process.env.CGCON_PORT ?? 8766);
+const PORT = Number(process.env.CGCON_PORT ?? 8765);
 const BASE = process.env.CGCON_URL ?? `http://127.0.0.1:${PORT}`;
 
 async function cmdStart(args: string[]): Promise<number> {
