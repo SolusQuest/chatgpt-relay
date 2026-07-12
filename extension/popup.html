@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <span class="dot" id="dot"></span>
+    <span id="status">…</span>
+  </header>
+
+  <section>
+    <h3>Sessions (Chrome tabs)</h3>
+    <table id="sessions">
+      <thead><tr><th>Session</th><th>Server view</th><th>Inflight</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h3>Recent tasks</h3>
+    <table id="tasks">
+      <thead><tr><th>ID</th><th>Session</th><th>Status</th><th>Time</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h3>Config</h3>
+    <label>Relay URL <input id="baseUrl" type="text" size="30"></label>
+    <button id="saveUrl">Save</button>
+    <button id="pollNow">Poll now</button>
+  </section>
+
+  <section id="lastErrorSection" hidden>
+    <h3>Last error</h3>
+    <pre id="lastError"></pre>
+  </section>
+
+  <script src="popup.js"></script>
+</body>
+</html>
