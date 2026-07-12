@@ -4,7 +4,13 @@
   "short_name": "cgcon",
   "version": "3.0.0",
   "description": "Bridge ChatGPT web to the local cgcon relay for AI-agent reviews.",
-  "permissions": ["storage", "alarms", "tabs", "scripting", "notifications"],
+  "permissions": [
+    "storage",
+    "alarms",
+    "tabs",
+    "scripting",
+    "notifications"
+  ],
   "host_permissions": [
     "https://chatgpt.com/*",
     "http://127.0.0.1:8765/*",
@@ -16,8 +22,12 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://chatgpt.com/*"],
-      "js": ["content-script.js"],
+      "matches": [
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "content-script.js"
+      ],
       "run_at": "document_idle",
       "all_frames": false
     }

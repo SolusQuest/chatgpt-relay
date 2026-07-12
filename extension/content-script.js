@@ -500,61 +500,20 @@
             const generating = isGenerating();
             const hasNewAssistant = msgs.length > baseline.assistantCount;
             const hasNewUser = users.length > baseline.userCount;
-            const lastEl = msgs.length ? msgs[msgs.length - 1] : null;
             const lastText = getLastText(msgs);
-            const rawTextContent = lastEl ? (lastEl.textContent ?? "") : "";
-            const rawInnerText = lastEl ? (lastEl.innerText ?? "") : "";
-            const outerLen = lastEl ? (lastEl.outerHTML?.length ?? 0) : 0;
-
-            // 诊断日志：探明 stop button / 各种 text 提取的实际情况
-            console.log("[cgcon content] poll-reply diag", {
-              assistantCount: msgs.length,
-              userCount: users.length,
-              baseline: baseline,
-              generating,
-              stopBtn: !!document.querySelector('[data-testid="stop-button"]'),
-              stopBtn2: !!document.querySelector('button[aria-label*="Stop"], button[aria-label*="停止"]'),
-              lastText_len: lastText.length,
-              textContent_len: rawTextContent.length,
-              innerText_len: rawInnerText.length,
-              outerHTML_len: outerLen,
-              outerHTML_head: lastEl?.outerHTML?.slice(0, 400),
-              childElementCount: lastEl?.childElementCount,
-              markdown_present: !!lastEl?.querySelector?.(".markdown, [data-message-content], .prose"),
-              docHidden: document.hidden,
-              visState: document.visibilityState,
-            });
-
-            // 若 assistant 容器已存在但里面 textContent=0（后台 tab 虚拟滚动 unmount），
-            // 尝试物化：scrollIntoView + 强制 sync layout。再读一次。
-            let materializedText = "";
-            if (lastEl && rawTextContent.length === 0 && outerLen > 0) {
-              try {
-                lastEl.scrollIntoView({ block: "center", inline: "nearest" });
-                void lastEl.getBoundingClientRect();
-                // 让 event loop 转一圈
-                await new Promise((r) => setTimeout(r, 30));
-                materializedText = (lastEl.textContent ?? "").trim();
-                console.log("[cgcon content] materialize attempt: textContent_len=", materializedText.length);
-              } catch (e) {
-                console.warn("[cgcon content] materialize error", e);
-              }
-            }
-            const effectiveText = materializedText.length > 0 ? materializedText : lastText;
-
             if (generating) {
-              sendResponse({ status: "generating", lastText: effectiveText, assistantCount: msgs.length });
+              sendResponse({ status: "generating", lastText: lastText, assistantCount: msgs.length });
               return;
             }
             if (!hasNewUser && !hasNewAssistant) {
-              sendResponse({ status: "not-started", lastText: effectiveText, assistantCount: msgs.length });
+              sendResponse({ status: "not-started", lastText: lastText, assistantCount: msgs.length });
               return;
             }
             if (hasNewAssistant) {
-              sendResponse({ status: "reply-ready", reply: effectiveText, assistantCount: msgs.length });
+              sendResponse({ status: "reply-ready", reply: lastText, assistantCount: msgs.length });
               return;
             }
-            sendResponse({ status: "posted-no-reply-yet", lastText: effectiveText, assistantCount: msgs.length });
+            sendResponse({ status: "posted-no-reply-yet", lastText: lastText, assistantCount: msgs.length });
           } catch (e) {
             sendResponse({ error: e.message });
           }
