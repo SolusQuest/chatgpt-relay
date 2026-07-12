@@ -6,9 +6,9 @@ import {
   DEFAULT_BASE,
   POLL_ALARM_NAME,
   HEARTBEAT_ALARM_NAME,
-  POLL_INTERVAL_MS,
   HEARTBEAT_INTERVAL_MS,
   NEXT_TASK_WAIT_MS,
+  DISPATCH_LOOP_RETRY_MS,
   STORAGE_KEYS,
   POLL_REPLY_STABLE_SAMPLES,
   POLL_NOT_STARTED_MAX,
@@ -19,6 +19,12 @@ import {
 // 开发调试：把 DEBUG 改成 true 或在 popup 里设置 window.__gptRelayDebug = true
 const DEBUG = false;
 const dlog = (...args) => { if (DEBUG) console.log(...args); };
+
+// per-session 持续任务分发 loop
+const dispatchLoops = new Map(); // session -> { tabId, controller }
+// taskId -> 等待该任务完成的 deferred
+const pendingCompletion = new Map();
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function getStorage(key, fallback) {
   const obj = await chrome.storage.local.get(key);
@@ -33,10 +39,14 @@ async function getBaseUrl() {
   return cfg.baseUrl || DEFAULT_BASE;
 }
 
-async function httpJson(method, url, body, timeoutMs = 30_000) {
+async function httpJson(method, url, body, timeoutMs = 30_000, signal) {
   const base = await getBaseUrl();
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  if (signal) {
+    if (signal.aborted) ctrl.abort();
+    else signal.addEventListener("abort", () => ctrl.abort(), { once: true });
+  }
   try {
     const res = await fetch(`${base}${url}`, {
       method,
@@ -111,7 +121,6 @@ const tabSessionCache = new Map();
 
 async function rememberTabSession(tabId, session) {
   tabSessionCache.set(tabId, session);
-  // 也写到 storage 便于 SW 重启后即时可用
   const saved = (await getStorage("tab_session_map", {}));
   saved[tabId] = session;
   await setStorage("tab_session_map", saved);
@@ -121,10 +130,12 @@ async function loadTabSessionCache() {
   for (const [k, v] of Object.entries(saved)) tabSessionCache.set(Number(k), v);
 }
 async function forgetTabSession(tabId) {
+  const session = tabSessionCache.get(tabId) ?? (await getStorage("tab_session_map", {}))[tabId];
   tabSessionCache.delete(tabId);
   const saved = (await getStorage("tab_session_map", {}));
   delete saved[tabId];
   await setStorage("tab_session_map", saved);
+  if (session) stopDispatchLoop(session);
 }
 
 // ── inflight tracking ──
@@ -154,6 +165,174 @@ async function notifyTabCleared(tabId) {
   try { await chrome.tabs.sendMessage(tabId, { type: "clear-inflight" }); } catch {}
 }
 
+// ── per-session dispatch loop ──
+// 每个 session 独立维护一个持续 long-poll：无任务时立即重新 long-poll，
+// 有任务时执行 run-task，等待任务完成后再继续 long-poll。
+function stopDispatchLoop(session) {
+  const loop = dispatchLoops.get(session);
+  if (!loop) return;
+  loop.controller.abort();
+  dispatchLoops.delete(session);
+  console.log("[relay sw] dispatch loop stopped", session.slice(0, 8));
+}
+
+async function startDispatchLoop(session, tabId) {
+  const existing = dispatchLoops.get(session);
+  if (existing) {
+    if (existing.tabId === tabId) return; // 已经在为这个 tab 跑
+    // tab 变了：停掉旧的，用新的重新跑
+    stopDispatchLoop(session);
+  }
+  const controller = new AbortController();
+  dispatchLoops.set(session, { tabId, controller });
+  console.log("[relay sw] dispatch loop started", session.slice(0, 8), "tab", tabId);
+
+  try {
+    while (!controller.signal.aborted) {
+      const tabInfo = await chrome.tabs.get(tabId).catch(() => null);
+      if (!tabInfo) {
+        console.log("[relay sw] dispatch loop exit: tab gone", session.slice(0, 8));
+        break;
+      }
+      if (tabInfo.discarded) {
+        const ok = await reviveDiscardedTab(tabInfo);
+        if (!ok) {
+          console.log("[relay sw] dispatch loop exit: revive failed", session.slice(0, 8));
+          break;
+        }
+      }
+      if (offlineSessions.has(session)) {
+        console.log("[relay sw] dispatch loop exit: offline", session.slice(0, 8));
+        break;
+      }
+
+      // safety / pause 检查：与旧 handleTab 行为保持一致
+      let safety = null;
+      try {
+        const r = await chrome.tabs.sendMessage(tabId, { type: "check-safety" });
+        safety = r?.block ?? null;
+      } catch { /* content script gone */ }
+      if (safety) {
+        await httpJson("POST", `/internal/sessions/${encodeURIComponent(session)}/status`, {
+          paused: true, reason: `${safety.reason}: ${safety.text}`,
+        }).catch(() => {});
+        console.log("[relay sw] dispatch loop exit: safety", session.slice(0, 8), safety.reason);
+        break;
+      }
+      await httpJson("POST", `/internal/sessions/${encodeURIComponent(session)}/status`, {
+        paused: false,
+      }).catch(() => {});
+
+      const loopStart = Date.now();
+      let claim;
+      try {
+        claim = await httpJson(
+          "GET",
+          `/internal/next_task?session=${encodeURIComponent(session)}&wait=${NEXT_TASK_WAIT_MS}`,
+          undefined,
+          NEXT_TASK_WAIT_MS + 8000,
+          controller.signal,
+        );
+      } catch (e) {
+        if (controller.signal.aborted) {
+          console.log("[relay sw] dispatch loop abort", session.slice(0, 8));
+          break;
+        }
+        console.warn("[relay sw] next_task error", session.slice(0, 8), e.message);
+        await delay(DISPATCH_LOOP_RETRY_MS);
+        continue;
+      }
+
+      if (!claim?.task) {
+        // long-poll 超时，立即继续下一轮
+        continue;
+      }
+
+      const { taskId, text } = claim.task;
+      const dispatchAt = Date.now();
+      console.log(
+        "[relay sw] dispatch task", taskId.slice(0, 8),
+        "session", session.slice(0, 8),
+        "dispatchAt", dispatchAt,
+        "waitMs", dispatchAt - loopStart,
+      );
+      await markInflight(session, taskId);
+
+      try {
+        const runRes = await chrome.tabs.sendMessage(tabId, { type: "run-task", taskId, text });
+        if (runRes?.error) throw new Error(runRes.error);
+        if (runRes?.status !== "submitted") {
+          // content-script 老版本兼容
+          if (typeof runRes?.reply === "string") {
+            await httpJson("POST", `/internal/tasks/${taskId}/complete`, { text: runRes.reply });
+            await clearInflight(session);
+            console.log("[relay sw] task completed inline", taskId.slice(0, 8), "completionAt", Date.now());
+            continue;
+          }
+          throw new Error("run-task did not acknowledge submission");
+        }
+
+        await setPendingReply(taskId, {
+          session,
+          tabId,
+          taskId,
+          baseline: runRes.baseline ?? { assistantCount: 0, lastAssistantText: "", userCount: 0 },
+          submittedAt: Date.now(),
+          lastPollAt: 0,
+          notStartedCount: 0,
+          stableSampleCount: 0,
+          lastSampleText: "",
+        });
+
+        // 等待当前任务完成（done/failed/recover/requeue 都会 deletePendingReply）
+        await waitForPendingReply(taskId, controller.signal);
+        console.log("[relay sw] task completed", taskId.slice(0, 8), "completionAt", Date.now());
+      } catch (e) {
+        console.warn("[relay sw] task failed", taskId.slice(0, 8), e.message);
+        await httpJson("POST", `/internal/tasks/${taskId}/complete`, { error: e.message }).catch(() => {});
+        await clearInflight(session);
+      }
+    }
+  } finally {
+    dispatchLoops.delete(session);
+  }
+}
+
+async function restoreDispatchLoops() {
+  const saved = await getStorage("tab_session_map", {});
+  const tabs = await listChatGPTTabs();
+  for (const tab of tabs) {
+    if (!tab.id) continue;
+    const session = saved[tab.id] ?? tabSessionCache.get(tab.id);
+    if (!session) continue;
+    if (offlineSessions.has(session)) continue;
+    startDispatchLoop(session, tab.id).catch((e) =>
+      console.warn("[relay sw] restore loop failed", session.slice(0, 8), e),
+    );
+  }
+}
+
+async function waitForPendingReply(taskId, signal) {
+  let deferred = pendingCompletion.get(taskId);
+  if (!deferred) {
+    deferred = {};
+    deferred.promise = new Promise((resolve, reject) => {
+      deferred.resolve = resolve;
+      deferred.reject = reject;
+    });
+    pendingCompletion.set(taskId, deferred);
+  }
+  if (signal?.aborted) return;
+  return Promise.race([
+    deferred.promise,
+    new Promise((_, reject) => {
+      const handler = () => reject(new Error("aborted"));
+      if (signal.aborted) handler();
+      else signal.addEventListener("abort", handler, { once: true });
+    }),
+  ]);
+}
+
 // ── pending-reply state machine ──
 // SW 主动 poll 而非 content-script 长期 await。原因：
 //   1) Chrome 冻结后台 tab 的 MutationObserver / setInterval；
@@ -176,6 +355,15 @@ async function setPendingReply(taskId, rec) {
   const map = await listPendingReplies();
   map[taskId] = rec;
   await setStorage(STORAGE_KEYS.PENDING_REPLIES, map);
+  // 确保 completion deferred 存在，供 dispatch loop 等待
+  if (!pendingCompletion.has(taskId)) {
+    const deferred = {};
+    deferred.promise = new Promise((resolve, reject) => {
+      deferred.resolve = resolve;
+      deferred.reject = reject;
+    });
+    pendingCompletion.set(taskId, deferred);
+  }
   // 触发快速采样循环（非阻塞，若已在跑就是 no-op）
   void scheduleFastPending();
 }
@@ -183,6 +371,11 @@ async function deletePendingReply(taskId) {
   const map = await listPendingReplies();
   delete map[taskId];
   await setStorage(STORAGE_KEYS.PENDING_REPLIES, map);
+  const deferred = pendingCompletion.get(taskId);
+  if (deferred) {
+    deferred.resolve();
+    pendingCompletion.delete(taskId);
+  }
 }
 async function getPendingReply(taskId) {
   const map = await listPendingReplies();
@@ -370,127 +563,16 @@ async function scheduleFastPending() {
 }
 
 // ── 轮询 ──
-let pollInProgress = false;
-async function pollOnce() {
-  if (pollInProgress) return;
-  pollInProgress = true;
-  dlog("[relay sw] pollOnce start");
-  try {
-    const tabs = await listChatGPTTabs();
-    dlog("[relay sw] pollOnce tabs=", tabs.length);
-    for (const tab of tabs) {
-      if (!tab.id) continue;
-      try {
-        await handleTab(tab.id);
-      } catch (e) {
-        console.warn("[relay sw] handleTab failed", tab.id, e);
-      }
-    }
-  } finally {
-    pollInProgress = false;
-  }
-}
-
+// handleTab 已重构为 per-session 持续 long-poll 的入口。
 async function handleTab(tabId) {
-  // Chrome 可能把 chatgpt.com tab discard 掉；先 revive 再继续
-  const tabInfo = await chrome.tabs.get(tabId).catch(() => null);
-  if (!tabInfo) return;
-  if (tabInfo.discarded) {
-    const ok = await reviveDiscardedTab(tabInfo);
-    if (!ok) { console.warn("[relay sw] failed to revive tab", tabId); return; }
-  }
-
   const session = await getTabSession(tabId);
   if (!session) {
     dlog("[relay sw] tab", tabId, "has no known session; skipping");
     return;
   }
-  if (offlineSessions.has(session)) return;
-
-  const inflight = await getInflight(session);
-  if (inflight) {
-    dlog("[relay sw] handleTab skip: session", session.slice(0, 8), "has inflight task", inflight.taskId?.slice?.(0, 8));
-    return;
-  }
-
-  let safety = null;
-  try {
-    const r = await chrome.tabs.sendMessage(tabId, { type: "check-safety" });
-    safety = r?.block ?? null;
-  } catch { /* content script gone */ }
-
-  if (safety) {
-    await httpJson("POST", `/internal/sessions/${encodeURIComponent(session)}/status`, {
-      paused: true, reason: `${safety.reason}: ${safety.text}`,
-    }).catch(() => {});
-    try {
-      await chrome.tabs.sendMessage(tabId, {
-        type: "update-banner",
-        text: `暂停: ${safety.reason}`,
-        color: "#8e44ad",
-      });
-    } catch {}
-    return;
-  }
-
-  await httpJson("POST", `/internal/sessions/${encodeURIComponent(session)}/status`, {
-    paused: false,
-  }).catch(() => {});
-
-  let claim;
-  try {
-    claim = await httpJson(
-      "GET",
-      `/internal/next_task?session=${encodeURIComponent(session)}&wait=${NEXT_TASK_WAIT_MS}`,
-      undefined,
-      NEXT_TASK_WAIT_MS + 5000,
-    );
-  } catch (e) {
-    console.warn("[relay sw] next_task failed", session, e.message);
-    return;
-  }
-  if (!claim?.task) return;
-
-  const { taskId, text } = claim.task;
-  console.log("[relay sw] claimed", taskId.slice(0, 8), "session", session.slice(0, 8));
-  await markInflight(session, taskId);
-
-  try {
-    const runRes = await chrome.tabs.sendMessage(tabId, {
-      type: "run-task", taskId, text,
-    });
-    dlog("[relay sw] run-task response", taskId.slice(0,8), "status=", runRes?.status, "hasReply=", typeof runRes?.reply === "string", "error=", runRes?.error);
-    if (runRes?.error) throw new Error(runRes.error);
-    if (runRes?.status !== "submitted") {
-      // content-script 老版本仍可能返回 { reply }，兼容一下
-      if (typeof runRes?.reply === "string") {
-        await httpJson("POST", `/internal/tasks/${taskId}/complete`, { text: runRes.reply });
-        await clearInflight(session);
-        return;
-      }
-      throw new Error("run-task did not acknowledge submission");
-    }
-    // 登记 pendingReply，让 SW 主动采样完成
-    dlog("[relay sw] registering pendingReply", taskId.slice(0,8), "baseline=", runRes.baseline);
-    await setPendingReply(taskId, {
-      session,
-      tabId,
-      taskId,
-      baseline: runRes.baseline ?? { assistantCount: 0, lastAssistantText: "", userCount: 0 },
-      submittedAt: Date.now(),
-      lastPollAt: 0,
-      notStartedCount: 0,
-      stableSampleCount: 0,
-      lastSampleText: "",
-    });
-  } catch (e) {
-    console.warn("[relay sw] task failed", taskId, e);
-    await httpJson("POST", `/internal/tasks/${taskId}/complete`, { error: e.message }).catch(() => {});
-    await setStorage(STORAGE_KEYS.LAST_ERROR, {
-      taskId, session, error: e.message, at: Date.now(),
-    });
-    await clearInflight(session);
-  }
+  startDispatchLoop(session, tabId).catch((e) =>
+    console.warn("[relay sw] startDispatchLoop failed", session.slice(0, 8), e),
+  );
 }
 
 async function heartbeatOnce() {
@@ -538,9 +620,9 @@ async function reconcileInflight() {
             if (sid === session) { tabId = tid; break; }
           }
         }
-        await clearInflight(session);
-        await deletePendingReply(entry.taskId);
-        await notifyTabCleared(tabId);
+       await clearInflight(session);
+       await deletePendingReply(entry.taskId);
+       await notifyTabCleared(tabId);
       }
     } catch (e) {
       // server 不可达就算了，下一轮再试
@@ -562,10 +644,9 @@ async function ensureAlarms() {
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === POLL_ALARM_NAME) {
     void reconcileInflight();
-    void pollOnce();
     void pollPendingReplies();
-    setTimeout(() => { void pollOnce(); void pollPendingReplies(); }, POLL_INTERVAL_MS);
-    setTimeout(() => { void pollOnce(); void pollPendingReplies(); }, 2 * POLL_INTERVAL_MS);
+    // alarm 仅作为 SW 被唤醒后的恢复机制：恢复每个 session 的 dispatch loop
+    void restoreDispatchLoops();
   } else if (alarm.name === HEARTBEAT_ALARM_NAME) {
     void heartbeatOnce();
     setTimeout(() => void heartbeatOnce(), HEARTBEAT_INTERVAL_MS);
@@ -585,26 +666,32 @@ void ensureAlarms();
 void loadTabSessionCache();
 void reconcileInflight();
 void pollPendingReplies();
+void restoreDispatchLoops();
 
 // ── 消息桥接 ──
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const type = msg?.type;
 
-  if (type === "session-hello") {
-    if (sender.tab?.id && msg.session) {
-      rememberTabSession(sender.tab.id, msg.session).then(() => {
-        handleTab(sender.tab.id).catch((e) => console.warn("[relay sw] hello poll failed", e));
+ if (type === "session-hello") {
+   if (sender.tab?.id && msg.session) {
+     rememberTabSession(sender.tab.id, msg.session).then(() => {
+        startDispatchLoop(msg.session, sender.tab.id).catch((e) =>
+          console.warn("[relay sw] hello dispatch loop failed", e),
+        );
       });
     }
     sendResponse({ status: "ok" });
     return true;
   }
 
-  if (type === "offline") {
+ if (type === "offline") {
     if (sender.tab?.id) {
       (async () => {
         const sid = await getTabSession(sender.tab.id);
-        if (sid) offlineSessions.add(sid);
+        if (sid) {
+          offlineSessions.add(sid);
+          stopDispatchLoop(sid);
+        }
         sendResponse({ status: "ok" });
       })();
       return true;
@@ -612,11 +699,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
 
-  if (type === "online") {
+ if (type === "online") {
     if (sender.tab?.id) {
       (async () => {
         const sid = await getTabSession(sender.tab.id);
-        if (sid) offlineSessions.delete(sid);
+        if (sid) {
+          offlineSessions.delete(sid);
+          startDispatchLoop(sid, sender.tab.id).catch(() => {});
+        }
         sendResponse({ status: "ok" });
       })();
       return true;
@@ -629,8 +719,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (sender.tab?.id) {
       (async () => {
         const sid = await getTabSession(sender.tab.id);
-        if (sid) offlineSessions.add(sid);
-        setTimeout(() => sid && offlineSessions.delete(sid), 15_000);
+        if (sid) {
+          offlineSessions.add(sid);
+          stopDispatchLoop(sid);
+          setTimeout(() => {
+            offlineSessions.delete(sid);
+            startDispatchLoop(sid, sender.tab.id).catch(() => {});
+          }, 15_000);
+        } else {
+          setTimeout(() => sid && offlineSessions.delete(sid), 15_000);
+        }
         sendResponse({ status: "ok" });
       })();
       return true;
@@ -658,6 +756,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         await markInflight(sid, msg.taskId);
         // 立即触发一次采样
         void pollPendingReplies();
+        startDispatchLoop(sid, sender.tab.id).catch(() => {});
         sendResponse({ status: "ok" });
       } catch (e) {
         sendResponse({ error: e.message });
@@ -675,6 +774,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const sid = await getTabSession(sender.tab.id);
           if (sid) await clearInflight(sid);
         }
+        await deletePendingReply(msg.taskId);
         sendResponse({ recovered: r?.recovered ?? false, status: r?.status });
       } catch (e) {
         console.warn("[relay sw] recover-task failed", e);
@@ -692,6 +792,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const sid = await getTabSession(sender.tab.id);
           if (sid) await clearInflight(sid);
         }
+        await deletePendingReply(msg.taskId);
         sendResponse({ status: "ok" });
       } catch (e) {
         sendResponse({ error: e.message });
@@ -701,7 +802,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (type === "popup-poll-now") {
-    pollOnce().then(() => sendResponse({ status: "ok" })).catch((e) => sendResponse({ error: e.message }));
+    restoreDispatchLoops().then(() => sendResponse({ status: "ok" })).catch((e) => sendResponse({ error: e.message }));
     return true;
   }
 
@@ -747,6 +848,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       await setStorage(STORAGE_KEYS.INFLIGHT, {});
       await setStorage(STORAGE_KEYS.PENDING_REPLIES, {});
+      for (const session of dispatchLoops.keys()) {
+        stopDispatchLoop(session);
+      }
+      for (const deferred of pendingCompletion.values()) {
+        deferred.resolve();
+      }
+      pendingCompletion.clear();
       sendResponse({ status: "ok" });
     })();
     return true;

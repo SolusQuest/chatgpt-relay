@@ -10,7 +10,9 @@ export const HEARTBEAT_ALARM_NAME = "gpt-relay-heartbeat";
 // setTimeout 短周期递归。alarm 只用于保活。
 export const POLL_INTERVAL_MS = 4000;
 export const HEARTBEAT_INTERVAL_MS = 12000;
-export const NEXT_TASK_WAIT_MS = 3000; // long-poll wait chunk
+// per-session dispatch loop：长轮询等待任务、出错后重试间隔
+export const NEXT_TASK_WAIT_MS = 25000; // 与服务端 /internal/next_task 长轮询对齐
+export const DISPATCH_LOOP_RETRY_MS = 2000;
 
 export const STORAGE_KEYS = {
   INFLIGHT: "inflight",              // Map<sessionId, {taskId, submittedAt}>
