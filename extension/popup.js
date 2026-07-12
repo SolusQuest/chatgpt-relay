@@ -3,13 +3,11 @@
 const el = (id) => document.getElementById(id);
 
 async function refresh() {
-  // 从 SW 拉状态
   const state = await chrome.runtime.sendMessage({ type: "popup-get-state" });
   if (!state) return;
 
   el("baseUrl").value = state.baseUrl;
 
-  // Health
   let healthy = false;
   let sessions = [];
   let tasks = [];
@@ -20,30 +18,29 @@ async function refresh() {
     sessions = s?.sessions ?? [];
     const t = await fetch(`${state.baseUrl}/v1/tasks?limit=8`).then((r) => r.json());
     tasks = t?.tasks ?? [];
-  } catch (e) {
-    healthy = false;
-  }
+  } catch { /* unreachable */ }
 
   el("dot").className = "dot " + (healthy ? "ok" : "err");
+  const offlineCount = state.offlineSessionCount ?? 0;
   el("status").textContent = healthy
-    ? `${state.baseUrl} · ${sessions.length} active`
+    ? `${state.baseUrl} · ${sessions.length} active${offlineCount ? ` · ${offlineCount} offline` : ""}`
     : `${state.baseUrl} · unreachable`;
 
-  // Sessions table：按 tab 视角展示
   const sessTbody = el("sessions").querySelector("tbody");
   sessTbody.innerHTML = "";
   for (const tab of state.tabs) {
     const tr = document.createElement("tr");
     const server = sessions.find((x) => x.session === tab.session);
     if (server?.paused) tr.classList.add("paused");
+    if (tab.offline) tr.classList.add("offline");
     const inflight = state.inflight[tab.session];
+    let view = "(not seen)";
+    if (tab.offline) view = "offline";
+    else if (server?.paused) view = `paused: ${server.pauseReason ?? ''}`;
+    else if (server) view = `pending=${server.pendingTasks}`;
     tr.innerHTML = `
       <td class="mono" title="${tab.session ?? ''}">${(tab.session ?? '?').slice(0, 12)}…</td>
-      <td>${
-        !server ? "(not seen)" :
-        server.paused ? `paused: ${server.pauseReason ?? ''}` :
-        `pending=${server.pendingTasks}`
-      }</td>
+      <td>${view}</td>
       <td class="mono">${inflight ? inflight.taskId.slice(0, 8) : ""}</td>
     `;
     sessTbody.appendChild(tr);
@@ -52,7 +49,6 @@ async function refresh() {
     sessTbody.innerHTML = `<tr><td colspan="3" style="color:#999">no chatgpt.com tabs open</td></tr>`;
   }
 
-  // Tasks
   const taskTbody = el("tasks").querySelector("tbody");
   taskTbody.innerHTML = "";
   for (const t of tasks) {
@@ -67,11 +63,10 @@ async function refresh() {
     taskTbody.appendChild(tr);
   }
 
-  // Last error
   if (state.lastError) {
     el("lastErrorSection").hidden = false;
     el("lastError").textContent =
-      `[${new Date(state.lastError.at).toLocaleTimeString()}] ${state.lastError.taskId?.slice(0,8) ?? '?'}\n${state.lastError.error}`;
+      `[${new Date(state.lastError.at).toLocaleTimeString()}] ${state.lastError.taskId?.slice(0, 8) ?? '?'}\n${state.lastError.error}`;
   }
 }
 
@@ -84,6 +79,11 @@ el("saveUrl").addEventListener("click", async () => {
 el("pollNow").addEventListener("click", async () => {
   await chrome.runtime.sendMessage({ type: "popup-poll-now" });
   setTimeout(refresh, 300);
+});
+
+el("clearInflight").addEventListener("click", async () => {
+  await chrome.runtime.sendMessage({ type: "popup-clear-inflight" });
+  setTimeout(refresh, 200);
 });
 
 refresh();

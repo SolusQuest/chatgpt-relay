@@ -188,3 +188,31 @@ test("legacy /health returns ok", async () => {
   assert.equal(r.status, 200);
   assert.equal(r.json.status, "ok");
 });
+
+test("recover endpoint completes an in-flight task with DOM-captured reply", async () => {
+  const c = await post("/v1/tasks", { session: "sR", text: "recover me" });
+  const id = c.json.taskId;
+  await get("/internal/next_task?session=sR");
+  const rec = await post(`/internal/tasks/${id}/recover`, { text: "captured reply" });
+  assert.equal(rec.json.status, "done");
+  assert.equal(rec.json.recovered, true);
+  const t = await get(`/v1/tasks/${id}`);
+  assert.equal(t.json.reply, "captured reply");
+});
+
+test("recover on already-done task is idempotent", async () => {
+  const c = await post("/v1/tasks", { session: "sR2", text: "already done" });
+  const id = c.json.taskId;
+  await get("/internal/next_task?session=sR2");
+  await post(`/internal/tasks/${id}/complete`, { text: "original" });
+  const rec = await post(`/internal/tasks/${id}/recover`, { text: "duplicate" });
+  assert.equal(rec.json.status, "done");
+  assert.equal(rec.json.recovered, false);
+  const t = await get(`/v1/tasks/${id}`);
+  assert.equal(t.json.reply, "original");
+});
+
+test("recover on unknown task returns 404", async () => {
+  const rec = await post(`/internal/tasks/nope/recover`, { text: "x" });
+  assert.equal(rec.status, 404);
+});

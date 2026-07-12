@@ -73,7 +73,7 @@ test("config.js exports required constants", () => {
 
 test("content-script contains required message handlers", () => {
   const src = fs.readFileSync(path.join(EXT, "content-script.js"), "utf8");
-  for (const t of ["get-session-id", "check-safety", "update-banner", "run-task"]) {
+  for (const t of ["get-session-id", "check-safety", "update-banner", "run-task", "recover-task", "requeue-task", "offline", "online"]) {
     assert.match(src, new RegExp(`"${t}"`), `missing handler: ${t}`);
   }
 });

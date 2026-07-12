@@ -1,5 +1,5 @@
 // extension/service-worker.js
-// MV3 Service Worker: 驱动轮询、HTTP、心跳；用 chrome.tabs.sendMessage 唤醒 content-script。
+// MV3 Service Worker: 驱动轮询、HTTP、心跳、消息桥接、恢复。
 // SW 会被 Chrome 主动休眠，全部长期状态放 chrome.storage.local。
 
 import {
@@ -12,7 +12,6 @@ import {
   STORAGE_KEYS,
 } from "./lib/config.js";
 
-// ── storage helpers ──
 async function getStorage(key, fallback) {
   const obj = await chrome.storage.local.get(key);
   return obj[key] ?? fallback;
@@ -21,13 +20,11 @@ async function setStorage(key, value) {
   await chrome.storage.local.set({ [key]: value });
 }
 
-// ── 配置 ──
 async function getBaseUrl() {
   const cfg = await getStorage("config", {});
   return cfg.baseUrl || DEFAULT_BASE;
 }
 
-// ── HTTP ──
 async function httpJson(method, url, body, timeoutMs = 30_000) {
   const base = await getBaseUrl();
   const ctrl = new AbortController();
@@ -43,7 +40,9 @@ async function httpJson(method, url, body, timeoutMs = 30_000) {
     const json = text ? JSON.parse(text) : null;
     if (!res.ok) {
       const msg = json?.message ?? json?.error ?? `HTTP ${res.status}`;
-      throw new Error(msg);
+      const err = new Error(msg);
+      err.status = res.status;
+      throw err;
     }
     return json;
   } finally {
@@ -51,7 +50,6 @@ async function httpJson(method, url, body, timeoutMs = 30_000) {
   }
 }
 
-// ── tab 管理 ──
 async function listChatGPTTabs() {
   return chrome.tabs.query({ url: "https://chatgpt.com/*" });
 }
@@ -65,7 +63,7 @@ async function getTabSession(tabId) {
   }
 }
 
-// ── inflight tracking（Phase 3 只做基本；Phase 4 会加恢复） ──
+// ── inflight tracking ──
 async function markInflight(session, taskId) {
   const inflight = (await getStorage(STORAGE_KEYS.INFLIGHT, {}));
   inflight[session] = { taskId, submittedAt: Date.now() };
@@ -76,8 +74,15 @@ async function clearInflight(session) {
   delete inflight[session];
   await setStorage(STORAGE_KEYS.INFLIGHT, inflight);
 }
+async function getInflight(session) {
+  const inflight = (await getStorage(STORAGE_KEYS.INFLIGHT, {}));
+  return inflight[session] ?? null;
+}
 
-// ── 轮询：一次遍历所有 chatgpt tab，尝试认领 & 执行任务 ──
+// ── offline 标记 ──
+const offlineSessions = new Set();
+
+// ── 轮询 ──
 let pollInProgress = false;
 async function pollOnce() {
   if (pollInProgress) return;
@@ -99,18 +104,17 @@ async function pollOnce() {
 
 async function handleTab(tabId) {
   const session = await getTabSession(tabId);
-  if (!session) return; // content-script 未就绪
+  if (!session) return;
+  if (offlineSessions.has(session)) return;
 
-  // 检查该 session 是否已有 inflight（避免同 session 并发派任务）
-  const inflight = await getStorage(STORAGE_KEYS.INFLIGHT, {});
-  if (inflight[session]) return;
+  const inflight = await getInflight(session);
+  if (inflight) return;
 
-  // 询问 content-script safety
   let safety = null;
   try {
     const r = await chrome.tabs.sendMessage(tabId, { type: "check-safety" });
     safety = r?.block ?? null;
-  } catch { /* content 消失 */ }
+  } catch { /* content script gone */ }
 
   if (safety) {
     await httpJson("POST", `/internal/sessions/${encodeURIComponent(session)}/status`, {
@@ -126,7 +130,6 @@ async function handleTab(tabId) {
     return;
   }
 
-  // 正常状态：上报 & long-poll 认领
   await httpJson("POST", `/internal/sessions/${encodeURIComponent(session)}/status`, {
     paused: false,
   }).catch(() => {});
@@ -151,25 +154,23 @@ async function handleTab(tabId) {
 
   try {
     const runRes = await chrome.tabs.sendMessage(tabId, {
-      type: "run-task",
-      taskId,
-      text,
+      type: "run-task", taskId, text,
     });
     if (runRes?.error) throw new Error(runRes.error);
     if (typeof runRes?.reply !== "string") throw new Error("no reply from content-script");
     await httpJson("POST", `/internal/tasks/${taskId}/complete`, { text: runRes.reply });
+    await clearInflight(session);
   } catch (e) {
     console.warn("[cgcon sw] task failed", taskId, e);
+    // 注意：不立即 clearInflight，让 content-script 的 sessionStorage 有机会走 recover 流程
     await httpJson("POST", `/internal/tasks/${taskId}/complete`, { error: e.message }).catch(() => {});
     await setStorage(STORAGE_KEYS.LAST_ERROR, {
       taskId, session, error: e.message, at: Date.now(),
     });
-  } finally {
     await clearInflight(session);
   }
 }
 
-// ── 心跳：给每个活跃 chatgpt tab 的 session 都发一次 ──
 async function heartbeatOnce() {
   const tabs = await listChatGPTTabs();
   for (const tab of tabs) {
@@ -180,9 +181,25 @@ async function heartbeatOnce() {
   }
 }
 
-// ── alarm handler：Chrome 会 wake up SW 触发 alarm；alarm 最小间隔 1min。
-// 我们只用 alarm 触发即时任务；短周期靠 alarm 内递归的 setTimeout（Chrome 允许，
-// 只要 SW 未 idle。alarm 到达时 SW 一定会被唤醒）。
+// ── SW 唤醒时扫孤儿 inflight（page 已刷新但 SW 侧还残留） ──
+async function reconcileInflight() {
+  const inflight = await getStorage(STORAGE_KEYS.INFLIGHT, {});
+  if (Object.keys(inflight).length === 0) return;
+  const tabs = await listChatGPTTabs();
+  const liveSessions = new Set();
+  for (const t of tabs) {
+    if (!t.id) continue;
+    const sid = await getTabSession(t.id);
+    if (sid) liveSessions.add(sid);
+  }
+  // 该 session 的 tab 消失了 → 清理 inflight（防止内存泄漏）
+  const stale = Object.keys(inflight).filter((s) => !liveSessions.has(s));
+  for (const s of stale) {
+    console.log("[cgcon sw] reconcile: dropping inflight for missing session", s);
+    await clearInflight(s);
+  }
+}
+
 async function ensureAlarms() {
   const list = await chrome.alarms.getAll();
   const names = new Set(list.map((a) => a.name));
@@ -196,8 +213,8 @@ async function ensureAlarms() {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === POLL_ALARM_NAME) {
+    void reconcileInflight();
     void pollOnce();
-    // 追加两次短周期 poll 让 alarm 一次唤醒能覆盖多个 poll interval
     setTimeout(() => void pollOnce(), POLL_INTERVAL_MS);
     setTimeout(() => void pollOnce(), 2 * POLL_INTERVAL_MS);
   } else if (alarm.name === HEARTBEAT_ALARM_NAME) {
@@ -210,22 +227,98 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 chrome.runtime.onInstalled.addListener(() => { void ensureAlarms(); });
 chrome.runtime.onStartup.addListener(() => { void ensureAlarms(); });
 void ensureAlarms();
+void reconcileInflight();
 
-// ── content-script → SW 消息（"session-hello" 触发一次即时 poll） ──
+// ── 消息桥接 ──
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg?.type === "session-hello") {
-    // 立即尝试一次 poll，让新打开 tab 快速接单
+  const type = msg?.type;
+
+  if (type === "session-hello") {
     if (sender.tab?.id) {
       handleTab(sender.tab.id).catch((e) => console.warn("[cgcon sw] hello poll failed", e));
     }
     sendResponse({ status: "ok" });
     return true;
   }
-  if (msg?.type === "popup-poll-now") {
+
+  if (type === "offline") {
+    if (sender.tab?.id) {
+      (async () => {
+        const sid = await getTabSession(sender.tab.id);
+        if (sid) offlineSessions.add(sid);
+        sendResponse({ status: "ok" });
+      })();
+      return true;
+    }
+    return false;
+  }
+
+  if (type === "online") {
+    if (sender.tab?.id) {
+      (async () => {
+        const sid = await getTabSession(sender.tab.id);
+        if (sid) offlineSessions.delete(sid);
+        sendResponse({ status: "ok" });
+      })();
+      return true;
+    }
+    return false;
+  }
+
+  if (type === "network-reload") {
+    // Content script 即将 reload；把此 session 从 inflight 摘除避免误 recover
+    if (sender.tab?.id) {
+      (async () => {
+        const sid = await getTabSession(sender.tab.id);
+        if (sid) offlineSessions.add(sid);
+        setTimeout(() => sid && offlineSessions.delete(sid), 15_000);
+        sendResponse({ status: "ok" });
+      })();
+      return true;
+    }
+    return false;
+  }
+
+  if (type === "recover-task") {
+    (async () => {
+      try {
+        const r = await httpJson("POST", `/internal/tasks/${msg.taskId}/recover`, { text: msg.text });
+        // 找到该 session 并清 inflight
+        if (sender.tab?.id) {
+          const sid = await getTabSession(sender.tab.id);
+          if (sid) await clearInflight(sid);
+        }
+        sendResponse({ recovered: r?.recovered ?? false, status: r?.status });
+      } catch (e) {
+        console.warn("[cgcon sw] recover-task failed", e);
+        sendResponse({ error: e.message });
+      }
+    })();
+    return true;
+  }
+
+  if (type === "requeue-task") {
+    (async () => {
+      try {
+        await httpJson("POST", `/internal/tasks/${msg.taskId}/requeue`, {});
+        if (sender.tab?.id) {
+          const sid = await getTabSession(sender.tab.id);
+          if (sid) await clearInflight(sid);
+        }
+        sendResponse({ status: "ok" });
+      } catch (e) {
+        sendResponse({ error: e.message });
+      }
+    })();
+    return true;
+  }
+
+  if (type === "popup-poll-now") {
     pollOnce().then(() => sendResponse({ status: "ok" })).catch((e) => sendResponse({ error: e.message }));
     return true;
   }
-  if (msg?.type === "popup-get-state") {
+
+  if (type === "popup-get-state") {
     (async () => {
       const [inflight, cfg, lastError] = await Promise.all([
         getStorage(STORAGE_KEYS.INFLIGHT, {}),
@@ -237,13 +330,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       for (const t of tabs) {
         if (!t.id) continue;
         const sid = await getTabSession(t.id);
-        tabsInfo.push({ tabId: t.id, url: t.url, title: t.title, session: sid });
+        tabsInfo.push({
+          tabId: t.id, url: t.url, title: t.title, session: sid,
+          offline: sid ? offlineSessions.has(sid) : false,
+        });
       }
-      sendResponse({ inflight, cfg, lastError, tabs: tabsInfo, baseUrl: cfg.baseUrl || DEFAULT_BASE });
+      sendResponse({
+        inflight, cfg, lastError, tabs: tabsInfo,
+        baseUrl: cfg.baseUrl || DEFAULT_BASE,
+        offlineSessionCount: offlineSessions.size,
+      });
     })();
     return true;
   }
-  if (msg?.type === "popup-set-base-url") {
+
+  if (type === "popup-set-base-url") {
     (async () => {
       const cfg = await getStorage("config", {});
       cfg.baseUrl = msg.baseUrl;
@@ -252,6 +353,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     })();
     return true;
   }
+
+  if (type === "popup-clear-inflight") {
+    (async () => {
+      await setStorage(STORAGE_KEYS.INFLIGHT, {});
+      sendResponse({ status: "ok" });
+    })();
+    return true;
+  }
+
   return false;
 });
 

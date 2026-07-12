@@ -20,3 +20,4 @@ input[type=text] { padding: 3px 5px; }
 button { padding: 3px 8px; margin-left: 6px; }
 pre { background: #fff5f5; border: 1px solid #ffd; padding: 6px; margin: 0;
   font-size: 11px; white-space: pre-wrap; word-break: break-all; max-height: 100px; overflow-y: auto; }
+tr.offline td { color: #7f8c8d; font-style: italic; }

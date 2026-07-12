@@ -61,6 +61,29 @@ export function createInternalRouter(store: TaskStore): Router {
     }
   });
 
+  // 从 DOM 回捞的回复：扩展重启/刷新后发现某 taskId 已生成完，走这里报回。
+  // 语义：如果 task 处于 queued/in_progress 则视为 complete；已 terminal 则忽略。
+  router.post("/tasks/:id/recover", (req: Request, res: Response) => {
+    const id = String(req.params.id ?? "");
+    const body = (req.body ?? {}) as { text?: unknown };
+    const text = typeof body.text === "string" ? body.text : "";
+    if (!text) return res.status(400).json({ error: "missing text" });
+    const existing = store.getTask(id);
+    if (!existing) return res.status(404).json({ error: "task not found" });
+    if (["done", "failed", "cancelled", "expired"].includes(existing.status)) {
+      return res.json({ status: existing.status, taskId: id, recovered: false });
+    }
+    try {
+      const task = store.completeTask(id, { text });
+      return res.json({ status: task.status, taskId: task.id, recovered: true });
+    } catch (err) {
+      if (err instanceof TaskStoreError) {
+        return res.status(400).json({ error: err.code, message: err.message });
+      }
+      throw err;
+    }
+  });
+
   // 请求把任务打回 queued（页面刷新后回捞失败等场景）
   router.post("/tasks/:id/requeue", (req: Request, res: Response) => {
     const id = String(req.params.id ?? "");
