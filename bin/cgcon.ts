@@ -184,28 +184,44 @@ async function cmdResume(): Promise<number> {
 }
 
 async function cmdReview(args: string[]): Promise<number> {
-  // 简单实现：从 --session、--stdin / --text 读取
   let session = "";
   let text = "";
   let readStdin = false;
+  let file: string | null = null;
+  let wait = true;
+  let timeoutMs: number | undefined;
+  let cri: string | undefined;
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === "--session") session = args[++i] ?? "";
     else if (a === "--text") text = args[++i] ?? "";
     else if (a === "--stdin") readStdin = true;
+    else if (a === "--file") file = args[++i] ?? null;
+    else if (a === "--no-wait") wait = false;
+    else if (a === "--timeout") timeoutMs = Number(args[++i]);
+    else if (a === "--cri") cri = args[++i];
   }
   if (!session) {
-    console.error("usage: cgcon review --session <id> (--text ... | --stdin)");
+    console.error("usage: cgcon review --session <id> (--text T | --stdin | --file F) [--no-wait] [--timeout ms] [--cri key]");
     return 64;
   }
   if (readStdin) {
     text = await readAllStdin();
+  } else if (file) {
+    const { readFileSync } = await import("node:fs");
+    text = readFileSync(file, "utf8");
   }
   if (!text) {
     console.error("no text provided");
     return 64;
   }
-  const r = await review(text, { session, baseUrl: BASE });
+  const r = await review(text, {
+    session,
+    baseUrl: BASE,
+    wait,
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    ...(cri !== undefined ? { clientRequestId: cri } : {}),
+  });
   if ("reply" in r) {
     if (r.status === "done") {
       process.stdout.write(r.reply ?? "");

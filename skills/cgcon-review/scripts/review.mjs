@@ -50,6 +50,13 @@ const created = await httpJson("POST", "/v1/tasks", {
   session: args.session, text, timeout: args.timeoutMs, clientRequestId: cri,
 });
 const taskId = created.taskId;
+if (created.encodingWarning) {
+  process.stderr.write(`[cgcon] WARNING: server flagged suspicious encoding: ${created.encodingWarning}\n`);
+  process.stderr.write(`[cgcon]   hint (PowerShell): $OutputEncoding = [System.Text.UTF8Encoding]::new()\n`);
+}
+if (created.encodingFixed) {
+  process.stderr.write(`[cgcon] note: server auto-fixed encoding (${created.encodingFixed})\n`);
+}
 writePending({
   taskId, session: args.session, submittedAt: started,
   textPreview: text.slice(0, 80), clientRequestId: cri,

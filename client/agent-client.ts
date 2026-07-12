@@ -95,7 +95,7 @@ export function listPending(): PendingRecord[] {
 async function submitTask(
   text: string,
   opts: ReviewOptions,
-): Promise<{ taskId: string; status: string }> {
+): Promise<{ taskId: string; status: string; encodingWarning?: string; encodingFixed?: string }> {
   const baseUrl = opts.baseUrl ?? DEFAULT_BASE;
   const body: Record<string, unknown> = {
     session: opts.session,
@@ -103,7 +103,7 @@ async function submitTask(
   };
   if (opts.timeoutMs != null) body.timeout = opts.timeoutMs;
   if (opts.clientRequestId) body.clientRequestId = opts.clientRequestId;
-  return http.post<{ taskId: string; status: string }>("/v1/tasks", body, {
+  return http.post<{ taskId: string; status: string; encodingWarning?: string; encodingFixed?: string }>("/v1/tasks", body, {
     baseUrl,
     timeoutMs: 10_000,
     signal: opts.signal,
@@ -136,7 +136,14 @@ export async function review(
   opts: ReviewOptions,
 ): Promise<ReviewResult | { taskId: string; status: "queued" }> {
   const started = Date.now();
-  const { taskId, status } = await submitTask(text, opts);
+  const submitted = await submitTask(text, opts); const { taskId } = submitted;
+  if (submitted.encodingWarning) {
+    process.stderr.write(`[cgcon] WARNING: server flagged suspicious encoding: ${submitted.encodingWarning}\n`);
+    process.stderr.write(`[cgcon]   hint (PowerShell): $OutputEncoding = [System.Text.UTF8Encoding]::new()\n`);
+  }
+  if (submitted.encodingFixed) {
+    process.stderr.write(`[cgcon] note: server auto-fixed encoding (${submitted.encodingFixed})\n`);
+  }
   writePending({
     taskId,
     session: opts.session,

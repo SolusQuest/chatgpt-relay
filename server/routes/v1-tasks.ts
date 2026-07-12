@@ -6,6 +6,7 @@ import type { TaskStore, Task, TaskStatus } from "../task-store.js";
 import { TaskStoreError, TERMINAL_STATUSES } from "../task-store.js";
 import { longPollTask } from "../long-poll.js";
 import { asPositiveInt, isValidSessionId } from "../util.js";
+import { tryFixEncoding } from "../encoding-fix.js";
 
 const VALID_STATUSES: readonly TaskStatus[] = [
   "queued",
@@ -71,14 +72,20 @@ export function createV1TasksRouter(store: TaskStore): Router {
     const timeoutMs = asPositiveInt(body.timeout) ?? undefined;
     const clientRequestId =
       typeof body.clientRequestId === "string" ? body.clientRequestId : null;
+    const fix = tryFixEncoding(body.text);
+    if (fix.fixed) console.warn(`[v1/tasks] encoding-fix ${fix.method}: ${fix.note}`);
+    else if (fix.method === "ascii-lossy-warn") console.warn(`[v1/tasks] encoding-warn: ${fix.note}`);
     try {
       const task = store.createTask({
         session: body.session,
-        text: body.text,
+        text: fix.text,
         timeoutMs,
         clientRequestId,
       });
-      return res.status(201).json({ taskId: task.id, status: task.status });
+      const payload: { taskId: string; status: string; encodingWarning?: string; encodingFixed?: string } = { taskId: task.id, status: task.status };
+      if (fix.method === "ascii-lossy-warn") payload.encodingWarning = fix.note;
+      if (fix.fixed) payload.encodingFixed = `${fix.method}: ${fix.note}`;
+      return res.status(201).json(payload);
     } catch (err) {
       return respondStoreError(res, err);
     }

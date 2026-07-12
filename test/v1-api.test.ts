@@ -181,3 +181,37 @@ test("recover on unknown task returns 404", async () => {
   const rec = await post(`/internal/tasks/nope/recover`, { text: "x" });
   assert.equal(rec.status, 404);
 });
+
+test("POST /v1/tasks auto-fixes latin-1 mojibake", async () => {
+  const original = "帮我 review";
+  const mojibake = Buffer.from(original, "utf8").toString("latin1");
+  const r = await post("/v1/tasks", { session: "sEnc1", text: mojibake });
+  assert.equal(r.status, 201);
+  assert.ok(r.json.encodingFixed, `expected encodingFixed, got ${JSON.stringify(r.json)}`);
+  // 服务端应存的是修好的
+  const taskId = r.json.taskId;
+  const t = await get(`/v1/tasks/${taskId}?include_text=1`);
+  // include_text 需要 include_text=1，但 GET /:id 默认包含 text
+  assert.equal(t.json.text, original);
+});
+
+test("POST /v1/tasks warns on ASCII-lossy input but preserves it", async () => {
+  const r = await post("/v1/tasks", {
+    session: "sEnc2",
+    text: "?? review ?????? code",
+  });
+  assert.equal(r.status, 201);
+  assert.ok(r.json.encodingWarning, `expected encodingWarning, got ${JSON.stringify(r.json)}`);
+  const t = await get(`/v1/tasks/${r.json.taskId}`);
+  assert.equal(t.json.text, "?? review ?????? code");
+});
+
+test("POST /v1/tasks passes through clean UTF-8 CJK without warning", async () => {
+  const r = await post("/v1/tasks", {
+    session: "sEnc3",
+    text: "帮我 review 一下这段代码：function f(x){return x*2}",
+  });
+  assert.equal(r.status, 201);
+  assert.equal(r.json.encodingFixed, undefined);
+  assert.equal(r.json.encodingWarning, undefined);
+});
