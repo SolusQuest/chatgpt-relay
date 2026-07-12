@@ -1,6 +1,6 @@
 ---
 name: gpt-relay-review
-description: Use when the user wants ChatGPT (web app) to review, critique, or provide a second opinion on content via the local gpt-relay service running at http://127.0.0.1:8765. Ideal for design docs, PR diffs, ambiguous refactors, architecture choices, prompt drafts, or any high-stakes decision where the user already has an authenticated ChatGPT tab open. Do not use for quick self-review, when no ChatGPT tab is available, or when the user asked for a specific API-based model.
+description: Use when the user wants ChatGPT (web app) to review, critique, provide a second opinion on, or engage in double-blind discussion about content via the local gpt-relay service at http://127.0.0.1:8765. Send GitHub PR/issue URLs when possible (the ChatGPT session already has connector access, including private repos), or send full text for standalone drafts (design docs, issue bodies, prompts, commit messages). Also supports discussion mode: both agent and relay produce independent analyses, then converge. Do not use for quick self-review, when no ChatGPT tab is available, when the user asked for a specific API-based model, or for content the user has not authorized to share with ChatGPT.
 ---
 
 # gpt-relay-review
@@ -11,22 +11,40 @@ cost -- uses the user's ChatGPT Plus subscription.
 
 ## When to use this skill
 
-Trigger when **all** of these hold:
-- The user explicitly asks for ChatGPT / GPT / "another model" to review or
-  second-opinion a piece of content, **or** the content is important enough
-  that cross-model review is clearly valuable (long design docs, security
-  reviews, non-obvious refactor plans, big PR descriptions).
-- The user already has gpt-relay running (check with `health.mjs`) and at least
-  one active ChatGPT tab (check with `sessions.mjs`).
-- The content is text (Markdown / code / diffs). Images and file attachments
-  are not supported.
+Trigger when **all** hold:
+- The user explicitly asks for ChatGPT / GPT / "another model" to review, or
+  the content warrants cross-model review (design docs, security-sensitive
+  refactors, non-obvious PR reviews, issue body refinement, test coverage
+  design, architecture choices).
+- gpt-relay is running (verify with `health.mjs`) and at least one active
+  ChatGPT tab exists (`sessions.mjs`).
+- Content is text (Markdown / code / diffs) or a resolvable URL. Images and
+  file attachments are not supported.
 
 Do **not** trigger when:
-- The user just wants a quick internal self-check.
-- No relay is reachable or no session is active -- surface the missing
-  precondition instead of falling back silently.
-- The content contains secrets the user has not explicitly authorized to
-  share with ChatGPT.
+- The user just wants quick internal self-review.
+- No relay reachable or no active session -- surface the precondition, don't
+  fall back silently.
+- Content contains secrets the user hasn't authorized to share with ChatGPT.
+
+## Session context assumptions (default: hold)
+
+The ChatGPT session behind gpt-relay is the user's own logged-in session,
+usually with pre-loaded conversation context. **Default assumptions**:
+
+- The session **can access GitHub PR/issue URLs**, including the user's own
+  private repos (ChatGPT connectors are authorized).
+  → Prefer sending **URLs** over inlining diffs/issue bodies.
+- The session **has necessary project / repo context** (architecture,
+  terminology, current feature work).
+  → Don't re-explain project background every prompt.
+- The session is authenticated as the user.
+  → OK to say "this is part of my X feature"; don't treat as cold Q&A.
+
+**Downgrade only on explicit contradictory evidence**: relay says "I can't
+see this URL" / "please paste the content", or the reply is clearly
+off-topic. Then either (a) supply the missing context inline with a note, or
+(b) stop and ask the user.
 
 ## Preconditions
 
@@ -67,6 +85,18 @@ printf %s "$PROMPT" | node $SKILL_DIR/scripts/review.mjs \
     --timeout 600000
 ```
 
+**Content shape**:
+- **Have a GitHub PR/issue URL?** Send the URL, not the diff/body — see
+  Session context assumptions above.
+- **Have local uncommitted changes?** `git commit && git push` first, then
+  send the PR URL. Never inline unpushed diffs; the reviewer's line
+  references won't match anything the user can see.
+- **Standalone text** (issue drafts, design docs, prompt drafts, commit
+  message drafts): send the **full text**, numbered when multiple. Don't
+  send summaries or "the important part".
+- **Multiple drafts in one review**: format as `## Draft 1`, `## Draft 2`
+  headings so relay can address them individually.
+
 Behavior:
 - On success, `review.mjs` prints the ChatGPT reply to stdout and exits 0.
 - On task-level failure (paused mid-flight, expired, cancelled), exits 2 with
@@ -82,6 +112,47 @@ Flags worth knowing:
   same key within the same session returns the original taskId instead of
   creating a duplicate. Recommended if the caller may retry.
 - `--file <path>` read prompt from a file instead of stdin/argv.
+
+## Discussion mode (double-blind, advanced)
+
+For important decisions (issue scope refinement, test coverage design,
+architecture / naming choices, etc.), one-shot review can be extended into
+**discussion mode**: agent and relay produce independent analyses, then
+merge. This reduces LLM sycophancy — whoever sees the other's answer first
+tends to drift toward it.
+
+**Core rule: ordering guarantees independence.**
+
+```
+Round 0: agent thinks independently in its scratchpad → output A
+         (do NOT send to relay yet)
+Round 1: send relay a prompt containing ONLY the task + objective facts
+         (issue placeholder, code under test, requirements) → output B
+Round 2: agent compares A vs B — identify overlap, agent-only,
+         relay-only, and conflicts
+Round 3+ (optional): if diffs/conflicts are significant, send relay a
+         discussion prompt like: "my view is <A>, yours is <B>. What am I
+         missing? What are you not considering? For conflict <X>, what's
+         the rationale trade-off?" → output C, iterate.
+```
+
+Reuse the **same session** across rounds (`--cri` optional; multi-turn
+context is one of gpt-relay's advantages over stateless API calls).
+
+**Termination**:
+- Convergence: key points overlap ~80%, remaining diffs stylistic, or two
+  consecutive rounds add no new arguments → stop and act on the synthesis
+- Substantive stalemate: both sides have fully explained rationales but
+  disagree on a decision point → stop, present both to the user
+- Hard cap: 3 discussion rounds beyond Round 1
+- External: session paused, degradation signal, user interrupt
+
+**Anti-patterns**:
+- Putting agent's opinion in the Round 1 prompt → degrades to review mode
+- Asking relay to grade agent's answer → same
+- Discussing until "looks perfect" → overfit; discussion is for blind-spot
+  detection, not polish
+- Replacing user decisions with agent+relay consensus
 
 ## Handling long reviews
 

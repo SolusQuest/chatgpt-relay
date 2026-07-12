@@ -3,8 +3,12 @@
 // 列出最近的 tasks（默认 20 条）。
 import { httpJson } from "./lib.mjs";
 const args = process.argv.slice(2);
-const limit = Number(args[args.indexOf("--last") + 1]) || 20;
-const session = args[args.indexOf("--session") + 1];
+function argVal(flag) {
+  const i = args.indexOf(flag);
+  return i >= 0 && i + 1 < args.length ? args[i + 1] : undefined;
+}
+const limit = Number(argVal("--last")) || 20;
+const session = argVal("--session");
 const url = new URLSearchParams({ limit: String(limit) });
 if (args.includes("--session") && session) url.set("session", session);
 const r = await httpJson("GET", `/v1/tasks?${url}`);

@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export const BASE = process.env.GPT_RELAY_URL ?? `http://127.0.0.1:${process.env.GPT_RELAY_PORT ?? 8766}`;
+export const BASE = process.env.GPT_RELAY_URL ?? `http://127.0.0.1:${process.env.GPT_RELAY_PORT ?? 8765}`;
 export const PENDING_DIR = process.env.GPT_RELAY_PENDING_DIR ??
   path.join(os.homedir(), ".gpt-relay", "pending");
 
