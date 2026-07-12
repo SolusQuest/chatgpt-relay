@@ -510,10 +510,13 @@
               sendResponse({ status: "not-started", lastText, assistantCount: msgs.length });
               return;
             }
-            if (hasNewAssistant && changed) {
+            // 关键：只要 assistant 消息数增加就是新回复，不比较文字（新旧回答文字
+            // 可能巧合相同——例如 review 同一段代码——那也是新的一条 assistant 消息）。
+            if (hasNewAssistant) {
               sendResponse({ status: "reply-ready", reply: lastText, assistantCount: msgs.length });
               return;
             }
+            // 只有 user 变但 assistant 没变：说明 send 已发出但页面还没插入 assistant 占位
             sendResponse({ status: "posted-no-reply-yet", lastText, assistantCount: msgs.length });
           } catch (e) {
             sendResponse({ error: e.message });
