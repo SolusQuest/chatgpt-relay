@@ -1,69 +1,285 @@
 #!/usr/bin/env node
 // bin/cgcon.ts
-// Phase 0 CLI: 只实现 start / health，Phase 1 起补齐 tasks/show/cancel/resume。
-import { spawn } from 'node:child_process';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+// v3 CLI: start/health/tasks/show/cancel/sessions/resume/review。
+import { spawn } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  cancelTask,
+  getTask,
+  healthCheck,
+  listSessions,
+  resumePending,
+  review,
+} from "../client/agent-client.js";
+import { http } from "../client/http.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(__dirname, '..');
+const REPO_ROOT = path.resolve(__dirname, "..");
 const PORT = Number(process.env.CGCON_PORT ?? 8766);
-const BASE = `http://localhost:${PORT}`;
+const BASE = process.env.CGCON_URL ?? `http://127.0.0.1:${PORT}`;
 
 async function cmdStart(args: string[]): Promise<number> {
-  const entry = path.join(REPO_ROOT, 'server', 'index.ts');
-  const proc = spawn(process.execPath, ['--import', 'tsx', entry, ...args], {
-    stdio: 'inherit',
+  const entry = path.join(REPO_ROOT, "server", "index.ts");
+  const proc = spawn(process.execPath, ["--import", "tsx", entry, ...args], {
+    stdio: "inherit",
     env: process.env,
   });
-  return new Promise((resolve) => proc.on('exit', (code) => resolve(code ?? 0)));
+  return new Promise((resolve) => proc.on("exit", (code) => resolve(code ?? 0)));
 }
 
 async function cmdHealth(): Promise<number> {
-  try {
-    const res = await fetch(`${BASE}/health`);
-    const data = (await res.json()) as { status?: string; sessions?: number };
-    if (data.status === 'ok') {
-      console.log(`ok (${BASE}, sessions=${data.sessions ?? 0})`);
-      return 0;
-    }
-    console.error(`unexpected response: ${JSON.stringify(data)}`);
-    return 2;
-  } catch (err) {
-    console.error(`relay not reachable at ${BASE}: ${(err as Error).message}`);
+  const ok = await healthCheck(BASE);
+  if (ok) {
+    console.log(`ok (${BASE})`);
+    return 0;
+  }
+  console.error(`relay not reachable at ${BASE}`);
+  return 1;
+}
+
+async function cmdSessions(): Promise<number> {
+  const sessions = await listSessions(BASE);
+  if (sessions.length === 0) {
+    console.log("(no active sessions)");
+    return 0;
+  }
+  console.log(
+    ["session", "pending", "inFlight", "paused", "reason", "lastSeen"].join("\t"),
+  );
+  for (const s of sessions) {
+    console.log(
+      [
+        s.session.slice(0, 12) + "…",
+        s.pendingTasks,
+        s.inProgressTaskId ? "yes" : "no",
+        s.paused ? "yes" : "no",
+        s.pauseReason ?? "",
+        new Date(s.lastSeen).toISOString(),
+      ].join("\t"),
+    );
+  }
+  return 0;
+}
+
+interface CliTask {
+  taskId: string;
+  session: string;
+  status: string;
+  submittedAt: number;
+  completedAt: number | null;
+  error: string | null;
+  reply: string | null;
+}
+
+async function cmdTasks(args: string[]): Promise<number> {
+  const q = new URLSearchParams();
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--session") q.set("session", args[++i] ?? "");
+    else if (a === "--status") q.set("status", args[++i] ?? "");
+    else if (a === "--last") q.set("limit", args[++i] ?? "20");
+  }
+  if (!q.has("limit")) q.set("limit", "20");
+  const r = await http.get<{ tasks: CliTask[] }>(`/v1/tasks?${q}`, {
+    baseUrl: BASE,
+    timeoutMs: 5_000,
+  });
+  if (r.tasks.length === 0) {
+    console.log("(no tasks)");
+    return 0;
+  }
+  console.log(["taskId", "session", "status", "submittedAt", "elapsedMs"].join("\t"));
+  for (const t of r.tasks) {
+    const elapsed =
+      t.completedAt != null ? t.completedAt - t.submittedAt : Date.now() - t.submittedAt;
+    console.log(
+      [
+        t.taskId.slice(0, 8),
+        t.session.slice(0, 10),
+        t.status,
+        new Date(t.submittedAt).toISOString(),
+        `${elapsed}ms`,
+      ].join("\t"),
+    );
+  }
+  return 0;
+}
+
+async function cmdShow(args: string[]): Promise<number> {
+  const id = args[0];
+  if (!id) {
+    console.error("usage: cgcon show <taskId>");
+    return 64;
+  }
+  const t = await getTask(id, BASE);
+  if (!t) {
+    console.error(`task not found: ${id}`);
     return 1;
   }
+  console.log("─── task ───────────────────────────────────────");
+  console.log(`  id:          ${t.taskId}`);
+  console.log(`  session:     ${t.session}`);
+  console.log(`  status:      ${t.status}`);
+  console.log(`  submitted:   ${new Date(t.submittedAt).toISOString()}`);
+  console.log(
+    `  dispatched:  ${t.dispatchedAt ? new Date(t.dispatchedAt).toISOString() : "(pending)"}`,
+  );
+  console.log(
+    `  completed:   ${t.completedAt ? new Date(t.completedAt).toISOString() : "(pending)"}`,
+  );
+  console.log(`  requeues:    ${t.requeueCount}`);
+  if (t.text) {
+    console.log("\n─── prompt ─────────────────────────────────────");
+    console.log(t.text);
+  }
+  if (t.reply) {
+    console.log("\n─── reply ──────────────────────────────────────");
+    console.log(t.reply);
+  }
+  if (t.error) {
+    console.log("\n─── error ──────────────────────────────────────");
+    console.log(t.error);
+  }
+  return 0;
+}
+
+async function cmdCancel(args: string[]): Promise<number> {
+  const id = args[0];
+  if (!id) {
+    console.error("usage: cgcon cancel <taskId>");
+    return 64;
+  }
+  const t = await cancelTask(id, BASE);
+  console.log(`${t.taskId}: ${t.status}`);
+  return 0;
+}
+
+async function cmdResume(): Promise<number> {
+  const rows = await resumePending(BASE);
+  if (rows.length === 0) {
+    console.log("(no pending tasks)");
+    return 0;
+  }
+  for (const { record, task } of rows) {
+    const preview = record.textPreview.replace(/\s+/g, " ");
+    if (!task) {
+      console.log(`${record.taskId.slice(0, 8)}\tGONE\t"${preview}"`);
+      continue;
+    }
+    const line = [
+      task.taskId.slice(0, 8),
+      task.status,
+      `"${preview}"`,
+    ].join("\t");
+    console.log(line);
+    if (task.status === "done" && task.reply) {
+      console.log("─── reply ────────────────");
+      console.log(task.reply);
+      console.log("──────────────────────────");
+    }
+    if (task.error) console.log(`  error: ${task.error}`);
+  }
+  return 0;
+}
+
+async function cmdReview(args: string[]): Promise<number> {
+  // 简单实现：从 --session、--stdin / --text 读取
+  let session = "";
+  let text = "";
+  let readStdin = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--session") session = args[++i] ?? "";
+    else if (a === "--text") text = args[++i] ?? "";
+    else if (a === "--stdin") readStdin = true;
+  }
+  if (!session) {
+    console.error("usage: cgcon review --session <id> (--text ... | --stdin)");
+    return 64;
+  }
+  if (readStdin) {
+    text = await readAllStdin();
+  }
+  if (!text) {
+    console.error("no text provided");
+    return 64;
+  }
+  const r = await review(text, { session, baseUrl: BASE });
+  if ("reply" in r) {
+    if (r.status === "done") {
+      process.stdout.write(r.reply ?? "");
+      return 0;
+    }
+    console.error(`task ${r.taskId} ${r.status}: ${r.error ?? "(no error)"}`);
+    return 2;
+  }
+  console.log(`queued taskId=${r.taskId}`);
+  return 0;
+}
+
+async function readAllStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const c of process.stdin) chunks.push(c as Buffer);
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 function usage(): void {
   console.log(`cgcon <command>
 
 commands:
-  start          start relay server (foreground)
-  health         check relay health at ${BASE}
+  start                    start relay server (foreground)
+  health                   check relay at ${BASE}
+  sessions                 list active ChatGPT sessions
+  tasks [--session ID] [--status S] [--last N]
+                           list recent tasks
+  show <taskId>            show full prompt + reply
+  cancel <taskId>          cancel a task
+  resume                   check pending tasks from previous run
+  review --session ID (--text T | --stdin)
+                           submit a review and wait
 
 env:
-  CGCON_PORT     server port (default 8766)
+  CGCON_PORT (${PORT})     server port
+  CGCON_URL                override base url
+  CGCON_PENDING_DIR        agent pending records dir
 `);
 }
 
 async function main(): Promise<number> {
   const [, , cmd, ...rest] = process.argv;
-  switch (cmd) {
-    case 'start':
-      return cmdStart(rest);
-    case 'health':
-      return cmdHealth();
-    case undefined:
-    case '-h':
-    case '--help':
-    case 'help':
-      usage();
-      return 0;
-    default:
-      console.error(`unknown command: ${cmd}`);
-      usage();
-      return 64;
+  try {
+    switch (cmd) {
+      case "start":
+        return await cmdStart(rest);
+      case "health":
+        return await cmdHealth();
+      case "sessions":
+        return await cmdSessions();
+      case "tasks":
+        return await cmdTasks(rest);
+      case "show":
+        return await cmdShow(rest);
+      case "cancel":
+        return await cmdCancel(rest);
+      case "resume":
+        return await cmdResume();
+      case "review":
+        return await cmdReview(rest);
+      case undefined:
+      case "-h":
+      case "--help":
+      case "help":
+        usage();
+        return 0;
+      default:
+        console.error(`unknown command: ${cmd}`);
+        usage();
+        return 64;
+    }
+  } catch (err) {
+    console.error(`error: ${(err as Error).message}`);
+    return 1;
   }
 }
 

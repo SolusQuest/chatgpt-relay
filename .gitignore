@@ -7,3 +7,4 @@ dist/
 
 # tsx / typescript build cache
 *.tsbuildinfo
+.test-data/

@@ -32,7 +32,7 @@ before(async () => {
   const entry = path.join(REPO_ROOT, 'server', 'index.ts');
   child = spawn(process.execPath, ['--import', 'tsx', entry], {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, CGCON_PORT: String(PORT) },
+    env: { ...process.env, CGCON_PORT: String(PORT), CGCON_DATA_DIR: path.join(REPO_ROOT, ".test-data", "smoke") },
   });
   child.stdout?.on('data', () => {});
   child.stderr?.on('data', (d) => process.stderr.write(`[srv] ${d}`));
