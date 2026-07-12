@@ -3,8 +3,6 @@
 **References**:
 - Relay API + usage patterns: [`agent-instructions.md`](../agent-instructions.md)
 - Skill (if invoked as a Codex/Claude skill): [`skills/gpt-relay-review/SKILL.md`](../skills/gpt-relay-review/SKILL.md)
-- Discussion mode mechanics: see the "讨论 / 独立思考 + 综合" section in
-  agent-instructions.md, or the "Discussion mode" section in SKILL.md
 
 ---
 
@@ -14,9 +12,8 @@ End-to-end flow for turning a rough / placeholder GitHub issue into a
 production-quality PR, using the local relay as an independent reviewer /
 brainstorming counterpart at two key decision points.
 
-Deliberately slow — 6–8 relay round-trips totalling several minutes of wall
-time — because the goal is getting scope and coverage **right the first time**,
-not shipping fast.
+Deliberately slow — the goal is getting scope and coverage **right the first
+time**, not shipping fast.
 
 ## When to use / not to use
 
@@ -39,15 +36,12 @@ user** whether to switch to lightweight mode.
 
 - gpt-relay reachable and at least one non-paused ChatGPT session available
   (see agent-instructions.md § "使用前 sanity check").
-- User has authorized this workflow, or invoked a skill / slash command that
-  triggers it.
-- The relay session either already has repo/project context loaded, or you're
-  prepared to supply it inline when relay signals "no context" (see
-  Session context assumptions in SKILL.md).
-- **Pin the session**: note the chosen session id at Phase 1 and reuse it
-  across every relay call in the workflow. Continuity gives discussion mode
-  and later review consistency; ChatGPT's multi-turn conversation memory is
-  one of relay's key advantages over stateless API calls.
+- User has authorized this workflow.
+- **Pin the session at Phase 1 and reuse it across every relay call.**
+  Continuity is the whole point: relay accumulates context across phases, so
+  Phase 5's test brainstorm already knows what Phase 1 decided and what
+  Phase 2 refined. Standard session-context assumptions apply — see
+  SKILL.md.
 
 ---
 
@@ -62,17 +56,14 @@ points you'd want resolved: scope boundaries, in/out, acceptance criteria,
 edge cases, dependencies, risks, naming, non-goals, migration/back-compat
 questions. Do **not** send this list to relay yet.
 
-**Round 1 — relay, independently**. Send relay a prompt containing:
-- The placeholder issue text (full, not summary)
-- Objective context (e.g. link to related code, existing constraint docs)
-- **No** hint of what you (agent) already thought
+**Round 1 — relay, independently**. Send only the placeholder issue text
+(full, not summary). **No hint** of what you (agent) already thought.
 
 Prompt skeleton:
 ```text
-下面是一个 placeholder issue，我们想把它 refine 到可以直接实现。请列出你觉得
-在动手前必须明确的 decision points（scope 边界、AC、edge cases、依赖、风险、
-naming、non-goals、migration 问题等）。请按类别分组列出，每个点简述为什么它
-重要。
+下面是一个 placeholder issue，我们想 refine 到可以直接实现。请独立列出你觉得
+动手前必须明确的 decision points（scope 边界、AC、edge cases、依赖、风险、
+naming、non-goals、migration 问题等），按类别分组，每点简述为什么重要。
 
 --- issue ---
 <placeholder 全文>
@@ -84,13 +75,12 @@ naming、non-goals、migration 问题等）。请按类别分组列出，每个�
 - Relay-only: judge — did agent miss it, or is it noise?
 - Conflicts (same point, opposite view): mark for discussion round
 
-**Round 3+ — discussion (only if significant diffs/conflicts)**. Send relay
-(same session):
+**Round 3+ — discussion (only if significant diffs/conflicts)**. Send relay:
 ```text
 我独立列出的 decision points 是 <A>；你列的是 <B>。请指出：
-- 我遗漏的关键点（如果有）
+- 我遗漏的关键点
 - 你没考虑到的约束
-- 对冲突点 <X> 的 rationale trade-off
+- 冲突点 <X> 的 rationale trade-off
 ```
 Iterate. Hard cap: 3 rounds beyond Round 1.
 
@@ -100,11 +90,9 @@ Iterate. Hard cap: 3 rounds beyond Round 1.
 - Substantive stalemate → **stop, present both views to user for tiebreak**
 - Hard cap reached → same as stalemate
 
-**Checkpoint before Phase 2**:
-- If any point that emerged is genuinely a **user decision** (product
-  direction, scope tradeoff, "do we support X?"), stop and ask user before
-  drafting the refined issue. Don't auto-resolve.
-- If everything is engineering-technical and convergence is clean, proceed.
+**Checkpoint before Phase 2**: if any point that emerged is genuinely a
+**user decision** (product direction, scope tradeoff, "do we support X?"),
+stop and ask user. Don't auto-resolve.
 
 ---
 
@@ -114,13 +102,11 @@ Agent drafts a complete refined issue body incorporating the Phase 1
 synthesis. Include:
 - **Problem statement** (what and why)
 - **Scope**: in / out / explicitly not-goals
-- **Design overview** (rough approach)
 - **Acceptance criteria** (concrete, testable)
 - **Dependencies / risks**
 - **Open questions** (if any left)
 
-Send to relay for review (this is now standard review mode, not discussion —
-see SKILL.md § Sending a review). Prompt skeleton:
+Send to relay for review (standard review mode). Prompt skeleton:
 ```text
 请作为严格的 PM/工程 reviewer 审查下面的 refined issue body。重点检查：
 scope 是否清楚、AC 是否可执行、依赖 / 风险是否遗漏、是否有含糊措辞。
@@ -136,17 +122,13 @@ round is fine to ignore.
 
 ## Phase 3 — User checkpoint before implementation
 
-Present the refined issue draft to the user. **Do not skip this**.
+Present the refined issue draft to the user.
 
-User either:
-- **Approves** → `gh issue create` (or `gh issue edit <n>` if placeholder
+- **Approved** → `gh issue create` (or `gh issue edit <n>` if placeholder
   already exists on GitHub). Proceed to Phase 4.
 - **Requests changes** → back to Phase 2 with user's feedback.
-- **Aborts** → stop; the value from Phase 1 synthesis is still worth
-  recording somewhere the user can find it.
-
-Implementation without a user-signed issue is high risk — a wrong scope
-decision downstream wastes hours.
+- **Aborted** → stop; still record the Phase 1 synthesis somewhere the user
+  can find it.
 
 ---
 
@@ -159,43 +141,29 @@ Standard agent implementation, driven by the issue's AC:
   **stop and go back to Phase 1 for that specific point** — do not silently
   guess
 
-Push to a feature branch. Do not open a PR yet if you plan to run Phase 5
-before writing tests (tests should be part of the initial PR).
+Push to a feature branch. Don't open a PR yet.
 
 ---
 
 ## Phase 5 — Test coverage brainstorming (discussion mode)
 
-Same shape as Phase 1, but for test cases. Goal: don't ship with obvious
-blind spots.
+Same shape as Phase 1, but for test cases.
 
 **Round 0 — agent, independently**. In scratchpad, list test cases based on
-your reading of the code + issue AC. Cover: happy path, edge cases,
-boundaries (numeric, empty, malformed), failure modes, concurrency / state
-if applicable.
+your reading of the code + issue AC: happy path, edge cases, boundaries,
+failure modes, concurrency / state if applicable.
 
-**Round 1 — relay, independently**. Send:
-- Code under test (as GitHub URLs if pushed, else inline)
-- Issue AC
-- **No** hint of what you already listed
+**Round 1 — relay, independently**. Send the pushed code URL and reference
+the issue (which relay already reviewed in Phase 2 within this session):
 
-Prompt skeleton:
 ```text
-下面是待测的代码和它对应的 AC。请列出你会覆盖的 test cases，每个 case 简述
-测什么以及为什么重要。按类别分组：happy path / edge / boundary / failure /
-其他。
-
---- 代码 ---
-<file content 或 URL>
-
---- AC ---
-<AC 列表>
+Phase 4 的实现已经 push 到 <branch URL>。基于我们在这个会话里 refine 过的
+issue AC，请独立列出你会覆盖的 test cases，每个 case 简述测什么、为什么重要。
+按类别分组：happy / edge / boundary / failure / 其他。
 ```
 
-**Round 2 / 3+** — same merge / diff / discuss as Phase 1.
-
-**Termination**: same as Phase 1. Convergence typically here means
-"both agree on the critical cases; the residual diffs are 'nice to have'
+**Round 2 / 3+ / termination**: same as Phase 1. Convergence here typically
+means "both agree on the critical cases; residual diffs are 'nice to have'
 vs 'not worth it'."
 
 ---
@@ -207,35 +175,39 @@ Agent implements the test set from Phase 5 synthesis. Confirm:
 - Full test suite still passes
 - Coverage of every AC bullet from the refined issue
 
-Commit + push to the same feature branch. Open a PR (draft is default):
+Commit + push to the same feature branch. Open a **draft** PR:
 ```bash
 gh pr create --draft --title "..." --body "..."
 ```
 
-PR body should reference the issue and briefly summarize what was implemented.
+PR body: reference the issue, summarize what was implemented, and map each
+AC bullet to the code / tests that satisfy it. (Relay already knows the
+issue and the test strategy from earlier phases, so you don't need to
+restate them for Phase 7.)
 
 ---
 
 ## Phase 7 — Relay reviews PR
 
-Send the **PR URL** to relay (see agent-instructions.md § PR review). Do
-not inline the diff. Prompt skeleton:
+Send the PR URL to relay (see agent-instructions.md § PR review). Do not
+inline the diff. Prompt skeleton:
 ```text
-请作为严格的代码 reviewer review 下面这个 PR。优先列必须修改的问题；
-如果没有阻塞问题，请明确说可以合并，并列出剩余的风险 / 后续任务。
+请作为严格的代码 reviewer review 下面这个 PR，实现了我们之前 refine 过的
+issue。优先列必须修改的问题；如果没有阻塞问题，请明确说可以合并，并列出
+剩余的风险 / 后续任务。
 
 PR: <url>
 ```
 
 Iterate:
 - Real issue → agent fixes → commit + push same branch → same URL for
-  re-review (ChatGPT will re-fetch the updated PR)
+  re-review
 - Style / preference feedback in last round → note in handoff, don't
   necessarily change
 - Convergence: relay explicitly says "no blocking issues" or "safe to
   request human review"
 
-**Do not** merge or mark ready-for-review autonomously.
+Do **not** merge or mark ready-for-review autonomously.
 
 ---
 
@@ -244,16 +216,14 @@ Iterate:
 Present to the user:
 1. **PR link** (still draft)
 2. **What was refined vs the placeholder** — one paragraph
-3. **Coverage of AC** — checklist showing each AC bullet → which test(s)
-   / code path
-4. **Remaining risks / open questions** relay flagged that were not
-   auto-resolved
-5. **Decisions made** where relay and agent initially disagreed, and how
-   they were resolved
-6. **Explicitly ask**: draft or ready-for-review? merge criteria?
+3. **AC coverage** — checklist mapping each AC bullet → tests / code
+4. **Decisions and disagreements** — where relay and agent initially
+   disagreed (in Phase 1 or Phase 5), how it was resolved, and any
+   remaining risks / open questions relay flagged
+5. **Explicitly ask**: draft or ready-for-review? merge criteria?
 
-User confirms → done. User promotes to ready-for-review or merges as
-they see fit.
+User confirms → done. User promotes to ready-for-review or merges as they
+see fit.
 
 ---
 
@@ -261,30 +231,11 @@ they see fit.
 
 - **Never merge, mark ready-for-review, or close the issue autonomously.**
   Every phase either continues or hands to user.
-- **Same session across all phases** of a single issue-to-PR run.
+- **Same session across all phases.** Non-negotiable — the workflow relies
+  on relay's accumulating context.
 - **If relay pauses / captcha at any phase**: stop, tell user, do not retry.
-- **If relay repeatedly signals no context** (see downgrade signals in
-  SKILL.md): don't push through with guesses. Either supply the missing
-  context inline (with a note), or ask user to pull the right conversation
-  to the foreground.
 - **If the issue turns out to be trivial** (small bug fix, one-liner):
-  abort the workflow and ask user if lightweight mode is preferred.
-- **Discussion mode is not required in every phase**: Phase 2 (issue review)
-  and Phase 7 (PR review) are review mode (one voice: relay), because agent
-  already made the concrete artifact. Phase 1 and Phase 5 use discussion
-  mode because independence matters *before* an artifact exists.
-
-## Time / effort
-
-Approximate wall clock:
-- Phase 1: 3–5 minutes (2 relay round-trips + potential discussion)
-- Phase 2: 2–5 minutes per review iteration (usually 1–2 iterations)
-- Phase 3: 1–5 minutes user review
-- Phase 4: minutes to hours depending on implementation
-- Phase 5: 3–5 minutes
-- Phase 6: minutes to hours
-- Phase 7: 2–5 minutes per iteration
-- Phase 8: 1–5 minutes user handoff
-
-Full workflow: usually 20–60 minutes of orchestration overhead beyond
-raw implementation. Skip only when scope is trivial.
+  abort and ask user if lightweight mode is preferred.
+- **Discussion mode only at Phase 1 and Phase 5** (before an artifact
+  exists, where independence matters). Phase 2 and Phase 7 are review mode
+  because agent already produced the concrete artifact.
