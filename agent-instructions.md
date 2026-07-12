@@ -96,26 +96,56 @@ cgcon 是本地 SQLite 队列服务，agent 提交 task → 浏览器扩展在 C
 ## 端点：`GET /v1/tasks/:id` — 查询 / 长轮询
 
 **查询参数**：
-- `wait=<ms>`：server 侧长轮询，最多挂起 `min(wait, 60000)` ms 直到 task 进入 terminal
+- `wait=<ms>`：server 侧长轮询上限，最多挂起 `min(wait, 60000)` ms。单次
+  HTTP 上限 **60 秒**（服务端 hard cap）。省略或 0 = 立即返回。
 
-**响应**：完整 Task 对象（含 `text`）。**长轮询超时返回当前非-terminal 状态**（不是错误）。
+**响应**：完整 Task 对象（含 `text`）。**长轮询超时返回当前非-terminal 状态**
+（不是错误、不是超时错误）。`404` 表示 taskId 不存在或已被清理。
 
-**用法**：
+### 关键语义：长轮询超时 ≠ 任务超时
+
+`?wait=<ms>` 只是**这一次 HTTP 请求**的挂起上限，跟 task 本身的生命周期完全
+独立。超时返回后**再次拉**（甚至下次进程启动后）仍能拿到最新状态，直到 task
+进入 terminal 或 task 被从数据库删除。
+
+具体：
+- 拿到 `done` → `reply` 是最终答复
+- 拿到 `failed | cancelled | expired` → `error` 是原因，reply 永远为 null
+- 拿到 `queued | in_progress` → 任务仍在推进，隔一会儿再拉
+
+`expired` 是唯一**不可挽回**的失败：一旦 `Date.now() > expiresAt`
+（= `submittedAt + timeoutMs`）且仍未进入 terminal，服务端维护线程会把它标为
+expired，扩展也不会再处理它。所以 `timeoutMs` 要给足；默认 5 分钟对 review
+一般够用，长文档建议 10-15 分钟。
+
+### 推荐拉取方式
+
+**Agent 侧**：循环 `wait=60000`（最大化利用 hard cap，减少网络往返到"每分钟一次"）：
+
 ```bash
-# 立即查询
-curl -s http://127.0.0.1:8765/v1/tasks/<id>
-
-# 长轮询到完成（推荐：循环 wait=30000 直到 terminal）
 while :; do
-  t=$(curl -s "http://127.0.0.1:8765/v1/tasks/<id>?wait=30000")
-  status=$(echo "$t" | jq -r .status)
-  case "$status" in
-    done|failed|cancelled|expired) echo "$t"; break ;;
+  r=$(curl -s "http://127.0.0.1:8765/v1/tasks/$T?wait=60000")
+  s=$(echo "$r" | jq -r .status)
+  case "$s" in
+    done)                      echo "$r" | jq -r .reply; break ;;
+  # 其它 terminal
+    failed|cancelled|expired)  echo "$r" | jq -r .error >&2; exit 2 ;;
+  # queued / in_progress → 静默继续
   esac
 done
 ```
 
-`404` 表示 taskId 不存在或已被清理。
+**中断后恢复**：只要记下过 taskId，进程崩溃 / Ctrl-C / 重启后依旧能拉：
+
+```bash
+# 数小时后（只要没到 expiresAt）
+curl -s "http://127.0.0.1:8765/v1/tasks/$T?wait=60000"
+```
+
+**避免的反模式**：
+- ❌ 不带 `wait` 参数每秒轮询一次 → 浪费 CPU + 网络
+- ❌ `wait > 60000` 期望挂更久 → 服务端会 cap 到 60s
+- ❌ 单次 HTTP 超时就放弃 → 应该继续拉，任务往往仍在跑
 
 ## 端点：`DELETE /v1/tasks/:id` — 取消
 
