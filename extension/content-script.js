@@ -482,6 +482,7 @@
         }
         if (msg.type === "clear-inflight") {
           clearInflight();
+          try { updateBanner(`Relay: ${getSessionId().slice(0, 8)}…`, "#10a37f"); } catch {}
           sendResponse({ status: "ok" });
         } else if (msg.type === "get-session-id") {
           sendResponse({ session: getSessionId() });

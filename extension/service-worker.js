@@ -150,8 +150,8 @@ const offlineSessions = new Set();
 // task 完成 / 失败 / 服务端强制超时 均走这里，避免 banner 卡在"等待回复"蓝色。
 async function notifyTabCleared(tabId) {
   if (!tabId) return;
+  // clear-inflight handler 里会同步复位 banner 到 "Relay: <sess8>…"
   try { await chrome.tabs.sendMessage(tabId, { type: "clear-inflight" }); } catch {}
-  try { await chrome.tabs.sendMessage(tabId, { type: "update-banner", text: "Relay", color: "#10a37f" }); } catch {}
 }
 
 // ── pending-reply state machine ──
@@ -176,6 +176,8 @@ async function setPendingReply(taskId, rec) {
   const map = await listPendingReplies();
   map[taskId] = rec;
   await setStorage(STORAGE_KEYS.PENDING_REPLIES, map);
+  // 触发快速采样循环（非阻塞，若已在跑就是 no-op）
+  void scheduleFastPending();
 }
 async function deletePendingReply(taskId) {
   const map = await listPendingReplies();
@@ -341,6 +343,30 @@ async function requeuePending(taskId, rec) {
   await deletePendingReply(taskId);
   await clearInflight(rec.session);
   await notifyTabCleared(rec.tabId);
+}
+
+// ── 快速采样调度 ──
+// chrome.alarms 最小周期 1 分钟；对已有 pending 任务这个粒度太粗（用户等 ~60s
+// 才能拿到已经生成完的 reply）。pending 非空时用 setTimeout 快速循环
+// (FAST_POLL_MS) 加速采样，pending 清空后自然退出，靠 alarm + heartbeat 兜底
+// 保证 SW 不被休眠。
+const FAST_POLL_MS = 2000;
+let fastPollScheduled = false;
+async function scheduleFastPending() {
+  if (fastPollScheduled) return;
+  const map = await listPendingReplies();
+  if (Object.keys(map).length === 0) return;
+  fastPollScheduled = true;
+  const tick = async () => {
+    try { await pollPendingReplies(); } catch (e) { console.warn("[cgcon sw] fast tick failed", e); }
+    const cur = await listPendingReplies();
+    if (Object.keys(cur).length > 0) {
+      setTimeout(tick, FAST_POLL_MS);
+    } else {
+      fastPollScheduled = false;
+    }
+  };
+  setTimeout(tick, FAST_POLL_MS);
 }
 
 // ── 轮询 ──
