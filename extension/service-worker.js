@@ -76,13 +76,47 @@ async function listChatGPTTabs() {
   return chrome.tabs.query({ url: "https://chatgpt.com/*" });
 }
 
-async function getTabSession(tabId) {
+async function getTabSession(tabId, opts = {}) {
+  // 缓存命中直接返回（后台 tab 里 sendMessage 会被节流甚至阻塞）
+  const cached = tabSessionCache.get(tabId);
+  if (cached && !opts.forceFresh) return cached;
+  // 冷路径：真的问 content-script
   try {
-    const r = await chrome.tabs.sendMessage(tabId, { type: "get-session-id" });
-    return r?.session ?? null;
+    const r = await Promise.race([
+      chrome.tabs.sendMessage(tabId, { type: "get-session-id" }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error("sendMessage timeout")), 3000)),
+    ]);
+    if (r?.session) {
+      await rememberTabSession(tabId, r.session);
+      return r.session;
+    }
+    return null;
   } catch {
     return null;
   }
+}
+
+// ── tab -> session 缓存 ──
+// SW 会休眠，重启时缓存丢失；但 content-script 每 3s 会 session-hello 重新报，
+// 所以下一轮 alarm 时就能重建。
+const tabSessionCache = new Map();
+
+async function rememberTabSession(tabId, session) {
+  tabSessionCache.set(tabId, session);
+  // 也写到 storage 便于 SW 重启后即时可用
+  const saved = (await getStorage("tab_session_map", {}));
+  saved[tabId] = session;
+  await setStorage("tab_session_map", saved);
+}
+async function loadTabSessionCache() {
+  const saved = (await getStorage("tab_session_map", {}));
+  for (const [k, v] of Object.entries(saved)) tabSessionCache.set(Number(k), v);
+}
+async function forgetTabSession(tabId) {
+  tabSessionCache.delete(tabId);
+  const saved = (await getStorage("tab_session_map", {}));
+  delete saved[tabId];
+  await setStorage("tab_session_map", saved);
 }
 
 // ── inflight tracking ──
@@ -136,7 +170,10 @@ async function handleTab(tabId) {
   }
 
   const session = await getTabSession(tabId);
-  if (!session) return;
+  if (!session) {
+    console.log("[cgcon sw] tab", tabId, "has no known session; skipping");
+    return;
+  }
   if (offlineSessions.has(session)) return;
 
   const inflight = await getInflight(session);
@@ -256,9 +293,16 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
+chrome.tabs.onRemoved.addListener((tabId) => { void forgetTabSession(tabId); });
+chrome.tabs.onUpdated.addListener((tabId, info) => {
+  // URL 变化时清缓存，让 content-script 重新报 session id
+  if (info.url) void forgetTabSession(tabId);
+});
+
 chrome.runtime.onInstalled.addListener(() => { void ensureAlarms(); });
 chrome.runtime.onStartup.addListener(() => { void ensureAlarms(); });
 void ensureAlarms();
+void loadTabSessionCache();
 void reconcileInflight();
 
 // ── 消息桥接 ──
@@ -266,8 +310,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const type = msg?.type;
 
   if (type === "session-hello") {
-    if (sender.tab?.id) {
-      handleTab(sender.tab.id).catch((e) => console.warn("[cgcon sw] hello poll failed", e));
+    if (sender.tab?.id && msg.session) {
+      rememberTabSession(sender.tab.id, msg.session).then(() => {
+        handleTab(sender.tab.id).catch((e) => console.warn("[cgcon sw] hello poll failed", e));
+      });
     }
     sendResponse({ status: "ok" });
     return true;
