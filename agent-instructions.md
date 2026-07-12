@@ -90,23 +90,53 @@ Relay 不止是 one-shot review 的执行器。**当用户明确允许**、且�
 **为什么**：LLM 有 sycophancy 倾向——先看到对方的答案就容易顺着走。强制
 "双方 blind output 后再合流"能拿到真的第二意见，而不是回声。
 
-### 核心原则：顺序保证独立
+### 核心原则：并行独立 + barrier
 
-**谁看谁的 prompt 决定了谁受谁影响。** 必须保证：
-1. Agent 先在**自己的 scratchpad**（内部草稿 / 工具调用日志）里写出独立观点
-   —— 不要写完就发给 relay；
-2. **Relay 收到的第一条 prompt 里只含任务描述和必要客观事实**（issue
-   placeholder、待测代码、约束条件），**不含 agent 的观点**；
-3. 拿到 relay 的独立观点后，agent 再进入"综合 / 讨论"阶段。
+**谁看谁的 prompt 决定了谁受谁影响。** 讨论模式的独立性靠**两条硬 barrier**
+保证，两条都满足时 agent 与 relay 的独立思考**可以（且推荐）并行**：
 
-违反 1 或 2 就退化成 review 模式，讨论价值消失。
+1. **Submit relay 之前，agent 不写任何观点**——先构造好只含任务描述与必要
+   客观事实（issue placeholder、待测代码、约束条件）的 prompt，**submit
+   之后**才允许开始本地推理；
+2. **拿到 relay 结果之前，agent 必须把自己的独立结论落到可见文本**
+   （scratchpad / 草稿文件 / 消息 draft），不能只放在"心里"。这样综合阶段
+   有两份可对照的独立文本，避免事后"我本来也是这么想的"式合流；
+3. Relay 的第一条 prompt **不含 agent 的观点**；agent 拿到 relay 独立观点
+   后才进入"综合 / 讨论"阶段。
+
+违反任意一条就退化成 review 模式，讨论价值消失。
+
+**为什么要并行**：agent 本地推理通常 5–30s，relay 一次往返 20–90s，串行
+= 两者相加，并行 = max(两者)。用非阻塞提交把两段时间叠起来是"免费"收益，
+且更贴合讨论的语义（同行同时下笔，再交换）。
+
+**并行姿势**（伪代码）：
+
+```ts
+// T0: 先 submit relay 拿 taskId（非阻塞）
+const { taskId } = await submitTask({ session, text: contextOnly, timeout: 600_000 });
+// T0+ε: 立刻开始本地独立思考，并在 relay 回来之前写到 scratchpad
+const agentThoughts = await thinkIndependentlyAndPersist(context);
+// T1: 再阻塞等 relay（通常此时已经或即将返回）
+const relayThoughts = await waitForTask(taskId, { timeoutMs: 600_000 });
+// T2: 综合
+const merged = synthesize(agentThoughts, relayThoughts);
+```
+
+**不适合并行的场景**（保持串行）：
+- **Context 尚未定型**：雏形阶段两方对问题的理解就不同，先串行对齐 context
+  再并行发散；
+- **设计上就是串行**（agent 先决定范围 → relay 基于范围 review）：这不属于
+  讨论模式，别硬套。
 
 ### 流程模板
 
 ```
-Round 0: agent 在 scratchpad 独立思考 → agent-output-A
-Round 1: relay 收到"只含任务与客观事实"的 prompt → relay-output-B
-        （此时 agent-output-A 尚未发给 relay）
+Round 0 & 1 (并行):
+        - 先向 relay submit 只含任务与客观事实的 prompt（拿 taskId）
+        - 同时 agent 在 scratchpad 独立思考 → 落到文本 agent-output-A
+        - 等 relay 返回 → relay-output-B
+        （barrier：submit 前 agent 不写观点；拿到 B 前 A 必须已落文本）
 Round 2: agent 比对 A 和 B，识别：
         - 交集（双方都覆盖的点）
         - 差集 A\B（agent 独有）
@@ -126,10 +156,12 @@ Round 3+ (可选): 若差集或冲突显著，agent 发讨论 prompt：
 想让 issue body 从粗糙 draft 到打磨到位时，讨论优于单次 review：
 
 ```
-Round 0: agent 从 placeholder / requirements 独立列决策点，例如：
-         ["scope 是否包含 X？", "AC 是否要包含性能指标？", ...]
-Round 1: 只把 placeholder / 概要给 relay，问"列出你觉得需要明确的决策点"
-         → relay 独立给出一份决策点清单
+Round 0 & 1 (并行):
+         - submit relay：只把 placeholder / 概要发过去，问"列出你觉得需要
+           明确的决策点"
+         - 同时 agent 从 placeholder / requirements 独立列决策点，写入
+           scratchpad（例如 ["scope 是否包含 X？", "AC 是否要包含性能指标？", ...]）
+         - 等 relay 返回其独立决策点清单
 Round 2: agent 综合两份清单 → 一份决策点 union；
          对分歧项（一方有一方无 / 双方相反）标注
 Round 3+ (若需要): 就分歧项让 relay 进一步讨论
@@ -142,9 +174,12 @@ Round N: 收敛后，agent 用综合决策点重新起草 issue body（此时可
 写 test 前决定覆盖哪些路径 / 边界：
 
 ```
-Round 0: agent 独立列 test cases（基于自己读代码的理解）
-Round 1: 给 relay 待测代码 + 需求描述，问"你会覆盖哪些场景？
-         列 cases 和理由"
+Round 0 & 1 (并行):
+         - submit relay：给待测代码 + 需求描述，问"你会覆盖哪些场景？
+           列 cases 和理由"
+         - 同时 agent 独立列 test cases（基于自己读代码的理解），写入
+           scratchpad
+         - 等 relay 返回其独立 case 清单
 Round 2: agent 对比两份 case 清单：
          - 双方都列的 → 高置信度必写
          - 单方独有 → 判断是遗漏、是过度覆盖、还是各有侧重
@@ -182,6 +217,10 @@ Round N: 收敛后写 tests
 - ❌ 每轮都新起 conversation —— 讨论模式**要利用 relay session 的连续
   上下文**，用**同一 session**多次 POST（相当于 ChatGPT 侧多轮对话）；
   这也是 relay 相对 API 的一大优势
+- ❌ 串行等 relay 再开始本地思考 —— 白白浪费 20–90s；应在 submit 后立刻
+  并行推理（前提是不违反两条 barrier）
+- ❌ agent 独立结论只放"心里"，等 relay 回来后再"回忆" —— 无法验证独立性，
+  容易 post-hoc 合流；必须先落到可见文本
 
 ---
 

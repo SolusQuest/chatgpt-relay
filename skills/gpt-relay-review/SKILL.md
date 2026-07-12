@@ -121,13 +121,25 @@ architecture / naming choices, etc.), one-shot review can be extended into
 merge. This reduces LLM sycophancy — whoever sees the other's answer first
 tends to drift toward it.
 
-**Core rule: ordering guarantees independence.**
+**Core rule: two barriers guarantee independence — run in parallel within
+them.** Agent reasoning is usually 5–30s while a relay round-trip is 20–90s;
+serialising wastes the whole relay wait. As long as both barriers hold, agent
+thinking and relay thinking should run **concurrently**.
+
+Barriers (must both hold):
+1. **Agent writes no opinion before submitting relay.** Build a facts-only
+   prompt first (task description, issue placeholder, code, constraints);
+   submit that; **only then** start agent's own reasoning.
+2. **Agent's independent output must be persisted (scratchpad / draft file /
+   message draft) before reading relay's reply.** No "I had that in my head".
 
 ```
-Round 0: agent thinks independently in its scratchpad → output A
-         (do NOT send to relay yet)
-Round 1: send relay a prompt containing ONLY the task + objective facts
-         (issue placeholder, code under test, requirements) → output B
+Round 0 & 1 (parallel):
+         - submit relay with a facts-only prompt (non-blocking → taskId)
+         - immediately start agent reasoning in scratchpad → output A
+           (persisted before polling relay back)
+         - poll relay → output B
+         (barriers: no agent opinion in submit; A written before reading B)
 Round 2: agent compares A vs B — identify overlap, agent-only,
          relay-only, and conflicts
 Round 3+ (optional): if diffs/conflicts are significant, send relay a
@@ -135,6 +147,22 @@ Round 3+ (optional): if diffs/conflicts are significant, send relay a
          missing? What are you not considering? For conflict <X>, what's
          the rationale trade-off?" → output C, iterate.
 ```
+
+Parallel shape via the CLI (or API):
+```bash
+# 1) submit relay, non-blocking → prints JSON {"taskId":"..."}
+TASK=$(gpt-relay review --session <id> --stdin --no-wait < facts.txt | jq -r .taskId)
+# 2) do agent's own reasoning, persist to scratchpad-A.md
+# 3) once A is written, fetch relay's reply
+gpt-relay show "$TASK"        # snapshot; or GET /v1/tasks/:id?wait=60000
+```
+Or hit the API directly: `POST /v1/tasks` returns `{taskId,status}`
+immediately; later `GET /v1/tasks/:id?wait=<ms>` long-polls until terminal.
+See agent-instructions.md for the full API.
+
+**When NOT to parallelise**: context still forming (align context serially
+first, then diverge); or when the flow is intentionally sequential (agent
+decides scope → relay reviews that scope — this is review, not discussion).
 
 Reuse the **same session** across rounds (`--cri` optional; multi-turn
 context is one of gpt-relay's advantages over stateless API calls).
@@ -148,8 +176,11 @@ context is one of gpt-relay's advantages over stateless API calls).
 - External: session paused, degradation signal, user interrupt
 
 **Anti-patterns**:
-- Putting agent's opinion in the Round 1 prompt → degrades to review mode
+- Putting agent's opinion in the submit prompt → degrades to review mode
 - Asking relay to grade agent's answer → same
+- Blocking on relay before starting agent-side reasoning → wastes 20–90s
+- Keeping agent's independent output "in head" until relay returns →
+  cannot audit independence, invites post-hoc drift
 - Discussing until "looks perfect" → overfit; discussion is for blind-spot
   detection, not polish
 - Replacing user decisions with agent+relay consensus

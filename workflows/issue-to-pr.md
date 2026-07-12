@@ -2,7 +2,6 @@
 
 **References**:
 - Relay API + usage patterns: [`agent-instructions.md`](../agent-instructions.md)
-- Skill (if invoked as a Codex/Claude skill): [`skills/gpt-relay-review/SKILL.md`](../skills/gpt-relay-review/SKILL.md)
 
 ---
 
@@ -51,13 +50,22 @@ Goal: figure out **all** the decisions that must be made explicit before the
 issue can be called "refined". Use double-blind discussion mode to avoid
 sycophancy.
 
-**Round 0 — agent, independently**. In scratchpad only, list the decision
-points you'd want resolved: scope boundaries, in/out, acceptance criteria,
-edge cases, dependencies, risks, naming, non-goals, migration/back-compat
-questions. Do **not** send this list to relay yet.
+**Round 0 & 1 — agent + relay in parallel** (recommended). Two hard barriers
+guarantee independence, and within those barriers **run both concurrently** to
+save the ~20–90s relay round-trip:
 
-**Round 1 — relay, independently**. Send only the placeholder issue text
-(full, not summary). **No hint** of what you (agent) already thought.
+1. **Submit relay first (non-blocking)** with only the placeholder issue text
+   (full, not summary). **No hint** of anything you (agent) already thought.
+2. **After submit, immediately start agent's own thinking in scratchpad**:
+   list the decision points you'd want resolved — scope boundaries, in/out,
+   acceptance criteria, edge cases, dependencies, risks, naming, non-goals,
+   migration/back-compat questions. **Persist to a visible draft** before
+   polling relay back.
+3. Poll relay for its independent list.
+
+The barriers: (a) submit relay **before** writing any agent opinions; (b)
+agent's list must be written down **before** reading relay's reply. Violate
+either and it degrades to review mode.
 
 Prompt skeleton:
 ```text
@@ -149,12 +157,18 @@ Push to a feature branch. Don't open a PR yet.
 
 Same shape as Phase 1, but for test cases.
 
-**Round 0 — agent, independently**. In scratchpad, list test cases based on
-your reading of the code + issue AC: happy path, edge cases, boundaries,
-failure modes, concurrency / state if applicable.
+**Round 0 & 1 — agent + relay in parallel** (same shape as Phase 1):
 
-**Round 1 — relay, independently**. Send the pushed code URL and reference
-the issue (which relay already reviewed in Phase 2 within this session):
+1. **Submit relay first (non-blocking)** with the pushed code URL and a
+   reference to the issue (which relay already reviewed in Phase 2 within
+   this session). Prompt below.
+2. **After submit, immediately** list test cases in scratchpad based on your
+   reading of the code + issue AC: happy path, edge cases, boundaries,
+   failure modes, concurrency / state if applicable. **Persist before
+   polling relay back.**
+3. Poll relay for its independent case list.
+
+Relay prompt skeleton:
 
 ```text
 Phase 4 的实现已经 push 到 <branch URL>。基于我们在这个会话里 refine 过的

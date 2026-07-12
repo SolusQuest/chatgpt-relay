@@ -230,7 +230,7 @@ async function cmdReview(args: string[]): Promise<number> {
     console.error(`task ${r.taskId} ${r.status}: ${r.error ?? "(no error)"}`);
     return 2;
   }
-  console.log(`queued taskId=${r.taskId}`);
+  console.log(JSON.stringify({ taskId: r.taskId, status: r.status }));
   return 0;
 }
 
