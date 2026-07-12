@@ -19,11 +19,9 @@ export const STORAGE_KEYS = {
   PENDING_REPLIES: "pending_replies", // Map<taskId, PendingReplyRecord>
 };
 
-// pending-reply state machine 常量
-// Chrome 冻结后台 tab 的 MutationObserver + setInterval，因此不能让 content
-// script 里的 waitForReply 长期挂着。SW 用 alarm 定时通过 sendMessage 唤醒
-// content script 做单次 DOM 快照。
+// pending-reply state machine 常量。SW 每次 alarm tick 通过 sendMessage(poll-reply)
+// 唤醒 content script 做单次 DOM 快照；见 service-worker.js pollOnePending。
 export const POLL_REPLY_STABLE_SAMPLES = 2;      // 需要 N 次连续相同快照才判定 done
 export const POLL_NOT_STARTED_MAX = 6;           // 连续 N 次都是 not-started 视为提交丢失
-export const POLL_HARD_TIMEOUT_MS = 10 * 60_000; // pending 硬超时（与 content-script REPLY_TIMEOUT_MS 对齐）
+export const POLL_HARD_TIMEOUT_MS = 10 * 60_000; // pending 硬超时上限（10 分钟）
 export const POLL_REPLY_SENDMSG_TIMEOUT_MS = 6000;

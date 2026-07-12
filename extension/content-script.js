@@ -1,6 +1,14 @@
 // extension/content-script.js
-// 注入到 chatgpt.com 页面：DOM 操作 + safety 探测 + banner + inflight 恢复
-// + 断网检测。与 service-worker 通过 chrome.runtime.sendMessage 通信。SW 负责 HTTP。
+// 注入到 chatgpt.com 页面：DOM 注入 + 提交 + safety 探测 + banner + inflight 恢复 + 断网检测。
+//
+// 架构：这一层只做同步 DOM 操作 + 单次 poll-reply 快照。判定"是否有新回复"用
+// data-message-id（不用 count；ChatGPT 会虚拟滚动 unmount 老消息）。文本读取
+// 用 textContent（不用 innerText，后者依赖 layout）。
+//
+// 长跑的"等回复"逻辑不在这里，改由 service-worker.js 的 pending-reply 状态机
+// 每次 alarm 周期主动通过 sendMessage(poll-reply) 采样。原因是 Chrome 会冻结
+// 后台/未渲染 tab 里的 MutationObserver 和 setInterval，无法用长跑 observer。
+// 即便前台运行，主动采样架构也让"页面 F5 刷新"和"SW 重启"的 recovery 简单。
 
 (() => {
   "use strict";
@@ -54,9 +62,6 @@
 
   const ACTION_DELAY_MIN = 250;
   const ACTION_DELAY_MAX = 900;
-  const REPLY_STABLE_MS = 2500;
-  const REPLY_TIMEOUT_MS = 10 * 60 * 1000;
-  const REPLY_NO_ACTIVITY_MS = 25000;
   const INFLIGHT_KEY = "cgcon_inflight_v3";
   const FETCH_FAIL_THRESHOLD = 3;
   const RELOAD_COOLDOWN_MS = 60_000;
@@ -328,60 +333,6 @@
     return true;
   }
 
-  function waitForReply(baseline) {
-    return new Promise((resolve, reject) => {
-      let stableTimer = null;
-      let lastText = "";
-      let sawAnyActivity = false;
-      const timeout = setTimeout(() => { cleanup(); reject(new Error(`waitForReply timeout ${REPLY_TIMEOUT_MS}ms`)); }, REPLY_TIMEOUT_MS);
-      const noActivityTimer = setTimeout(() => {
-        if (!sawAnyActivity) {
-          cleanup();
-          reject(new Error(`waitForReply: 提交后 ${REPLY_NO_ACTIVITY_MS}ms DOM 完全静止，可能 Lexical 没识别到 send 事件`));
-        }
-      }, REPLY_NO_ACTIVITY_MS);
-
-      function check() {
-        try {
-          const block = findSafetyBlock();
-          if (block) { cleanup(); reject(new Error(`waitForReply safety: ${block.reason}`)); return; }
-        } catch (e) { cleanup(); reject(e); return; }
-        if (isGenerating()) {
-          sawAnyActivity = true;
-          if (stableTimer) { clearTimeout(stableTimer); stableTimer = null; }
-          return;
-        }
-        const msgs = getAssistantMessages();
-        const users = getUserMessages();
-        if (users.length > baseline.userCount || msgs.length > baseline.assistantCount) sawAnyActivity = true;
-        if (msgs.length === 0) return;
-        const last = getLastText(msgs);
-        if (!last) return;
-        const hasNewAssistant = msgs.length > baseline.assistantCount;
-        const hasNewUser = users.length > baseline.userCount || Date.now() - baseline.startedAt > 2000;
-        const changed = last !== baseline.lastAssistantText;
-        if (!(hasNewAssistant || (hasNewUser && changed))) return;
-
-        if (last === lastText) return;
-        lastText = last;
-        if (stableTimer) clearTimeout(stableTimer);
-        stableTimer = setTimeout(() => { cleanup(); resolve(last); }, REPLY_STABLE_MS);
-      }
-
-      const observer = new MutationObserver(check);
-      observer.observe(document.body, { childList: true, subtree: true, characterData: true });
-      const iv = setInterval(check, 500);
-      function cleanup() {
-        observer.disconnect();
-        clearInterval(iv);
-        clearTimeout(timeout);
-        clearTimeout(noActivityTimer);
-        if (stableTimer) clearTimeout(stableTimer);
-      }
-      check();
-    });
-  }
-
   // ── 页面加载后尝试回捞上次的 inflight ──
   async function tryRecoverInflight() {
     const rec = readInflight();
@@ -565,10 +516,8 @@
           await clickSend();
           updateBanner(`等待回复: ${msg.taskId?.slice?.(0, 8) ?? ""}…`, "#3498db");
 
-          // 关键：不再在 content-script 里 await waitForReply。
-          // 后台 tab 里 MutationObserver / setInterval 都会被 Chrome 冻结，
-          // 因此改由 service worker 每次 alarm 主动 sendMessage poll-reply
-          // 来做单次 DOM 快照。这里立即返回 submitted 让 SW 登记 pendingReplies。
+          // run-task 只做提交：注入 → click send → 记 baseline 到 sessionStorage → 立即返回。
+          // 后续 poll 由 SW 的 pending-reply 状态机负责（见 service-worker.js）。
           sendResponse({ status: "submitted", baseline });
         } else {
           sendResponse({ error: `unknown message type: ${msg.type}` });

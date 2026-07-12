@@ -16,6 +16,10 @@ import {
   POLL_REPLY_SENDMSG_TIMEOUT_MS,
 } from "./lib/config.js";
 
+// 开发调试：把 DEBUG 改成 true 或在 popup 里设置 window.__cgconDebug = true
+const DEBUG = false;
+const dlog = (...args) => { if (DEBUG) console.log(...args); };
+
 async function getStorage(key, fallback) {
   const obj = await chrome.storage.local.get(key);
   return obj[key] ?? fallback;
@@ -151,9 +155,11 @@ async function notifyTabCleared(tabId) {
 }
 
 // ── pending-reply state machine ──
-// Chrome 冻结后台 tab 的 MutationObserver / setInterval，因此不再让 content
-// script 长期挂 waitForReply。SW 每次 alarm 主动通过 chrome.tabs.sendMessage
-// 唤醒 content script 做单次 DOM 快照，把回复采集回来。
+// SW 主动 poll 而非 content-script 长期 await。原因：
+//   1) Chrome 冻结后台 tab 的 MutationObserver / setInterval；
+//   2) 状态在 SW 一处，页面 F5 或扩展 reload 都能自愈；
+//   3) SW 每次 alarm tick 通过 chrome.tabs.sendMessage(poll-reply) 唤醒 content
+//      script 做单次同步 DOM 快照。
 //
 // 记录形如：
 //   {
@@ -185,7 +191,7 @@ async function pollPendingReplies() {
   const map = await listPendingReplies();
   const ids = Object.keys(map);
   if (ids.length === 0) return;
-  console.log("[cgcon sw] pollPendingReplies pending=", ids.length);
+  dlog("[cgcon sw] pollPendingReplies pending=", ids.length);
 
   for (const taskId of ids) {
     const rec = map[taskId];
@@ -200,7 +206,7 @@ async function pollPendingReplies() {
 
 async function pollOnePending(taskId, rec) {
   const now = Date.now();
-  console.log("[cgcon sw] pollOnePending", taskId.slice(0,8), "tab=", rec.tabId, "session=", rec.session?.slice?.(0,8), "notStarted=", rec.notStartedCount, "stable=", rec.stableSampleCount);
+  dlog("[cgcon sw] pollOnePending", taskId.slice(0,8), "tab=", rec.tabId, "session=", rec.session?.slice?.(0,8), "notStarted=", rec.notStartedCount, "stable=", rec.stableSampleCount);
   // 硬超时
   if (now - rec.submittedAt > POLL_HARD_TIMEOUT_MS) {
     console.warn("[cgcon sw] pending reply hard timeout", taskId);
@@ -237,7 +243,7 @@ async function pollOnePending(taskId, rec) {
   }
   rec.lastPollAt = now;
 
-  console.log("[cgcon sw] poll-reply snap", taskId.slice(0,8), "status=", snap?.status, "err=", snap?.error, "text=", (snap?.reply ?? snap?.lastText ?? "").slice(0,40));
+  dlog("[cgcon sw] poll-reply snap", taskId.slice(0,8), "status=", snap?.status, "err=", snap?.error, "text=", (snap?.reply ?? snap?.lastText ?? "").slice(0,40));
   if (!snap || snap.error) {
     console.warn("[cgcon sw] poll-reply error", taskId, snap?.error);
     await setPendingReply(taskId, rec);
@@ -342,10 +348,10 @@ let pollInProgress = false;
 async function pollOnce() {
   if (pollInProgress) return;
   pollInProgress = true;
-  console.log("[cgcon sw] pollOnce start");
+  dlog("[cgcon sw] pollOnce start");
   try {
     const tabs = await listChatGPTTabs();
-    console.log("[cgcon sw] pollOnce tabs=", tabs.length);
+    dlog("[cgcon sw] pollOnce tabs=", tabs.length);
     for (const tab of tabs) {
       if (!tab.id) continue;
       try {
@@ -370,14 +376,14 @@ async function handleTab(tabId) {
 
   const session = await getTabSession(tabId);
   if (!session) {
-    console.log("[cgcon sw] tab", tabId, "has no known session; skipping");
+    dlog("[cgcon sw] tab", tabId, "has no known session; skipping");
     return;
   }
   if (offlineSessions.has(session)) return;
 
   const inflight = await getInflight(session);
   if (inflight) {
-    console.log("[cgcon sw] handleTab skip: session", session.slice(0, 8), "has inflight task", inflight.taskId?.slice?.(0, 8));
+    dlog("[cgcon sw] handleTab skip: session", session.slice(0, 8), "has inflight task", inflight.taskId?.slice?.(0, 8));
     return;
   }
 
@@ -427,7 +433,7 @@ async function handleTab(tabId) {
     const runRes = await chrome.tabs.sendMessage(tabId, {
       type: "run-task", taskId, text,
     });
-    console.log("[cgcon sw] run-task response", taskId.slice(0,8), "status=", runRes?.status, "hasReply=", typeof runRes?.reply === "string", "error=", runRes?.error);
+    dlog("[cgcon sw] run-task response", taskId.slice(0,8), "status=", runRes?.status, "hasReply=", typeof runRes?.reply === "string", "error=", runRes?.error);
     if (runRes?.error) throw new Error(runRes.error);
     if (runRes?.status !== "submitted") {
       // content-script 老版本仍可能返回 { reply }，兼容一下
@@ -439,7 +445,7 @@ async function handleTab(tabId) {
       throw new Error("run-task did not acknowledge submission");
     }
     // 登记 pendingReply，让 SW 主动采样完成
-    console.log("[cgcon sw] registering pendingReply", taskId.slice(0,8), "baseline=", runRes.baseline);
+    dlog("[cgcon sw] registering pendingReply", taskId.slice(0,8), "baseline=", runRes.baseline);
     await setPendingReply(taskId, {
       session,
       tabId,
