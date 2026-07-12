@@ -1,5 +1,5 @@
 // test/smoke.test.ts
-// Smoke test: 启动 v3 relay（测试端口 18766），验证 /health。
+// Smoke test: 启动 relay（测试端口 18766），验证 /health。
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, ChildProcess } from 'node:child_process';

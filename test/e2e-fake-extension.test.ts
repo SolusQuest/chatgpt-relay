@@ -1,5 +1,5 @@
 // test/e2e-fake-extension.test.ts
-// 端到端：起 v3 server + fake 扩展 + agent-client review()，验证完整链路。
+// 端到端：起 server + fake 扩展 + agent-client review()，验证完整链路。
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";

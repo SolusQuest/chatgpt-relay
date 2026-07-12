@@ -1,5 +1,5 @@
 // client/agent-client.ts
-// v3 版 agent-client：基于 /v1 API + pending 目录跨进程持久化。
+// agent-client：基于 /v1 API + pending 目录跨进程持久化。
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

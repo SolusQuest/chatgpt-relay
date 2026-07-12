@@ -1,7 +1,7 @@
 {
   "name": "cgcon",
   "version": "3.0.0-alpha.0",
-  "description": "ChatGPT 网页自动 Relay 工具 (v3: SQLite 队列 + MV3 扩展)",
+  "description": "ChatGPT 网页自动 Relay 工具（SQLite 队列 + MV3 扩展）",
   "main": "server/index.ts",
   "bin": {
     "cgcon": "./bin/cgcon.ts"

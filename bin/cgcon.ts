@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // bin/cgcon.ts
-// v3 CLI: start/health/tasks/show/cancel/sessions/resume/review。
+// cgcon CLI: start/health/tasks/show/cancel/sessions/resume/review。
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

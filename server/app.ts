@@ -28,7 +28,7 @@ export function createApp(config: Config): AppHandle {
   // 扩展端内部 API
   app.use("/internal", createInternalRouter(store));
 
-  // 便捷别名（避免旧脚本调 /health 时 404；只保留一条无害的 alias）
+  // 健康检查（也用作 popup 的 relay 可达性探测）
   app.get("/health", (_req, res) => {
     res.json({ status: "ok", sessions: store.listSessions().length });
   });

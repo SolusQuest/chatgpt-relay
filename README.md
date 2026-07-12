@@ -1,4 +1,4 @@
-# cgcon — ChatGPT Relay v3
+# cgcon — ChatGPT Relay
 
 本地中继服务 + 浏览器扩展，让 AI coding agent 通过网页版 ChatGPT 做 code review /
 决策 / 长文本审阅。零 API 费用，只吃 ChatGPT Plus 订阅额度。
@@ -143,8 +143,7 @@ rm ~/.cgcon/cgcon.db*         # 全清
 
 - `agent-instructions.md` — 给 agent 直接看的 API 说明
 - `skills/cgcon-review/SKILL.md` — Codex/Claude skill 定义
-- `extension/README.md` — 扩展加载 + Phase 4 恢复机制细节
-- `MIGRATION.md` — v2 (tampermonkey) → v3 (extension + SQLite) 变化清单
+- `extension/README.md` — 扩展加载 + 恢复机制细节
 
 ## License
 

@@ -1,5 +1,5 @@
 // server/config.ts
-// v3 运行时配置。所有可调项集中在这里；env > default。
+// 运行时配置。所有可调项集中在这里；env > default。
 import os from "node:os";
 import path from "node:path";
 
