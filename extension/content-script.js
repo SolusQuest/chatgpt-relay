@@ -200,39 +200,75 @@
   }, 10000, 200, "waitForSendReady"); }
 
   // ── 后台友好的注入（不依赖 focus） ──
+  //
+  // ChatGPT 的输入框是 Lexical/ProseMirror 受控组件：改 DOM 无用，必须走 Lexical
+  // 认识的事件流。策略（按可靠性排序）：
+  //   1) 主路径：ClipboardEvent('paste') + DataTransfer。Lexical 有 dedicated
+  //      paste handler，最"官方"的注入方式，且不需要 focus 生效。
+  //   2) 回退：execCommand('insertText')。需要 focus，前台 tab 有效。
+  //   3) 最后兜底：Range 替换 + beforeinput/input 序列。可能只改 DOM 不改 state，
+  //      但作为最后一根稻草仍试一下。
+  //
+  // 注入后主动派发 'change'/'input' 事件通知 React；如果发现 send 按钮持续
+  // disabled，说明状态未同步，抛错让上层重试或明确失败。
   async function pasteIntoInput(text) {
     await waitForPageReady();
     const inp = await waitForInput();
 
-    // 只在页面可见时 scroll/click，避免后台 tab 触发意外行为
     if (!document.hidden) {
       inp.scrollIntoView({ block: "center", inline: "nearest" });
       await pacedDelay(120, 300);
       inp.click();
     }
-
-    // 尝试 focus（后台 tab 会失败，但不影响后续路径）
     try { inp.focus({ preventScroll: true }); } catch { /* ignore */ }
     await pacedDelay(50, 150);
 
-    // Path A：selection + execCommand（focus 生效时最稳）
-    let injectedOk = false;
-    if (document.activeElement === inp) {
+    // 确保 selection 落在输入框内（Lexical paste handler 会检查这个）
+    try {
       const sel = getSelection();
       if (sel) {
-        try { sel.selectAllChildren(inp); } catch { /* ignore */ }
+        sel.removeAllRanges();
+        const range = document.createRange();
+        range.selectNodeContents(inp);
+        range.collapse(false);
+        sel.addRange(range);
       }
-      try {
-        injectedOk = document.execCommand("insertText", false, text);
-      } catch { injectedOk = false; }
+    } catch { /* ignore */ }
+
+    let injectedOk = false;
+    let method = "none";
+
+    // Path 1: ClipboardEvent paste（对 Lexical 最可靠，且不要求 focus）
+    try {
+      const dt = new DataTransfer();
+      dt.setData("text/plain", text);
+      const pasteEvent = new ClipboardEvent("paste", {
+        bubbles: true,
+        cancelable: true,
+        clipboardData: dt,
+      });
+      if (!pasteEvent.clipboardData) {
+        Object.defineProperty(pasteEvent, "clipboardData", { value: dt });
+      }
+      inp.dispatchEvent(pasteEvent);
+      injectedOk = true;
+      method = "paste";
+    } catch (e) {
+      console.warn("[cgcon content] Path 1 (paste event) failed", e);
     }
 
-    // Path B：Range + beforeinput/input，用于后台 tab / execCommand 失效
+    // Path 2: execCommand insertText（前台 tab focused 时最可靠）
+    if (!injectedOk && document.activeElement === inp) {
+      try {
+        const ok = document.execCommand("insertText", false, text);
+        if (ok) { injectedOk = true; method = "execCommand"; }
+      } catch { /* ignore */ }
+    }
+
+    // Path 3: Range 替换 + beforeinput / input（DOM-level 最后兜底）
     if (!injectedOk) {
       try {
-        // 清空现有内容
         while (inp.firstChild) inp.removeChild(inp.firstChild);
-        // 需要给 Lexical/ProseMirror 一个可 render 的结构：外层可编辑区里放一个 <p>
         const p = document.createElement("p");
         p.appendChild(document.createTextNode(text));
         inp.appendChild(p);
@@ -240,31 +276,39 @@
           inp.dispatchEvent(new InputEvent("beforeinput", {
             bubbles: true, cancelable: true, inputType: "insertText", data: text,
           }));
-        } catch { /* older browsers */ }
+        } catch { /* ignore */ }
         inp.dispatchEvent(new InputEvent("input", {
           bubbles: true, cancelable: true, inputType: "insertText", data: text,
         }));
         injectedOk = true;
+        method = "dom-fallback";
       } catch (e) {
-        console.warn("[cgcon content] Path B failed", e);
+        console.warn("[cgcon content] Path 3 (DOM fallback) failed", e);
       }
     }
 
-    // 最后再补一次 input event，触发框架状态同步
-    try {
-      inp.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
-    } catch {
-      inp.dispatchEvent(new Event("input", { bubbles: true }));
-    }
-    await pacedDelay(250, 500);
+    await pacedDelay(300, 600);
 
-    // 校验：应至少注入了 min(target, target) 长度中较小者（放宽后台 tab 的空白差异）
     const injected = inp.innerText.trim();
     if (injected.length < Math.min(10, text.trim().length)) {
-      throw new Error("文本注入失败，输入框内容为空");
+      throw new Error(`文本注入失败 (method=${method})，输入框内容为空`);
     }
-  }
 
+    // 校验 Lexical state 是否同步：send button 是否 enabled
+    const sendReady = await waitForCondition(() => {
+      const b = findSendButton();
+      if (!b) return null;
+      if (b.disabled) return null;
+      if (b.getAttribute("aria-disabled") === "true") return null;
+      return b;
+    }, 3000, 100, "check-send-enabled").catch(() => null);
+
+    if (!sendReady) {
+      throw new Error(`文本注入方法 ${method} 未激活 send 按钮 (Lexical state 未同步)`);
+    }
+
+    console.log(`[cgcon content] injected via ${method}, DOM len=${injected.length}`);
+  }
   async function clickSend() {
     const b = await waitForSendReady();
     if (!document.hidden) b.scrollIntoView({ block: "center", inline: "nearest" });
