@@ -319,7 +319,7 @@ app.use((err, req, res, next) => {
   next(err);
 });
 
-const PORT = 8765;
+const PORT = Number(process.env.CGCON_PORT) || 8765;
 app.listen(PORT, () => {
   console.log(`ChatGPT Relay 已启动: http://localhost:${PORT}`);
 });

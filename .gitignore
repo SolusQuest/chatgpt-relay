@@ -1,5 +1,9 @@
 node_modules/
+dist/
 
 *.log
 .env
 .env.*
+
+# tsx / typescript build cache
+*.tsbuildinfo
