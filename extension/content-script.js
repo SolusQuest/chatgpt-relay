@@ -140,6 +140,10 @@
     const t = (el.textContent ?? el.innerText ?? "").replace(/\u00A0/g, " ").trim();
     return t;
   }
+  function getLastAssistantId(msgs) {
+    if (!msgs.length) return null;
+    return msgs[msgs.length - 1].getAttribute("data-message-id") || null;
+  }
 
   function getSessionId() {
     const m = location.pathname.match(/\/c\/([a-f0-9-]+)/);
@@ -494,12 +498,18 @@
               sendResponse({ status: "safety", reason: block.reason });
               return;
             }
-            const baseline = msg.baseline ?? { assistantCount: 0, lastAssistantText: "", userCount: 0 };
+            const baseline = msg.baseline ?? { assistantCount: 0, lastAssistantText: "", lastAssistantId: null, userCount: 0 };
             const msgs = getAssistantMessages();
             const users = getUserMessages();
             const generating = isGenerating();
-            const hasNewAssistant = msgs.length > baseline.assistantCount;
-            const hasNewUser = users.length > baseline.userCount;
+            const lastId = getLastAssistantId(msgs);
+            // 虚拟滚动会 unmount 老消息，所以 count 不可靠；用 data-message-id 判定"是否是新一条"。
+            // 若 lastId 为 null（页面还没插占位）视为无新回复。
+            const hasNewAssistant = !!lastId && lastId !== baseline.lastAssistantId;
+            // user 消息也可能被虚拟滚动 unmount，同样不能靠 count。只用来在极端情况下
+            // 分辨"提交都没生效"（既没有新 assistant 也完全没有 user）。保守：只要页面
+            // 有任何 user 消息就认为提交生效了。
+            const hasNewUser = users.length > 0;
             const lastText = getLastText(msgs);
             if (generating) {
               sendResponse({ status: "generating", lastText: lastText, assistantCount: msgs.length });
@@ -535,9 +545,11 @@
           updateBanner(`处理中: ${msg.taskId?.slice?.(0, 8) ?? ""}…`, "#e67e22");
 
           // 记录 baseline + inflight，供刷新恢复用
+          const _msgsAtSubmit = getAssistantMessages();
           const baseline = {
-            assistantCount: getAssistantMessages().length,
-            lastAssistantText: getLastText(getAssistantMessages()),
+            assistantCount: _msgsAtSubmit.length,
+            lastAssistantText: getLastText(_msgsAtSubmit),
+            lastAssistantId: getLastAssistantId(_msgsAtSubmit),
             userCount: getUserMessages().length,
             startedAt: Date.now(),
           };
