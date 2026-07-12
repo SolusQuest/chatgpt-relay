@@ -80,6 +80,111 @@ PR: https://github.com/<user>/<repo>/pull/<n>
 <全文>
 ```
 
+## 讨论 / 独立思考 + 综合（advanced，仅在用户允许时用）
+
+Relay 不止是 one-shot review 的执行器。**当用户明确允许**、且决策足够重要
+（issue scope、test 覆盖策略、架构选型、命名规范等），可以进入"讨论模式"：
+让 agent 和 relay session 各自**独立**思考后再综合，最后（必要时）多轮讨论
+到收敛。
+
+**为什么**：LLM 有 sycophancy 倾向——先看到对方的答案就容易顺着走。强制
+"双方 blind output 后再合流"能拿到真的第二意见，而不是回声。
+
+### 核心原则：顺序保证独立
+
+**谁看谁的 prompt 决定了谁受谁影响。** 必须保证：
+1. Agent 先在**自己的 scratchpad**（内部草稿 / 工具调用日志）里写出独立观点
+   —— 不要写完就发给 relay；
+2. **Relay 收到的第一条 prompt 里只含任务描述和必要客观事实**（issue
+   placeholder、待测代码、约束条件），**不含 agent 的观点**；
+3. 拿到 relay 的独立观点后，agent 再进入"综合 / 讨论"阶段。
+
+违反 1 或 2 就退化成 review 模式，讨论价值消失。
+
+### 流程模板
+
+```
+Round 0: agent 在 scratchpad 独立思考 → agent-output-A
+Round 1: relay 收到"只含任务与客观事实"的 prompt → relay-output-B
+        （此时 agent-output-A 尚未发给 relay）
+Round 2: agent 比对 A 和 B，识别：
+        - 交集（双方都覆盖的点）
+        - 差集 A\B（agent 独有）
+        - 差集 B\A（relay 独有）
+        - 冲突（同一决策点意见相反）
+Round 3+ (可选): 若差集或冲突显著，agent 发讨论 prompt：
+        "我的观点是 <A>，你的观点是 <B>。请指出：
+         (a) 我遗漏的关键点是什么？
+         (b) 你没考虑到的约束是什么？
+         (c) 冲突点 <X> 的 rationale trade-off。"
+        → relay-output-C，再综合，循环。
+终止：见"中止条件"。
+```
+
+### 具体应用：refine issue body
+
+想让 issue body 从粗糙 draft 到打磨到位时，讨论优于单次 review：
+
+```
+Round 0: agent 从 placeholder / requirements 独立列决策点，例如：
+         ["scope 是否包含 X？", "AC 是否要包含性能指标？", ...]
+Round 1: 只把 placeholder / 概要给 relay，问"列出你觉得需要明确的决策点"
+         → relay 独立给出一份决策点清单
+Round 2: agent 综合两份清单 → 一份决策点 union；
+         对分歧项（一方有一方无 / 双方相反）标注
+Round 3+ (若需要): 就分歧项让 relay 进一步讨论
+Round N: 收敛后，agent 用综合决策点重新起草 issue body（此时可以走
+         "Issue draft review"模式让 relay 复审最终稿）
+```
+
+### 具体应用：设计 test coverage
+
+写 test 前决定覆盖哪些路径 / 边界：
+
+```
+Round 0: agent 独立列 test cases（基于自己读代码的理解）
+Round 1: 给 relay 待测代码 + 需求描述，问"你会覆盖哪些场景？
+         列 cases 和理由"
+Round 2: agent 对比两份 case 清单：
+         - 双方都列的 → 高置信度必写
+         - 单方独有 → 判断是遗漏、是过度覆盖、还是各有侧重
+         - 相反 (agent 说要测 X, relay 说不必测 X) → 讨论
+Round N: 收敛后写 tests
+```
+
+### 中止条件
+
+**收敛**（继续讨论会 overfit，停）：
+- 双方指出的关键点集合基本相同（比方说 ≥80% 重合，剩下的只是描述方式）
+- 分歧只剩风格 / 措辞，不是实质
+- 连续两轮再无新论点出现
+
+**分歧充分**（值得停下来问用户）：
+- 双方对同一决策点各自展开了完整 rationale，仍然对立
+- 这时不要再让讨论"卷"下去；把两份 rationale 摆给用户，让用户 tiebreak
+
+**轮数上限**（防止无限循环）：
+- 默认硬上限 **3 轮讨论**（不含 Round 0 / Round 1 的独立输出）
+- 超过就停下来汇报当前状态，让用户决定
+
+**外部信号**（无条件停）：
+- session paused / 出验证码
+- relay 出现降级信号（"我看不到" / 明显偏题）
+- 用户中断
+
+### 反模式（讨论专用）
+
+- ❌ 把 agent 的独立观点直接放进 Round 1 prompt —— 就变回 review 模式
+- ❌ 每轮都让 relay 评价 agent 的答案而不是拿独立观点 —— 同上
+- ❌ 一直讨论到"看起来完美" —— overfit；讨论目的是找 blind spot，不是打磨
+- ❌ 用讨论替代用户决策 —— 涉及项目方向 / 权衡的最终选择要问用户，不要
+  agent 和 relay 自己收敛完就直接执行
+- ❌ 每轮都新起 conversation —— 讨论模式**要利用 relay session 的连续
+  上下文**，用**同一 session**多次 POST（相当于 ChatGPT 侧多轮对话）；
+  这也是 relay 相对 API 的一大优势
+
+---
+
 ## 长文档 / 大段代码
 
 - 单个 prompt 上限 512 KB（body）。超过就分批：先发第一段，回复里包含"收到，
