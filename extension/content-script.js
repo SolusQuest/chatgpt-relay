@@ -56,6 +56,7 @@
   const ACTION_DELAY_MAX = 900;
   const REPLY_STABLE_MS = 2500;
   const REPLY_TIMEOUT_MS = 10 * 60 * 1000;
+  const REPLY_NO_ACTIVITY_MS = 25000;
   const INFLIGHT_KEY = "cgcon_inflight_v3";
   const FETCH_FAIL_THRESHOLD = 3;
   const RELOAD_COOLDOWN_MS = 60_000;
