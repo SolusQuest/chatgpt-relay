@@ -10,6 +10,10 @@ import {
   HEARTBEAT_INTERVAL_MS,
   NEXT_TASK_WAIT_MS,
   STORAGE_KEYS,
+  POLL_REPLY_STABLE_SAMPLES,
+  POLL_NOT_STARTED_MAX,
+  POLL_HARD_TIMEOUT_MS,
+  POLL_REPLY_SENDMSG_TIMEOUT_MS,
 } from "./lib/config.js";
 
 async function getStorage(key, fallback) {
@@ -138,6 +142,192 @@ async function getInflight(session) {
 // ── offline 标记 ──
 const offlineSessions = new Set();
 
+// ── pending-reply state machine ──
+// Chrome 冻结后台 tab 的 MutationObserver / setInterval，因此不再让 content
+// script 长期挂 waitForReply。SW 每次 alarm 主动通过 chrome.tabs.sendMessage
+// 唤醒 content script 做单次 DOM 快照，把回复采集回来。
+//
+// 记录形如：
+//   {
+//     session, tabId, taskId, baseline,
+//     submittedAt, lastPollAt,
+//     notStartedCount,          // 连续 "not-started" 次数
+//     stableSampleCount,        // 连续文本相同次数（reply-ready 时用）
+//     lastSampleText,           // 上次采样到的文本
+//   }
+async function listPendingReplies() {
+  return await getStorage(STORAGE_KEYS.PENDING_REPLIES, {});
+}
+async function setPendingReply(taskId, rec) {
+  const map = await listPendingReplies();
+  map[taskId] = rec;
+  await setStorage(STORAGE_KEYS.PENDING_REPLIES, map);
+}
+async function deletePendingReply(taskId) {
+  const map = await listPendingReplies();
+  delete map[taskId];
+  await setStorage(STORAGE_KEYS.PENDING_REPLIES, map);
+}
+async function getPendingReply(taskId) {
+  const map = await listPendingReplies();
+  return map[taskId] ?? null;
+}
+
+async function pollPendingReplies() {
+  const map = await listPendingReplies();
+  const ids = Object.keys(map);
+  if (ids.length === 0) return;
+
+  for (const taskId of ids) {
+    const rec = map[taskId];
+    if (!rec) continue;
+    try {
+      await pollOnePending(taskId, rec);
+    } catch (e) {
+      console.warn("[cgcon sw] pollOnePending failed", taskId, e);
+    }
+  }
+}
+
+async function pollOnePending(taskId, rec) {
+  const now = Date.now();
+  // 硬超时
+  if (now - rec.submittedAt > POLL_HARD_TIMEOUT_MS) {
+    console.warn("[cgcon sw] pending reply hard timeout", taskId);
+    await failPending(taskId, rec, "pending reply hard timeout");
+    return;
+  }
+
+  // 定位 tab
+  let tabInfo = null;
+  try { tabInfo = await chrome.tabs.get(rec.tabId); } catch { tabInfo = null; }
+  if (!tabInfo) {
+    console.warn("[cgcon sw] pending tab gone; requeueing", taskId, rec.tabId);
+    await requeuePending(taskId, rec);
+    return;
+  }
+  if (tabInfo.discarded) {
+    const ok = await reviveDiscardedTab(tabInfo);
+    if (!ok) return; // wait next tick
+  }
+
+  // 调 content-script 单次快照
+  let snap;
+  try {
+    snap = await Promise.race([
+      chrome.tabs.sendMessage(rec.tabId, { type: "poll-reply", baseline: rec.baseline }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error("poll-reply sendMessage timeout")), POLL_REPLY_SENDMSG_TIMEOUT_MS)),
+    ]);
+  } catch (e) {
+    console.warn("[cgcon sw] poll-reply sendMessage failed", taskId, e.message);
+    // 一次失败不结算；下次 alarm 再试。
+    rec.lastPollAt = now;
+    await setPendingReply(taskId, rec);
+    return;
+  }
+  rec.lastPollAt = now;
+
+  if (!snap || snap.error) {
+    console.warn("[cgcon sw] poll-reply error", taskId, snap?.error);
+    await setPendingReply(taskId, rec);
+    return;
+  }
+
+  if (snap.status === "safety") {
+    console.warn("[cgcon sw] pending hit safety", taskId, snap.reason);
+    await httpJson("POST", `/internal/sessions/${encodeURIComponent(rec.session)}/status`, {
+      paused: true, reason: snap.reason ?? "safety",
+    }).catch(() => {});
+    // task 判失败，让 agent 感知
+    await failPending(taskId, rec, `safety: ${snap.reason ?? "unknown"}`);
+    return;
+  }
+
+  if (snap.status === "reply-ready") {
+    const text = snap.reply ?? "";
+    if (text && text === rec.lastSampleText) {
+      rec.stableSampleCount = (rec.stableSampleCount ?? 0) + 1;
+    } else {
+      rec.stableSampleCount = 1;
+      rec.lastSampleText = text;
+    }
+    if (rec.stableSampleCount >= POLL_REPLY_STABLE_SAMPLES) {
+      console.log("[cgcon sw] pending complete", taskId, "len=", text.length);
+      try {
+        await httpJson("POST", `/internal/tasks/${taskId}/complete`, { text });
+      } catch (e) {
+        console.warn("[cgcon sw] complete POST failed", taskId, e.message);
+        await setPendingReply(taskId, rec);
+        return;
+      }
+      await deletePendingReply(taskId);
+      await clearInflight(rec.session);
+      // 顺便清 content-script 里的 sessionStorage inflight + 复位 banner
+      try {
+        await chrome.tabs.sendMessage(rec.tabId, { type: "clear-inflight" });
+        await chrome.tabs.sendMessage(rec.tabId, { type: "update-banner", text: "Relay", color: "#10a37f" });
+      } catch {}
+      return;
+    }
+    await setPendingReply(taskId, rec);
+    return;
+  }
+
+  if (snap.status === "generating") {
+    // 进入生成中说明提交成功；重置 not-started 计数
+    rec.notStartedCount = 0;
+    rec.stableSampleCount = 0;
+    rec.lastSampleText = snap.lastText ?? rec.lastSampleText ?? "";
+    await setPendingReply(taskId, rec);
+    return;
+  }
+
+  if (snap.status === "posted-no-reply-yet") {
+    // 用户已发出去但还没生成
+    rec.notStartedCount = 0;
+    rec.lastSampleText = snap.lastText ?? rec.lastSampleText ?? "";
+    await setPendingReply(taskId, rec);
+    return;
+  }
+
+  if (snap.status === "not-started") {
+    rec.notStartedCount = (rec.notStartedCount ?? 0) + 1;
+    if (rec.notStartedCount >= POLL_NOT_STARTED_MAX) {
+      console.warn("[cgcon sw] pending never left not-started; failing", taskId);
+      await failPending(taskId, rec, "send appears to have failed (no user/assistant message change)");
+      return;
+    }
+    await setPendingReply(taskId, rec);
+    return;
+  }
+
+  // 未知 status：保守回写
+  await setPendingReply(taskId, rec);
+}
+
+async function failPending(taskId, rec, reason) {
+  try {
+    await httpJson("POST", `/internal/tasks/${taskId}/complete`, { error: reason });
+  } catch (e) {
+    console.warn("[cgcon sw] failPending POST failed", taskId, e.message);
+  }
+  await deletePendingReply(taskId);
+  await clearInflight(rec.session);
+  await setStorage(STORAGE_KEYS.LAST_ERROR, {
+    taskId, session: rec.session, error: reason, at: Date.now(),
+  });
+}
+
+async function requeuePending(taskId, rec) {
+  try {
+    await httpJson("POST", `/internal/tasks/${taskId}/requeue`, {});
+  } catch (e) {
+    console.warn("[cgcon sw] requeuePending POST failed", taskId, e.message);
+  }
+  await deletePendingReply(taskId);
+  await clearInflight(rec.session);
+}
+
 // ── 轮询 ──
 let pollInProgress = false;
 async function pollOnce() {
@@ -226,12 +416,29 @@ async function handleTab(tabId) {
       type: "run-task", taskId, text,
     });
     if (runRes?.error) throw new Error(runRes.error);
-    if (typeof runRes?.reply !== "string") throw new Error("no reply from content-script");
-    await httpJson("POST", `/internal/tasks/${taskId}/complete`, { text: runRes.reply });
-    await clearInflight(session);
+    if (runRes?.status !== "submitted") {
+      // content-script 老版本仍可能返回 { reply }，兼容一下
+      if (typeof runRes?.reply === "string") {
+        await httpJson("POST", `/internal/tasks/${taskId}/complete`, { text: runRes.reply });
+        await clearInflight(session);
+        return;
+      }
+      throw new Error("run-task did not acknowledge submission");
+    }
+    // 登记 pendingReply，让 SW 主动采样完成
+    await setPendingReply(taskId, {
+      session,
+      tabId,
+      taskId,
+      baseline: runRes.baseline ?? { assistantCount: 0, lastAssistantText: "", userCount: 0 },
+      submittedAt: Date.now(),
+      lastPollAt: 0,
+      notStartedCount: 0,
+      stableSampleCount: 0,
+      lastSampleText: "",
+    });
   } catch (e) {
     console.warn("[cgcon sw] task failed", taskId, e);
-    // 注意：不立即 clearInflight，让 content-script 的 sessionStorage 有机会走 recover 流程
     await httpJson("POST", `/internal/tasks/${taskId}/complete`, { error: e.message }).catch(() => {});
     await setStorage(STORAGE_KEYS.LAST_ERROR, {
       taskId, session, error: e.message, at: Date.now(),
@@ -284,8 +491,9 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === POLL_ALARM_NAME) {
     void reconcileInflight();
     void pollOnce();
-    setTimeout(() => void pollOnce(), POLL_INTERVAL_MS);
-    setTimeout(() => void pollOnce(), 2 * POLL_INTERVAL_MS);
+    void pollPendingReplies();
+    setTimeout(() => { void pollOnce(); void pollPendingReplies(); }, POLL_INTERVAL_MS);
+    setTimeout(() => { void pollOnce(); void pollPendingReplies(); }, 2 * POLL_INTERVAL_MS);
   } else if (alarm.name === HEARTBEAT_ALARM_NAME) {
     void heartbeatOnce();
     setTimeout(() => void heartbeatOnce(), HEARTBEAT_INTERVAL_MS);
@@ -304,6 +512,7 @@ chrome.runtime.onStartup.addListener(() => { void ensureAlarms(); });
 void ensureAlarms();
 void loadTabSessionCache();
 void reconcileInflight();
+void pollPendingReplies();
 
 // ── 消息桥接 ──
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -357,6 +566,34 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
 
+  if (type === "reattach-pending") {
+    (async () => {
+      try {
+        if (!sender.tab?.id) { sendResponse({ error: "no tab" }); return; }
+        const sid = await getTabSession(sender.tab.id);
+        if (!sid) { sendResponse({ error: "no session for tab" }); return; }
+        await setPendingReply(msg.taskId, {
+          session: sid,
+          tabId: sender.tab.id,
+          taskId: msg.taskId,
+          baseline: msg.baseline ?? { assistantCount: 0, lastAssistantText: "", userCount: 0 },
+          submittedAt: Date.now(),
+          lastPollAt: 0,
+          notStartedCount: 0,
+          stableSampleCount: 0,
+          lastSampleText: "",
+        });
+        await markInflight(sid, msg.taskId);
+        // 立即触发一次采样
+        void pollPendingReplies();
+        sendResponse({ status: "ok" });
+      } catch (e) {
+        sendResponse({ error: e.message });
+      }
+    })();
+    return true;
+  }
+
   if (type === "recover-task") {
     (async () => {
       try {
@@ -398,10 +635,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (type === "popup-get-state") {
     (async () => {
-      const [inflight, cfg, lastError] = await Promise.all([
+      const [inflight, cfg, lastError, pendingReplies] = await Promise.all([
         getStorage(STORAGE_KEYS.INFLIGHT, {}),
         getStorage("config", {}),
         getStorage(STORAGE_KEYS.LAST_ERROR, null),
+        getStorage(STORAGE_KEYS.PENDING_REPLIES, {}),
       ]);
       const tabs = await listChatGPTTabs();
       const tabsInfo = [];
@@ -417,6 +655,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         inflight, cfg, lastError, tabs: tabsInfo,
         baseUrl: cfg.baseUrl || DEFAULT_BASE,
         offlineSessionCount: offlineSessions.size,
+        pendingReplyCount: Object.keys(pendingReplies).length,
       });
     })();
     return true;
@@ -435,6 +674,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (type === "popup-clear-inflight") {
     (async () => {
       await setStorage(STORAGE_KEYS.INFLIGHT, {});
+      await setStorage(STORAGE_KEYS.PENDING_REPLIES, {});
       sendResponse({ status: "ok" });
     })();
     return true;

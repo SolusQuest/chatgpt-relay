@@ -385,10 +385,8 @@
     updateBanner(`回捞中: ${rec.taskId.slice(0, 8)}…`, "#f39c12");
 
     try {
-      // 等页面稳定
       await waitForCondition(() => document.body ? true : null, 10000, 200, "wait body");
       await delay(1500);
-      // 找到 assistant 消息，如果比 baseline 多则视为已完成
       const now = getAssistantMessages();
       const hasNew = now.length > (rec.baseline?.assistantCount ?? 0);
 
@@ -407,23 +405,22 @@
         }
       }
       if (isGenerating()) {
-        // 还在生成中，挂上 waitForReply 继续等
+        // 还在生成中：改由 SW 通过 poll-reply 主动采样，避免后台 tab observer 冻结。
         updateBanner(`回捞（生成中）: ${rec.taskId.slice(0, 8)}`, "#f39c12");
-        const reply = await waitForReply(rec.baseline ?? {
-          assistantCount: 0, lastAssistantText: "", userCount: 0, startedAt: Date.now(),
-        });
-        await chrome.runtime.sendMessage({ type: "recover-task", taskId: rec.taskId, text: reply });
-        updateBanner(`已回捞: ${rec.taskId.slice(0, 8)}`, "#27ae60");
-        clearInflight();
+        chrome.runtime.sendMessage({
+          type: "reattach-pending",
+          taskId: rec.taskId,
+          baseline: rec.baseline ?? {
+            assistantCount: 0, lastAssistantText: "", userCount: 0, startedAt: Date.now(),
+          },
+        }).catch(() => {});
         return;
       }
-      // 没有新消息 → 让 server 把 task 打回 queued
       console.log("[cgcon content] no new reply found; requeuing", rec.taskId);
       await chrome.runtime.sendMessage({ type: "requeue-task", taskId: rec.taskId });
       clearInflight();
     } catch (e) {
       console.warn("[cgcon content] recover failed", e);
-      // 保留 inflight 让下次继续尝试
     }
   }
 
@@ -484,7 +481,49 @@
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     (async () => {
       try {
-        if (msg.type === "get-session-id") {
+        if (msg.type === "poll-reply") {
+          // SW 驱动的单次 DOM 快照。不做长等待，立即返回当前状态。
+          // 后台 tab 的 MutationObserver 会被 Chrome 冻结，但主动 sendMessage
+          // 唤醒 content-script 时它仍能执行同步 DOM 读取。
+          try {
+            const block = findSafetyBlock();
+            if (block) {
+              sendResponse({ status: "safety", reason: block.reason });
+              return;
+            }
+            const baseline = msg.baseline ?? { assistantCount: 0, lastAssistantText: "", userCount: 0 };
+            const msgs = getAssistantMessages();
+            const users = getUserMessages();
+            const generating = isGenerating();
+
+            // 判断：是否有新内容出现（相对 baseline）
+            const hasNewAssistant = msgs.length > baseline.assistantCount;
+            const hasNewUser = users.length > baseline.userCount;
+            const lastText = getLastText(msgs);
+            const changed = lastText && lastText !== baseline.lastAssistantText;
+
+            if (generating) {
+              sendResponse({ status: "generating", lastText, assistantCount: msgs.length });
+              return;
+            }
+            if (!hasNewUser && !hasNewAssistant) {
+              sendResponse({ status: "not-started", lastText, assistantCount: msgs.length });
+              return;
+            }
+            if (hasNewAssistant && changed) {
+              sendResponse({ status: "reply-ready", reply: lastText, assistantCount: msgs.length });
+              return;
+            }
+            sendResponse({ status: "posted-no-reply-yet", lastText, assistantCount: msgs.length });
+          } catch (e) {
+            sendResponse({ error: e.message });
+          }
+          return;
+        }
+        if (msg.type === "clear-inflight") {
+          clearInflight();
+          sendResponse({ status: "ok" });
+        } else if (msg.type === "get-session-id") {
           sendResponse({ session: getSessionId() });
         } else if (msg.type === "check-safety") {
           sendResponse({ block: findSafetyBlock() });
@@ -514,10 +553,12 @@
           await pacedDelay(500, 1200);
           await clickSend();
           updateBanner(`等待回复: ${msg.taskId?.slice?.(0, 8) ?? ""}…`, "#3498db");
-          const reply = await waitForReply(baseline);
-          updateBanner(`Relay: ${getSessionId().slice(0, 8)}…`, "#10a37f");
-          clearInflight();
-          sendResponse({ reply });
+
+          // 关键：不再在 content-script 里 await waitForReply。
+          // 后台 tab 里 MutationObserver / setInterval 都会被 Chrome 冻结，
+          // 因此改由 service worker 每次 alarm 主动 sendMessage poll-reply
+          // 来做单次 DOM 快照。这里立即返回 submitted 让 SW 登记 pendingReplies。
+          sendResponse({ status: "submitted", baseline });
         } else {
           sendResponse({ error: `unknown message type: ${msg.type}` });
         }
