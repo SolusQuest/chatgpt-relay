@@ -1,12 +1,24 @@
 {
   "name": "gpt-relay",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "ChatGPT 网页自动 Relay 工具（SQLite 队列 + MV3 扩展）",
   "main": "server/index.ts",
   "bin": {
-    "gpt-relay": "./bin/gpt-relay.ts"
+    "gpt-relay": "./bin/gpt-relay.mjs"
   },
   "type": "module",
+  "files": [
+    "bin",
+    "client",
+    "server",
+    "scripts",
+    "extension",
+    "skills",
+    "workflows",
+    "agent-instructions.md",
+    "README.md",
+    "tsconfig.json"
+  ],
   "scripts": {
     "start": "tsx server/index.ts",
     "dev": "tsx watch server/index.ts",
@@ -15,12 +27,12 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "express": "^4.18.0"
+    "express": "^4.18.0",
+    "tsx": "^4.7.0"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^22.20.1",
-    "tsx": "^4.7.0",
     "typescript": "^5.4.0"
   },
   "engines": {
