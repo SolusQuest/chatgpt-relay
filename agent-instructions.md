@@ -9,17 +9,107 @@ gpt-relay 是本地 SQLite 队列服务，agent 提交 task → 浏览器扩展�
 → 回复回写到 SQLite → agent 拉回。默认地址 `http://127.0.0.1:8765`，数据落在
 `~/.gpt-relay/gpt-relay.db`。所有 task 落盘、可续、可回查。
 
-## 何时用
+# 使用模式
 
-**用**：
-- 长文档、复杂设计、非 trivial refactor 需要"另一个模型"的意见
-- 用户明确要求让 ChatGPT 看某段内容
-- 高风险决策想交叉验证
+用户可能通过 skill、slash command 或自然语言让你调用 relay。**具体触发时机由用户
+或 skill 决定，不由本文档规定**；本节只给"当决定要用时该怎么组织内容"的实践。
 
-**不用**：
-- 简单的 self-review、格式化建议
-- 处理敏感信息且用户未授权分享给 ChatGPT
-- 用户明确指定了具体 API 模型
+## Session 假设（默认成立，除非证据表明相反）
+
+Relay 背后是**用户本人的 ChatGPT 会话**，且用户已经在这些会话里预先构建了必要
+的项目上下文。所以在你给 relay 发内容前，可以**默认假设**：
+
+- **该 session 能访问 GitHub PR / Issue 链接**（包括用户自己 private repo 的），
+  因为 ChatGPT connectors 已授权。**不需要**你把 PR diff / issue body 内联进 prompt
+  —— 直接发 URL 即可。
+- **该 session 有必要的项目 / repo / conversation 上下文**（架构约定、术语、
+  正在处理的功能）。**不需要**在每次 prompt 里重复项目背景，也不需要解释你是谁。
+- **该 session 是 authenticated user 的**：可以带一句话背景（例如"这是我在做 X
+  feature 的一部分"），不用当陌生人问答对待。
+
+**只在证据表明相反时**才降级到"补上下文"或"改问用户"：
+- Relay 回复里明确说"我看不到这个链接" / "no access" / "please paste the content"
+- 回复里出现明显跟 repo 无关的解读（例如把 auth 项目理解成金融 audit）
+- 回复要求你解释某个用户/skill 明确定义过的术语
+
+看到降级信号时的两条路径：
+1. **补部分上下文**：你手边有的（PR body、关键文件内容、约定文档）直接贴进
+   下一条 prompt，明确标注"补充上下文，因为 relay session 看不到 <X>"
+2. **让用户决定**：如果需要的是用户端才能确定的东西（该给哪个 session 增加什么
+   授权、要不要暴露 private repo），停下来问用户，不要自己猜
+
+## PR review
+
+**标准流程**：让 relay session 看**远端 PR 链接**，不要贴本地 diff。
+
+1. 确认本地改动范围
+2. commit + push 到远端分支
+3. 用 `gh pr create` 或 web UI 创建/更新 PR（可以是 draft）
+4. 把 PR URL 发给 relay
+
+Prompt 骨架：
+```text
+请作为严格的代码 reviewer，review 下面这个 GitHub PR。
+
+请优先列出需要修改的问题；如果没有阻塞问题，请明确说明可以合并，并列出
+剩余风险。
+
+PR: https://github.com/<user>/<repo>/pull/<n>
+```
+
+拿到反馈后 agent 自己判断是否修改，改完 → commit / push 到同一分支 →
+用同一 URL 再发一次复审。**不要用关键词匹配判断是否通过**，读原文语义。
+
+## Issue / draft / 短文本 review
+
+无远端 URL 的内容（issue body draft、design note、prompt draft、commit message
+草稿），直接把**完整文本**贴进 prompt。不要只贴摘要或"关键部分"。
+
+多个 draft 一次性提交时按顺序编号：
+
+```text
+请作为严格的 PM/工程 reviewer，review 下面的 GitHub issue body draft。
+
+重点：scope、验收标准、依赖 / 风险、可执行性、含糊措辞。
+按严重程度列问题；没有阻塞问题就明确说可以推进。
+
+## Issue Draft 1
+<全文>
+
+## Issue Draft 2
+<全文>
+```
+
+## 长文档 / 大段代码
+
+- 单个 prompt 上限 512 KB（body）。超过就分批：先发第一段，回复里包含"收到，
+  等下一段"之类确认，再发下一段
+- prompt 建议给 ≥10 min timeout（默认 10 min 就够）；PR 特别大可以传
+  `"timeout": 1800000`（30 min）
+- 长 prompt 建议开启幂等：给 `clientRequestId`（例如 `pr-1234-round-1`），
+  agent 崩溃重启同一 CRI 不会重复提交
+
+## 多 session 并发
+
+一个 session 同时只处理一个 in-flight task。并发多 review 时：
+
+1. `GET /v1/sessions` 取所有 `paused=false && pendingTasks==0` 的 session
+2. 对每个 session **非阻塞** `POST /v1/tasks`（不循环等，立刻拿 taskId）
+3. 所有提交完成后**再循环 GET** 拿结果
+
+**不要**给同一 session 并发提交，会排队但看起来慢。
+
+## 反模式（不要做）
+
+- ❌ 把本地未 push 的 diff 内联到 prompt 请求 review —— 应该先 push，让 relay
+  拉远端；这样 review 结论指向的行号跟你和用户看到的一致
+- ❌ 因为怕 session 没上下文，把整个 repo README + AGENTS.md + 目标描述都
+  塞进每次 prompt —— session 已经有上下文，多余
+- ❌ 因为 ChatGPT 回复短，就补 prompt 再发 —— 先分析原回复够不够，够就用
+- ❌ 用关键词匹配 relay 回复判断 "通过 / 不通过" —— 读语义
+- ❌ 出现 pause / 验证码时自动重试 —— 停下告诉用户
+- ❌ CJK 内容通过 `node -e "…"` 或 `curl -d "…"` 传大段中文 —— 用 stdin /
+  `-d @file.json` / `agent-client.review()`
 
 ---
 
