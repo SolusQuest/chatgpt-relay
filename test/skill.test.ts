@@ -1,5 +1,5 @@
 // test/skill.test.ts
-// 验证 skills/cgcon-review/scripts 关键脚本。使用异步 spawn 避免与同进程 server 死锁。
+// 验证 skills/gpt-relay-review/scripts 关键脚本。使用异步 spawn 避免与同进程 server 死锁。
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -14,7 +14,7 @@ import { loadConfig } from "../server/config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
-const SCRIPTS = path.join(REPO_ROOT, "skills", "cgcon-review", "scripts");
+const SCRIPTS = path.join(REPO_ROOT, "skills", "gpt-relay-review", "scripts");
 
 let server: http.Server | null = null;
 let stop: (() => void) | null = null;
@@ -30,7 +30,7 @@ function runNode(
 ): Promise<SpawnResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [path.join(SCRIPTS, script), ...args], {
-      env: { ...process.env, CGCON_URL: baseUrl, ...extraEnv },
+      env: { ...process.env, GPT_RELAY_URL: baseUrl, ...extraEnv },
     });
     let stdout = "";
     let stderr = "";
@@ -50,8 +50,8 @@ function runNode(
 }
 
 before(async () => {
-  dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "cgcon-skill-"));
-  process.env.CGCON_DATA_DIR = dataDir;
+  dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-relay-skill-"));
+  process.env.GPT_RELAY_DATA_DIR = dataDir;
   const config = loadConfig();
   const handle = createApp(config);
   stop = handle.stopMaintenance;
@@ -75,7 +75,7 @@ test("health.mjs reports ok", async () => {
 });
 
 test("health.mjs exits 1 when relay unreachable", async () => {
-  const r = await runNode("health.mjs", [], { CGCON_URL: "http://127.0.0.1:1" });
+  const r = await runNode("health.mjs", [], { GPT_RELAY_URL: "http://127.0.0.1:1" });
   assert.equal(r.code, 1);
 });
 
@@ -93,13 +93,13 @@ test("list.mjs prints header", async () => {
 });
 
 test("review.mjs --no-wait submits and returns taskId immediately", async () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cgcon-p-"));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-relay-p-"));
   try {
     const r = await runNode("review.mjs", [
       "--session", "skill-nw",
       "--text", "hi",
       "--no-wait",
-    ], { CGCON_PENDING_DIR: tmp });
+    ], { GPT_RELAY_PENDING_DIR: tmp });
     assert.equal(r.code, 0, `stderr: ${r.stderr}`);
     const parsed = JSON.parse(r.stdout);
     assert.equal(parsed.status, "queued");
@@ -110,9 +110,9 @@ test("review.mjs --no-wait submits and returns taskId immediately", async () => 
 });
 
 test("resume.mjs reports no pending when dir empty", async () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cgcon-p-"));
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-relay-p-"));
   try {
-    const r = await runNode("resume.mjs", [], { CGCON_PENDING_DIR: tmp });
+    const r = await runNode("resume.mjs", [], { GPT_RELAY_PENDING_DIR: tmp });
     assert.equal(r.code, 0, `stderr: ${r.stderr}`);
     assert.match(r.stdout, /no pending/);
   } finally {

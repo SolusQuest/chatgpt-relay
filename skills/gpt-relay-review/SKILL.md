@@ -1,12 +1,12 @@
 ---
-name: cgcon-review
-description: Use when the user wants ChatGPT (web app) to review, critique, or provide a second opinion on content via the local cgcon relay running at http://127.0.0.1:8765. Ideal for design docs, PR diffs, ambiguous refactors, architecture choices, prompt drafts, or any high-stakes decision where the user already has an authenticated ChatGPT tab open. Do not use for quick self-review, when no ChatGPT tab is available, or when the user asked for a specific API-based model.
+name: gpt-relay-review
+description: Use when the user wants ChatGPT (web app) to review, critique, or provide a second opinion on content via the local gpt-relay service running at http://127.0.0.1:8765. Ideal for design docs, PR diffs, ambiguous refactors, architecture choices, prompt drafts, or any high-stakes decision where the user already has an authenticated ChatGPT tab open. Do not use for quick self-review, when no ChatGPT tab is available, or when the user asked for a specific API-based model.
 ---
 
-# cgcon-review
+# gpt-relay-review
 
 Send a piece of content to a user's live ChatGPT web session through the local
-cgcon relay, then wait for the human-in-the-loop reply and return it. Zero API
+gpt-relay, then wait for the human-in-the-loop reply and return it. Zero API
 cost -- uses the user's ChatGPT Plus subscription.
 
 ## When to use this skill
@@ -16,7 +16,7 @@ Trigger when **all** of these hold:
   second-opinion a piece of content, **or** the content is important enough
   that cross-model review is clearly valuable (long design docs, security
   reviews, non-obvious refactor plans, big PR descriptions).
-- The user already has cgcon running (check with `health.mjs`) and at least
+- The user already has gpt-relay running (check with `health.mjs`) and at least
   one active ChatGPT tab (check with `sessions.mjs`).
 - The content is text (Markdown / code / diffs). Images and file attachments
   are not supported.
@@ -36,7 +36,7 @@ fix it -- do not attempt further calls.
 ```bash
 node $SKILL_DIR/scripts/health.mjs
 # ok (http://127.0.0.1:8765, sessions=N)         -> proceed
-# relay not reachable at ...                     -> ask user to run `cgcon start`
+# relay not reachable at ...                     -> ask user to run `gpt-relay start`
 
 node $SKILL_DIR/scripts/sessions.mjs
 # [] or empty                                    -> ask user to open chatgpt.com
@@ -90,7 +90,7 @@ ChatGPT can take several minutes on large prompts. Defaults are:
 - Long-poll chunks of 30s -- the script never busy-loops.
 
 If the shell/agent is interrupted mid-wait, the taskId is preserved in
-`~/.cgcon/pending/<taskId>.json`. Recover with:
+`~/.gpt-relay/pending/<taskId>.json`. Recover with:
 
 ```bash
 node $SKILL_DIR/scripts/resume.mjs
@@ -107,27 +107,27 @@ node $SKILL_DIR/scripts/list.mjs --session <id> --last 5
 ```
 
 Useful for debugging: shows submittedAt, status, elapsed time. To inspect
-one task in full (prompt + reply), use the `cgcon show <taskId>` CLI if the
-user has the cgcon binary installed.
+one task in full (prompt + reply), use the `gpt-relay show <taskId>` CLI if the
+user has the gpt-relay binary installed.
 
 ## Failure modes and what to tell the user
 
 | Symptom                                    | Root cause                             | User action                                    |
 |--------------------------------------------|----------------------------------------|------------------------------------------------|
-| `relay not reachable`                      | server not running                     | run `cgcon start` or `node server/index.ts`    |
+| `relay not reachable`                      | server not running                     | run `gpt-relay start` or `node server/index.ts`    |
 | `sessions.mjs` returns `[]`                | no chatgpt.com tab active              | open chatgpt.com and confirm green banner      |
 | session `paused: true, pauseReason: ...`   | captcha / rate limit / unusual activity | solve in browser; extension will auto-resume  |
 | `review.mjs` exits 2, error mentions "文本注入失败" | ChatGPT frontend changed selectors     | update extension selectors                     |
 | `review.mjs` exits 3 (timeout)             | reply took longer than timeout         | run `resume.mjs` later to reclaim              |
-| HTTP 429 queue_full                        | too many pending tasks in this session | wait or cancel with `cgcon cancel <taskId>`    |
+| HTTP 429 queue_full                        | too many pending tasks in this session | wait or cancel with `gpt-relay cancel <taskId>`    |
 | HTTP 413 task_too_large                    | prompt bigger than server limit        | split the prompt                               |
 
 ## Environment variables
 
-- `CGCON_URL` - override relay URL (default `http://127.0.0.1:8765`).
-- `CGCON_PORT` - alternative to CGCON_URL, sets port on localhost.
-- `CGCON_PENDING_DIR` - alt location for pending files (default
-  `~/.cgcon/pending`).
+- `GPT_RELAY_URL` - override relay URL (default `http://127.0.0.1:8765`).
+- `GPT_RELAY_PORT` - alternative to GPT_RELAY_URL, sets port on localhost.
+- `GPT_RELAY_PENDING_DIR` - alt location for pending files (default
+  `~/.gpt-relay/pending`).
 
 ## Multi-session parallel review
 
@@ -146,11 +146,11 @@ node scripts/resume.mjs
 ## Data & privacy
 
 All prompts and replies are stored **locally** in the relay's SQLite
-database (`~/.cgcon/cgcon.db`) so tasks survive process restarts and
+database (`~/.gpt-relay/gpt-relay.db`) so tasks survive process restarts and
 allow post-hoc review. Nothing leaves the user's machine except the request
 to their own ChatGPT tab. If the user asks to purge history:
 
 ```bash
-cgcon tasks --last 100    # to see what is there
-rm ~/.cgcon/cgcon.db*  # or, non-destructive: `cgcon prune` (planned)
+gpt-relay tasks --last 100    # to see what is there
+rm ~/.gpt-relay/gpt-relay.db*  # or, non-destructive: `gpt-relay prune` (planned)
 ```

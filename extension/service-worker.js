@@ -16,7 +16,7 @@ import {
   POLL_REPLY_SENDMSG_TIMEOUT_MS,
 } from "./lib/config.js";
 
-// 开发调试：把 DEBUG 改成 true 或在 popup 里设置 window.__cgconDebug = true
+// 开发调试：把 DEBUG 改成 true 或在 popup 里设置 window.__gptRelayDebug = true
 const DEBUG = false;
 const dlog = (...args) => { if (DEBUG) console.log(...args); };
 
@@ -62,20 +62,20 @@ async function httpJson(method, url, body, timeoutMs = 30_000) {
 async function reviveDiscardedTab(tab) {
   if (!tab.id) return false;
   if (!tab.discarded) return true;
-  console.log("[cgcon sw] reviving discarded tab", tab.id);
+  console.log("[relay sw] reviving discarded tab", tab.id);
   try {
     await chrome.tabs.reload(tab.id);
     for (let i = 0; i < 40; i++) {
       await new Promise((r) => setTimeout(r, 200));
       try {
         const r = await chrome.tabs.sendMessage(tab.id, { type: "get-session-id" });
-        if (r?.session) { console.log("[cgcon sw] revived tab", tab.id, "session", r.session.slice(0, 8)); return true; }
+        if (r?.session) { console.log("[relay sw] revived tab", tab.id, "session", r.session.slice(0, 8)); return true; }
       } catch { /* still loading */ }
     }
-    console.warn("[cgcon sw] revived tab did not report session in 8s", tab.id);
+    console.warn("[relay sw] revived tab did not report session in 8s", tab.id);
     return false;
   } catch (e) {
-    console.warn("[cgcon sw] reload failed", tab.id, e);
+    console.warn("[relay sw] reload failed", tab.id, e);
     return false;
   }
 }
@@ -193,7 +193,7 @@ async function pollPendingReplies() {
   const map = await listPendingReplies();
   const ids = Object.keys(map);
   if (ids.length === 0) return;
-  dlog("[cgcon sw] pollPendingReplies pending=", ids.length);
+  dlog("[relay sw] pollPendingReplies pending=", ids.length);
 
   for (const taskId of ids) {
     const rec = map[taskId];
@@ -201,17 +201,17 @@ async function pollPendingReplies() {
     try {
       await pollOnePending(taskId, rec);
     } catch (e) {
-      console.warn("[cgcon sw] pollOnePending failed", taskId, e);
+      console.warn("[relay sw] pollOnePending failed", taskId, e);
     }
   }
 }
 
 async function pollOnePending(taskId, rec) {
   const now = Date.now();
-  dlog("[cgcon sw] pollOnePending", taskId.slice(0,8), "tab=", rec.tabId, "session=", rec.session?.slice?.(0,8), "notStarted=", rec.notStartedCount, "stable=", rec.stableSampleCount);
+  dlog("[relay sw] pollOnePending", taskId.slice(0,8), "tab=", rec.tabId, "session=", rec.session?.slice?.(0,8), "notStarted=", rec.notStartedCount, "stable=", rec.stableSampleCount);
   // 硬超时
   if (now - rec.submittedAt > POLL_HARD_TIMEOUT_MS) {
-    console.warn("[cgcon sw] pending reply hard timeout", taskId);
+    console.warn("[relay sw] pending reply hard timeout", taskId);
     await failPending(taskId, rec, "pending reply hard timeout");
     return;
   }
@@ -220,7 +220,7 @@ async function pollOnePending(taskId, rec) {
   let tabInfo = null;
   try { tabInfo = await chrome.tabs.get(rec.tabId); } catch { tabInfo = null; }
   if (!tabInfo) {
-    console.warn("[cgcon sw] pending tab gone; requeueing", taskId, rec.tabId);
+    console.warn("[relay sw] pending tab gone; requeueing", taskId, rec.tabId);
     await requeuePending(taskId, rec);
     return;
   }
@@ -237,7 +237,7 @@ async function pollOnePending(taskId, rec) {
       new Promise((_, rej) => setTimeout(() => rej(new Error("poll-reply sendMessage timeout")), POLL_REPLY_SENDMSG_TIMEOUT_MS)),
     ]);
   } catch (e) {
-    console.warn("[cgcon sw] poll-reply sendMessage failed", taskId, e.message);
+    console.warn("[relay sw] poll-reply sendMessage failed", taskId, e.message);
     // 一次失败不结算；下次 alarm 再试。
     rec.lastPollAt = now;
     await setPendingReply(taskId, rec);
@@ -245,15 +245,15 @@ async function pollOnePending(taskId, rec) {
   }
   rec.lastPollAt = now;
 
-  dlog("[cgcon sw] poll-reply snap", taskId.slice(0,8), "status=", snap?.status, "err=", snap?.error, "text=", (snap?.reply ?? snap?.lastText ?? "").slice(0,40));
+  dlog("[relay sw] poll-reply snap", taskId.slice(0,8), "status=", snap?.status, "err=", snap?.error, "text=", (snap?.reply ?? snap?.lastText ?? "").slice(0,40));
   if (!snap || snap.error) {
-    console.warn("[cgcon sw] poll-reply error", taskId, snap?.error);
+    console.warn("[relay sw] poll-reply error", taskId, snap?.error);
     await setPendingReply(taskId, rec);
     return;
   }
 
   if (snap.status === "safety") {
-    console.warn("[cgcon sw] pending hit safety", taskId, snap.reason);
+    console.warn("[relay sw] pending hit safety", taskId, snap.reason);
     await httpJson("POST", `/internal/sessions/${encodeURIComponent(rec.session)}/status`, {
       paused: true, reason: snap.reason ?? "safety",
     }).catch(() => {});
@@ -271,11 +271,11 @@ async function pollOnePending(taskId, rec) {
       rec.lastSampleText = text;
     }
     if (rec.stableSampleCount >= POLL_REPLY_STABLE_SAMPLES && text.length > 0) {
-      console.log("[cgcon sw] pending complete", taskId, "len=", text.length);
+      console.log("[relay sw] pending complete", taskId, "len=", text.length);
       try {
         await httpJson("POST", `/internal/tasks/${taskId}/complete`, { text });
       } catch (e) {
-        console.warn("[cgcon sw] complete POST failed", taskId, e.message);
+        console.warn("[relay sw] complete POST failed", taskId, e.message);
         await setPendingReply(taskId, rec);
         return;
       }
@@ -308,7 +308,7 @@ async function pollOnePending(taskId, rec) {
   if (snap.status === "not-started") {
     rec.notStartedCount = (rec.notStartedCount ?? 0) + 1;
     if (rec.notStartedCount >= POLL_NOT_STARTED_MAX) {
-      console.warn("[cgcon sw] pending never left not-started; failing", taskId);
+      console.warn("[relay sw] pending never left not-started; failing", taskId);
       await failPending(taskId, rec, "send appears to have failed (no user/assistant message change)");
       return;
     }
@@ -324,7 +324,7 @@ async function failPending(taskId, rec, reason) {
   try {
     await httpJson("POST", `/internal/tasks/${taskId}/complete`, { error: reason });
   } catch (e) {
-    console.warn("[cgcon sw] failPending POST failed", taskId, e.message);
+    console.warn("[relay sw] failPending POST failed", taskId, e.message);
   }
   await deletePendingReply(taskId);
   await clearInflight(rec.session);
@@ -338,7 +338,7 @@ async function requeuePending(taskId, rec) {
   try {
     await httpJson("POST", `/internal/tasks/${taskId}/requeue`, {});
   } catch (e) {
-    console.warn("[cgcon sw] requeuePending POST failed", taskId, e.message);
+    console.warn("[relay sw] requeuePending POST failed", taskId, e.message);
   }
   await deletePendingReply(taskId);
   await clearInflight(rec.session);
@@ -358,7 +358,7 @@ async function scheduleFastPending() {
   if (Object.keys(map).length === 0) return;
   fastPollScheduled = true;
   const tick = async () => {
-    try { await pollPendingReplies(); } catch (e) { console.warn("[cgcon sw] fast tick failed", e); }
+    try { await pollPendingReplies(); } catch (e) { console.warn("[relay sw] fast tick failed", e); }
     const cur = await listPendingReplies();
     if (Object.keys(cur).length > 0) {
       setTimeout(tick, FAST_POLL_MS);
@@ -374,16 +374,16 @@ let pollInProgress = false;
 async function pollOnce() {
   if (pollInProgress) return;
   pollInProgress = true;
-  dlog("[cgcon sw] pollOnce start");
+  dlog("[relay sw] pollOnce start");
   try {
     const tabs = await listChatGPTTabs();
-    dlog("[cgcon sw] pollOnce tabs=", tabs.length);
+    dlog("[relay sw] pollOnce tabs=", tabs.length);
     for (const tab of tabs) {
       if (!tab.id) continue;
       try {
         await handleTab(tab.id);
       } catch (e) {
-        console.warn("[cgcon sw] handleTab failed", tab.id, e);
+        console.warn("[relay sw] handleTab failed", tab.id, e);
       }
     }
   } finally {
@@ -397,19 +397,19 @@ async function handleTab(tabId) {
   if (!tabInfo) return;
   if (tabInfo.discarded) {
     const ok = await reviveDiscardedTab(tabInfo);
-    if (!ok) { console.warn("[cgcon sw] failed to revive tab", tabId); return; }
+    if (!ok) { console.warn("[relay sw] failed to revive tab", tabId); return; }
   }
 
   const session = await getTabSession(tabId);
   if (!session) {
-    dlog("[cgcon sw] tab", tabId, "has no known session; skipping");
+    dlog("[relay sw] tab", tabId, "has no known session; skipping");
     return;
   }
   if (offlineSessions.has(session)) return;
 
   const inflight = await getInflight(session);
   if (inflight) {
-    dlog("[cgcon sw] handleTab skip: session", session.slice(0, 8), "has inflight task", inflight.taskId?.slice?.(0, 8));
+    dlog("[relay sw] handleTab skip: session", session.slice(0, 8), "has inflight task", inflight.taskId?.slice?.(0, 8));
     return;
   }
 
@@ -446,20 +446,20 @@ async function handleTab(tabId) {
       NEXT_TASK_WAIT_MS + 5000,
     );
   } catch (e) {
-    console.warn("[cgcon sw] next_task failed", session, e.message);
+    console.warn("[relay sw] next_task failed", session, e.message);
     return;
   }
   if (!claim?.task) return;
 
   const { taskId, text } = claim.task;
-  console.log("[cgcon sw] claimed", taskId.slice(0, 8), "session", session.slice(0, 8));
+  console.log("[relay sw] claimed", taskId.slice(0, 8), "session", session.slice(0, 8));
   await markInflight(session, taskId);
 
   try {
     const runRes = await chrome.tabs.sendMessage(tabId, {
       type: "run-task", taskId, text,
     });
-    dlog("[cgcon sw] run-task response", taskId.slice(0,8), "status=", runRes?.status, "hasReply=", typeof runRes?.reply === "string", "error=", runRes?.error);
+    dlog("[relay sw] run-task response", taskId.slice(0,8), "status=", runRes?.status, "hasReply=", typeof runRes?.reply === "string", "error=", runRes?.error);
     if (runRes?.error) throw new Error(runRes.error);
     if (runRes?.status !== "submitted") {
       // content-script 老版本仍可能返回 { reply }，兼容一下
@@ -471,7 +471,7 @@ async function handleTab(tabId) {
       throw new Error("run-task did not acknowledge submission");
     }
     // 登记 pendingReply，让 SW 主动采样完成
-    dlog("[cgcon sw] registering pendingReply", taskId.slice(0,8), "baseline=", runRes.baseline);
+    dlog("[relay sw] registering pendingReply", taskId.slice(0,8), "baseline=", runRes.baseline);
     await setPendingReply(taskId, {
       session,
       tabId,
@@ -484,7 +484,7 @@ async function handleTab(tabId) {
       lastSampleText: "",
     });
   } catch (e) {
-    console.warn("[cgcon sw] task failed", taskId, e);
+    console.warn("[relay sw] task failed", taskId, e);
     await httpJson("POST", `/internal/tasks/${taskId}/complete`, { error: e.message }).catch(() => {});
     await setStorage(STORAGE_KEYS.LAST_ERROR, {
       taskId, session, error: e.message, at: Date.now(),
@@ -517,7 +517,7 @@ async function reconcileInflight() {
   // 1) 该 session 的 tab 消失了 → 清理 inflight
   for (const s of Object.keys(inflight)) {
     if (!liveSessions.has(s)) {
-      console.log("[cgcon sw] reconcile: dropping inflight for missing session", s.slice(0, 8));
+      console.log("[relay sw] reconcile: dropping inflight for missing session", s.slice(0, 8));
       await clearInflight(s);
     }
   }
@@ -528,7 +528,7 @@ async function reconcileInflight() {
     try {
       const t = await httpJson("GET", `/v1/tasks/${entry.taskId}`);
       if (t && ["done", "failed", "cancelled", "expired"].includes(t.status)) {
-        console.log("[cgcon sw] reconcile: task", entry.taskId.slice(0, 8), "already", t.status, "→ clearing inflight");
+        console.log("[relay sw] reconcile: task", entry.taskId.slice(0, 8), "already", t.status, "→ clearing inflight");
         // 找到对应 tabId（优先从 pendingReplies 拿，回退到反查 tab_session_map）
         let tabId = null;
         const pmap = await listPendingReplies();
@@ -593,7 +593,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (type === "session-hello") {
     if (sender.tab?.id && msg.session) {
       rememberTabSession(sender.tab.id, msg.session).then(() => {
-        handleTab(sender.tab.id).catch((e) => console.warn("[cgcon sw] hello poll failed", e));
+        handleTab(sender.tab.id).catch((e) => console.warn("[relay sw] hello poll failed", e));
       });
     }
     sendResponse({ status: "ok" });
@@ -677,7 +677,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         sendResponse({ recovered: r?.recovered ?? false, status: r?.status });
       } catch (e) {
-        console.warn("[cgcon sw] recover-task failed", e);
+        console.warn("[relay sw] recover-task failed", e);
         sendResponse({ error: e.message });
       }
     })();
@@ -755,4 +755,4 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return false;
 });
 
-console.log("[cgcon sw] loaded");
+console.log("[relay sw] loaded");

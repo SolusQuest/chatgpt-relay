@@ -1,4 +1,4 @@
-# cgcon Extension (MV3)
+# gpt-relay Extension (MV3)
 
 Chrome/Edge/Brave 扩展。安装到浏览器后，负责在 chatgpt.com 页面里执行 relay
 分发的 review 任务。
@@ -13,7 +13,7 @@ Chrome/Edge/Brave 扩展。安装到浏览器后，负责在 chatgpt.com 页面�
 
 ## 更新代码后
 
-- `chrome://extensions/` → 找到 cgcon Relay → 点 **刷新 (Reload)** 按钮
+- `chrome://extensions/` → 找到 gpt-relay → 点 **刷新 (Reload)** 按钮
 - 刷新 chatgpt.com 标签页（让 content-script 重新注入）
 
 ## 使用建议
@@ -89,7 +89,7 @@ npm start
 
 # 4. 发一个 review（另一个 shell）
 "帮我 review 这段代码：function add(a,b){return a+b}" | \
-  cgcon review --session <id-from-popup> --stdin --timeout 60000
+  gpt-relay review --session <id-from-popup> --stdin --timeout 60000
 
 # 5. 恢复测试：
 #    a) 发一个 review，看到"处理中"banner 时立即 F5

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// skills/cgcon-review/scripts/list.mjs
+// skills/gpt-relay-review/scripts/list.mjs
 // 列出最近的 tasks（默认 20 条）。
 import { httpJson } from "./lib.mjs";
 const args = process.argv.slice(2);

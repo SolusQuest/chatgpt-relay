@@ -29,8 +29,8 @@ async function get(p: string): Promise<{ status: number; json: any }> {
 }
 
 before(async () => {
-  dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "cgcon-rec-"));
-  process.env.CGCON_DATA_DIR = dataDir;
+  dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-relay-rec-"));
+  process.env.GPT_RELAY_DATA_DIR = dataDir;
   const cfg = loadConfig();
   const h = createApp(cfg);
   stop = h.stopMaintenance;

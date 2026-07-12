@@ -1,13 +1,13 @@
-# cgcon — Agent 使用指南
+# gpt-relay — Agent 使用指南
 
 面向 AI coding agent（Codex / Claude Code / 其他）的 API 说明。目标：一次读完就
-能正确用 cgcon 让 ChatGPT web 参与 review / 交叉验证 / 长文本审阅。
+能正确用 gpt-relay 让 ChatGPT web 参与 review / 交叉验证 / 长文本审阅。
 
 ## 一句话
 
-cgcon 是本地 SQLite 队列服务，agent 提交 task → 浏览器扩展在 ChatGPT 页面执行
+gpt-relay 是本地 SQLite 队列服务，agent 提交 task → 浏览器扩展在 ChatGPT 页面执行
 → 回复回写到 SQLite → agent 拉回。默认地址 `http://127.0.0.1:8765`，数据落在
-`~/.cgcon/cgcon.db`。所有 task 落盘、可续、可回查。
+`~/.gpt-relay/gpt-relay.db`。所有 task 落盘、可续、可回查。
 
 ## 何时用
 
@@ -25,7 +25,7 @@ cgcon 是本地 SQLite 队列服务，agent 提交 task → 浏览器扩展在 C
 
 # API 参考
 
-所有响应都是 `application/json`。URL 前缀 `http://127.0.0.1:8765`（可用 `CGCON_URL`
+所有响应都是 `application/json`。URL 前缀 `http://127.0.0.1:8765`（可用 `GPT_RELAY_URL`
 覆盖）。字段名统一 camelCase。所有时间戳都是**毫秒 Unix epoch**（`Date.now()`）。
 
 ## Status 枚举
@@ -68,7 +68,7 @@ cgcon 是本地 SQLite 队列服务，agent 提交 task → 浏览器扩展在 C
 {
   "session": "<sessionId>",       // 必填。UUID 或 ChatGPT conversation id
   "text": "<prompt>",             // 必填。≤ 512 KB
-  "timeout": 600000,              // 可选。默认 CGCON_DEFAULT_TIMEOUT_MS (10 min)
+  "timeout": 600000,              // 可选。默认 GPT_RELAY_DEFAULT_TIMEOUT_MS (10 min)
   "clientRequestId": "cli-abc"    // 可选。幂等 key，同 session 重复 POST 返回同一 taskId
 }
 ```
@@ -90,8 +90,8 @@ cgcon 是本地 SQLite 队列服务，agent 提交 task → 浏览器扩展在 C
 | 400 | `missing text` | text 为空 |
 | 409 | `session_paused` | session 处于 paused 状态 |
 | 409 | `duplicate_request` | 同 CRI 已有另一活跃 task（罕见） |
-| 413 | `task_too_large` | text 超过 `CGCON_MAX_TASK_BYTES`（512 KB） |
-| 429 | `queue_full` | 单 session queued 已达 `CGCON_MAX_QUEUED_PER_SESSION`（50） |
+| 413 | `task_too_large` | text 超过 `GPT_RELAY_MAX_TASK_BYTES`（512 KB） |
+| 429 | `queue_full` | 单 session queued 已达 `GPT_RELAY_MAX_QUEUED_PER_SESSION`（50） |
 
 ## 端点：`GET /v1/tasks/:id` — 查询 / 长轮询
 
@@ -248,7 +248,7 @@ curl -s "http://127.0.0.1:8765/v1/tasks/$T?wait=60000"
 
 ## 恢复中断的 task
 
-**Task 一旦提交就永远能找回**（除非用户 `rm ~/.cgcon/cgcon.db`）。Agent 崩溃/
+**Task 一旦提交就永远能找回**（除非用户 `rm ~/.gpt-relay/gpt-relay.db`）。Agent 崩溃/
 被 Ctrl-C，只要记下 taskId 即可：
 
 ```bash
@@ -256,7 +256,7 @@ curl -s "http://127.0.0.1:8765/v1/tasks/$T?wait=60000"
 ```
 
 Node 里若用了 `client/agent-client.ts`，`review()` 提交时会写
-`~/.cgcon/pending/<taskId>.json`。之后用 `resumePending()` 一次性扫回所有未
+`~/.gpt-relay/pending/<taskId>.json`。之后用 `resumePending()` 一次性扫回所有未
 完结 task。
 
 ## 幂等
@@ -275,7 +275,7 @@ Node 里若用了 `client/agent-client.ts`，`review()` 提交时会写
 
 ```bash
 # 1. relay 是否在跑
-curl -sf http://127.0.0.1:8765/health >/dev/null && echo ok || echo "relay down; run: cgcon start"
+curl -sf http://127.0.0.1:8765/health >/dev/null && echo ok || echo "relay down; run: gpt-relay start"
 
 # 2. 是否有活跃 ChatGPT tab
 n=$(curl -sf http://127.0.0.1:8765/v1/sessions | jq -r '.sessions | length')
@@ -285,7 +285,7 @@ n=$(curl -sf http://127.0.0.1:8765/v1/sessions | jq -r '.sessions | length')
 curl -sf http://127.0.0.1:8765/v1/sessions | jq '.sessions[] | select(.paused==false) | .session' | head -1
 ```
 
-如无 relay：让用户运行 `cgcon start` 或 `npm start`。
+如无 relay：让用户运行 `gpt-relay start` 或 `npm start`。
 如无 session：让用户打开 chatgpt.com 并确认页面顶部绿色 banner `Relay: xxxxxxxx…`。
 如全 paused：把 pauseReason 转告用户（通常是验证码 / 限速）。
 
@@ -307,20 +307,20 @@ curl -sf http://127.0.0.1:8765/v1/sessions | jq '.sessions[] | select(.paused==f
 
 | 变量 | 默认 | 用途 |
 |---|---|---|
-| `CGCON_URL` | `http://127.0.0.1:8765` | agent 端 relay URL |
-| `CGCON_PORT` | `8765` | server 端口 |
-| `CGCON_HOST` | `127.0.0.1` | server 监听地址 |
-| `CGCON_DATA_DIR` | `~/.cgcon` | 数据目录 |
-| `CGCON_DB_FILE` | `$DATA_DIR/cgcon.db` | SQLite 文件 |
-| `CGCON_DEFAULT_TIMEOUT_MS` | `600000` | 单 task 默认超时（**仅当 POST 未传 `timeout` 字段时生效**） |
-| `CGCON_MAX_TASK_BYTES` | `524288` | prompt 上限 |
-| `CGCON_MAX_QUEUED_PER_SESSION` | `50` | 单 session 队列上限 |
-| `CGCON_PENDING_DIR` | `$DATA_DIR/pending` | client-side pending files 目录 |
+| `GPT_RELAY_URL` | `http://127.0.0.1:8765` | agent 端 relay URL |
+| `GPT_RELAY_PORT` | `8765` | server 端口 |
+| `GPT_RELAY_HOST` | `127.0.0.1` | server 监听地址 |
+| `GPT_RELAY_DATA_DIR` | `~/.gpt-relay` | 数据目录 |
+| `GPT_RELAY_DB_FILE` | `$DATA_DIR/gpt-relay.db` | SQLite 文件 |
+| `GPT_RELAY_DEFAULT_TIMEOUT_MS` | `600000` | 单 task 默认超时（**仅当 POST 未传 `timeout` 字段时生效**） |
+| `GPT_RELAY_MAX_TASK_BYTES` | `524288` | prompt 上限 |
+| `GPT_RELAY_MAX_QUEUED_PER_SESSION` | `50` | 单 session 队列上限 |
+| `GPT_RELAY_PENDING_DIR` | `$DATA_DIR/pending` | client-side pending files 目录 |
 
 ---
 
 # 相关文档
 
 - `README.md` — 项目总览、CLI 用法
-- `skills/cgcon-review/SKILL.md` — Codex/Claude skill 定义（推荐给 skill runner 直接引用）
+- `skills/gpt-relay-review/SKILL.md` — Codex/Claude skill 定义（推荐给 skill runner 直接引用）
 - `extension/README.md` — 扩展加载、恢复行为

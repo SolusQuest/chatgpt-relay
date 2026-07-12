@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// skills/cgcon-review/scripts/health.mjs
+// skills/gpt-relay-review/scripts/health.mjs
 // 检查 relay 是否可达。exit 0=ok，1=不可达。
 import { BASE, httpJson } from "./lib.mjs";
 try {
@@ -8,6 +8,6 @@ try {
   console.error(`unexpected: ${JSON.stringify(r)}`); process.exit(2);
 } catch (e) {
   console.error(`relay not reachable at ${BASE}: ${e.message}`);
-  console.error(`hint: start it with 'cgcon start' or 'node server/index.ts' in the cgcon repo`);
+  console.error(`hint: start it with 'gpt-relay start' or 'node server/index.ts' in the gpt-relay repo`);
   process.exit(1);
 }

@@ -1,16 +1,16 @@
 {
-  "name": "cgcon",
-  "version": "3.0.0-alpha.0",
+  "name": "gpt-relay",
+  "version": "1.0.0",
   "description": "ChatGPT 网页自动 Relay 工具（SQLite 队列 + MV3 扩展）",
   "main": "server/index.ts",
   "bin": {
-    "cgcon": "./bin/cgcon.ts"
+    "gpt-relay": "./bin/gpt-relay.ts"
   },
   "type": "module",
   "scripts": {
     "start": "tsx server/index.ts",
     "dev": "tsx watch server/index.ts",
-    "cli": "tsx bin/cgcon.ts",
+    "cli": "tsx bin/gpt-relay.ts",
     "test": "tsx --test test/**/*.test.ts",
     "typecheck": "tsc --noEmit"
   },

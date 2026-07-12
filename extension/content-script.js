@@ -12,8 +12,8 @@
 
 (() => {
   "use strict";
-  if (window.__cgconContentLoaded) return;
-  window.__cgconContentLoaded = true;
+  if (window.__gptRelayContentLoaded) return;
+  window.__gptRelayContentLoaded = true;
 
   // ── 选择器 & safety pattern ─────────────────────────────
   const SELECTORS = {
@@ -62,7 +62,7 @@
 
   const ACTION_DELAY_MIN = 250;
   const ACTION_DELAY_MAX = 900;
-  const INFLIGHT_KEY = "cgcon_inflight_v3";
+  const INFLIGHT_KEY = "gpt_relay_inflight_v3";
   const FETCH_FAIL_THRESHOLD = 3;
   const RELOAD_COOLDOWN_MS = 60_000;
 
@@ -153,10 +153,10 @@
   function getSessionId() {
     const m = location.pathname.match(/\/c\/([a-f0-9-]+)/);
     if (m) return m[1];
-    let sid = sessionStorage.getItem("cgcon_relay_session_id");
+    let sid = sessionStorage.getItem("gpt_relay_session_id");
     if (!sid) {
       sid = (crypto.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`);
-      sessionStorage.setItem("cgcon_relay_session_id", sid);
+      sessionStorage.setItem("gpt_relay_session_id", sid);
     }
     return sid;
   }
@@ -270,7 +270,7 @@
       injectedOk = true;
       method = "paste";
     } catch (e) {
-      console.warn("[cgcon content] Path 1 (paste event) failed", e);
+      console.warn("[relay content] Path 1 (paste event) failed", e);
     }
 
     // Path 2: execCommand insertText（前台 tab focused 时最可靠）
@@ -299,7 +299,7 @@
         injectedOk = true;
         method = "dom-fallback";
       } catch (e) {
-        console.warn("[cgcon content] Path 3 (DOM fallback) failed", e);
+        console.warn("[relay content] Path 3 (DOM fallback) failed", e);
       }
     }
 
@@ -323,7 +323,7 @@
       throw new Error(`文本注入方法 ${method} 未激活 send 按钮 (Lexical state 未同步)`);
     }
 
-    console.log(`[cgcon content] injected via ${method}, DOM len=${injected.length}`);
+    console.log(`[relay content] injected via ${method}, DOM len=${injected.length}`);
   }
   async function clickSend() {
     const b = await waitForSendReady();
@@ -342,7 +342,7 @@
       clearInflight();
       return;
     }
-    console.log("[cgcon content] found inflight from previous session", rec);
+    console.log("[relay content] found inflight from previous session", rec);
     updateBanner(`回捞中: ${rec.taskId.slice(0, 8)}…`, "#f39c12");
 
     try {
@@ -354,7 +354,7 @@
       if (hasNew && !isGenerating()) {
         const last = getLastText(now);
         if (last) {
-          console.log("[cgcon content] recovered reply from DOM:", last.slice(0, 50));
+          console.log("[relay content] recovered reply from DOM:", last.slice(0, 50));
           const r = await chrome.runtime.sendMessage({
             type: "recover-task",
             taskId: rec.taskId,
@@ -377,11 +377,11 @@
         }).catch(() => {});
         return;
       }
-      console.log("[cgcon content] no new reply found; requeuing", rec.taskId);
+      console.log("[relay content] no new reply found; requeuing", rec.taskId);
       await chrome.runtime.sendMessage({ type: "requeue-task", taskId: rec.taskId });
       clearInflight();
     } catch (e) {
-      console.warn("[cgcon content] recover failed", e);
+      console.warn("[relay content] recover failed", e);
     }
   }
 
@@ -412,7 +412,7 @@
   function maybeReload(reason) {
     if (Date.now() - lastReloadAt < RELOAD_COOLDOWN_MS) return;
     lastReloadAt = Date.now();
-    console.warn("[cgcon content] reloading page:", reason);
+    console.warn("[relay content] reloading page:", reason);
     updateBanner(`重新加载: ${reason.slice(0, 30)}`, "#e67e22");
     // 让扩展知道正在 reload，避免此时派发新任务
     chrome.runtime.sendMessage({ type: "network-reload", reason }).catch(() => {});
@@ -524,7 +524,7 @@
           sendResponse({ error: `unknown message type: ${msg.type}` });
         }
       } catch (e) {
-        console.warn("[cgcon content] error handling", msg.type, e);
+        console.warn("[relay content] error handling", msg.type, e);
         updateBanner(`错误: ${e.message.slice(0, 40)}`, "#e74c3c");
         setTimeout(() => updateBanner(`Relay: ${getSessionId().slice(0, 8)}…`, "#10a37f"), 5000);
         // 不 clear inflight：让下次刷新有机会回捞
@@ -549,5 +549,5 @@
   // 页面加载后 1.5s 尝试 inflight 恢复
   setTimeout(() => { void tryRecoverInflight(); }, 1500);
 
-  console.log("[cgcon content] loaded, session=", getSessionId());
+  console.log("[relay content] loaded, session=", getSessionId());
 })();

@@ -48,10 +48,10 @@ function startFakeExtension(sessionId: string, replier: (prompt: string) => stri
 }
 
 before(async () => {
-  dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "cgcon-e2e-"));
-  pendingDir = fs.mkdtempSync(path.join(os.tmpdir(), "cgcon-pending-"));
-  process.env.CGCON_DATA_DIR = dataDir;
-  process.env.CGCON_PENDING_DIR = pendingDir;
+  dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-relay-e2e-"));
+  pendingDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-relay-pending-"));
+  process.env.GPT_RELAY_DATA_DIR = dataDir;
+  process.env.GPT_RELAY_PENDING_DIR = pendingDir;
   const config = loadConfig();
   const handle = createApp(config);
   stopMaintenance = handle.stopMaintenance;
@@ -60,7 +60,7 @@ before(async () => {
   });
   const addr = server!.address() as AddressInfo;
   baseUrl = `http://127.0.0.1:${addr.port}`;
-  process.env.CGCON_URL = baseUrl;
+  process.env.GPT_RELAY_URL = baseUrl;
 });
 
 after(async () => {

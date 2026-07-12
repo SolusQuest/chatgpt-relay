@@ -5,9 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { http, HttpError } from "./http.js";
 
-const DEFAULT_BASE = process.env.CGCON_URL ?? "http://127.0.0.1:8765";
-const PENDING_DIR = process.env.CGCON_PENDING_DIR ??
-  path.join(os.homedir(), ".cgcon", "pending");
+const DEFAULT_BASE = process.env.GPT_RELAY_URL ?? "http://127.0.0.1:8765";
+const PENDING_DIR = process.env.GPT_RELAY_PENDING_DIR ??
+  path.join(os.homedir(), ".gpt-relay", "pending");
 
 const TERMINAL = new Set(["done", "failed", "cancelled", "expired"]);
 
@@ -138,11 +138,11 @@ export async function review(
   const started = Date.now();
   const submitted = await submitTask(text, opts); const { taskId } = submitted;
   if (submitted.encodingWarning) {
-    process.stderr.write(`[cgcon] WARNING: server flagged suspicious encoding: ${submitted.encodingWarning}\n`);
-    process.stderr.write(`[cgcon]   hint (PowerShell): $OutputEncoding = [System.Text.UTF8Encoding]::new()\n`);
+    process.stderr.write(`[gpt-relay] WARNING: server flagged suspicious encoding: ${submitted.encodingWarning}\n`);
+    process.stderr.write(`[gpt-relay]   hint (PowerShell): $OutputEncoding = [System.Text.UTF8Encoding]::new()\n`);
   }
   if (submitted.encodingFixed) {
-    process.stderr.write(`[cgcon] note: server auto-fixed encoding (${submitted.encodingFixed})\n`);
+    process.stderr.write(`[gpt-relay] note: server auto-fixed encoding (${submitted.encodingFixed})\n`);
   }
   writePending({
     taskId,

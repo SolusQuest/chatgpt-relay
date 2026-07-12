@@ -30,23 +30,23 @@ function envStr(name: string, fallback: string): string {
   return raw != null && raw !== "" ? raw : fallback;
 }
 
-// 默认数据目录 ~/.cgcon
-const DEFAULT_DATA_DIR = path.join(os.homedir(), ".cgcon");
+// 默认数据目录 ~/.gpt-relay
+const DEFAULT_DATA_DIR = path.join(os.homedir(), ".gpt-relay");
 
 export function loadConfig(): Config {
-  const dataDir = envStr("CGCON_DATA_DIR", DEFAULT_DATA_DIR);
+  const dataDir = envStr("GPT_RELAY_DATA_DIR", DEFAULT_DATA_DIR);
   return {
-    port: envInt("CGCON_PORT", 8765),
-    host: envStr("CGCON_HOST", "127.0.0.1"),
+    port: envInt("GPT_RELAY_PORT", 8765),
+    host: envStr("GPT_RELAY_HOST", "127.0.0.1"),
     dataDir,
-    dbFile: envStr("CGCON_DB_FILE", path.join(dataDir, "cgcon.db")),
-    logDir: envStr("CGCON_LOG_DIR", path.join(dataDir, "logs")),
-    defaultTimeoutMs: envInt("CGCON_DEFAULT_TIMEOUT_MS", 10 * 60_000),
-    activeTaskGraceMs: envInt("CGCON_ACTIVE_TASK_GRACE_MS", 30_000),
-    heartbeatStaleMs: envInt("CGCON_HEARTBEAT_STALE_MS", 60_000),
-    sessionActiveMs: envInt("CGCON_SESSION_ACTIVE_MS", 30_000),
-    maintenanceIntervalMs: envInt("CGCON_MAINTENANCE_INTERVAL_MS", 5_000),
-    maxTaskTextBytes: envInt("CGCON_MAX_TASK_BYTES", 512 * 1024),
-    maxQueuedPerSession: envInt("CGCON_MAX_QUEUED_PER_SESSION", 50),
+    dbFile: envStr("GPT_RELAY_DB_FILE", path.join(dataDir, "gpt-relay.db")),
+    logDir: envStr("GPT_RELAY_LOG_DIR", path.join(dataDir, "logs")),
+    defaultTimeoutMs: envInt("GPT_RELAY_DEFAULT_TIMEOUT_MS", 10 * 60_000),
+    activeTaskGraceMs: envInt("GPT_RELAY_ACTIVE_TASK_GRACE_MS", 30_000),
+    heartbeatStaleMs: envInt("GPT_RELAY_HEARTBEAT_STALE_MS", 60_000),
+    sessionActiveMs: envInt("GPT_RELAY_SESSION_ACTIVE_MS", 30_000),
+    maintenanceIntervalMs: envInt("GPT_RELAY_MAINTENANCE_INTERVAL_MS", 5_000),
+    maxTaskTextBytes: envInt("GPT_RELAY_MAX_TASK_BYTES", 512 * 1024),
+    maxQueuedPerSession: envInt("GPT_RELAY_MAX_QUEUED_PER_SESSION", 50),
   };
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// bin/cgcon.ts
-// cgcon CLI: start/health/tasks/show/cancel/sessions/resume/review。
+// bin/gpt-relay.ts
+// gpt-relay CLI: start/health/tasks/show/cancel/sessions/resume/review。
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,8 +16,8 @@ import { http } from "../client/http.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
-const PORT = Number(process.env.CGCON_PORT ?? 8765);
-const BASE = process.env.CGCON_URL ?? `http://127.0.0.1:${PORT}`;
+const PORT = Number(process.env.GPT_RELAY_PORT ?? 8765);
+const BASE = process.env.GPT_RELAY_URL ?? `http://127.0.0.1:${PORT}`;
 
 async function cmdStart(args: string[]): Promise<number> {
   const entry = path.join(REPO_ROOT, "server", "index.ts");
@@ -109,7 +109,7 @@ async function cmdTasks(args: string[]): Promise<number> {
 async function cmdShow(args: string[]): Promise<number> {
   const id = args[0];
   if (!id) {
-    console.error("usage: cgcon show <taskId>");
+    console.error("usage: gpt-relay show <taskId>");
     return 64;
   }
   const t = await getTask(id, BASE);
@@ -147,7 +147,7 @@ async function cmdShow(args: string[]): Promise<number> {
 async function cmdCancel(args: string[]): Promise<number> {
   const id = args[0];
   if (!id) {
-    console.error("usage: cgcon cancel <taskId>");
+    console.error("usage: gpt-relay cancel <taskId>");
     return 64;
   }
   const t = await cancelTask(id, BASE);
@@ -202,7 +202,7 @@ async function cmdReview(args: string[]): Promise<number> {
     else if (a === "--cri") cri = args[++i];
   }
   if (!session) {
-    console.error("usage: cgcon review --session <id> (--text T | --stdin | --file F) [--no-wait] [--timeout ms] [--cri key]");
+    console.error("usage: gpt-relay review --session <id> (--text T | --stdin | --file F) [--no-wait] [--timeout ms] [--cri key]");
     return 64;
   }
   if (readStdin) {
@@ -241,7 +241,7 @@ async function readAllStdin(): Promise<string> {
 }
 
 function usage(): void {
-  console.log(`cgcon <command>
+  console.log(`gpt-relay <command>
 
 commands:
   start                    start relay server (foreground)
@@ -256,9 +256,9 @@ commands:
                            submit a review and wait
 
 env:
-  CGCON_PORT (${PORT})     server port
-  CGCON_URL                override base url
-  CGCON_PENDING_DIR        agent pending records dir
+  GPT_RELAY_PORT (${PORT})     server port
+  GPT_RELAY_URL                override base url
+  GPT_RELAY_PENDING_DIR        agent pending records dir
 `);
 }
 

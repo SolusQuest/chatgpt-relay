@@ -1,12 +1,12 @@
-// skills/cgcon-review/scripts/lib.mjs
+// skills/gpt-relay-review/scripts/lib.mjs
 // 共享工具：BASE URL、pending 目录、简单 HTTP。仅依赖 Node built-ins。
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export const BASE = process.env.CGCON_URL ?? `http://127.0.0.1:${process.env.CGCON_PORT ?? 8766}`;
-export const PENDING_DIR = process.env.CGCON_PENDING_DIR ??
-  path.join(os.homedir(), ".cgcon", "pending");
+export const BASE = process.env.GPT_RELAY_URL ?? `http://127.0.0.1:${process.env.GPT_RELAY_PORT ?? 8766}`;
+export const PENDING_DIR = process.env.GPT_RELAY_PENDING_DIR ??
+  path.join(os.homedir(), ".gpt-relay", "pending");
 
 const TERMINAL = new Set(["done", "failed", "cancelled", "expired"]);
 

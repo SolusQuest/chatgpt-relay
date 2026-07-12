@@ -16,9 +16,9 @@ let stopMaintenance: (() => void) | null = null;
 let dataDir = "";
 
 before(async () => {
-  dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "cgcon-v1-"));
-  process.env.CGCON_DATA_DIR = dataDir;
-  process.env.CGCON_PORT = "0";
+  dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-relay-v1-"));
+  process.env.GPT_RELAY_DATA_DIR = dataDir;
+  process.env.GPT_RELAY_PORT = "0";
   const config = loadConfig();
   const handle = createApp(config);
   stopMaintenance = handle.stopMaintenance;

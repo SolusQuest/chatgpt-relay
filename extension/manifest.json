@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "cgcon Relay",
-  "short_name": "cgcon",
-  "version": "3.0.0",
-  "description": "Bridge ChatGPT web to the local cgcon relay for AI-agent reviews.",
+  "name": "gpt-relay",
+  "short_name": "gpt-relay",
+  "version": "1.0.0",
+  "description": "Bridge ChatGPT web to the local gpt-relay service for AI-agent reviews.",
   "permissions": [
     "storage",
     "alarms",
@@ -34,7 +34,7 @@
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "cgcon Relay",
+    "default_title": "gpt-relay Relay",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png",

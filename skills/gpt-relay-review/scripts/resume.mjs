@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// skills/cgcon-review/scripts/resume.mjs
-// 扫描 ~/.cgcon/pending 目录，对每个 taskId 查最新状态；terminal 项自动清理。
+// skills/gpt-relay-review/scripts/resume.mjs
+// 扫描 ~/.gpt-relay/pending 目录，对每个 taskId 查最新状态；terminal 项自动清理。
 // 输出：一段人类可读表格 + 每条 done 的 reply（分隔线包围）。
 import { httpJson, isTerminal, listPending, clearPending } from "./lib.mjs";
 const items = listPending();
