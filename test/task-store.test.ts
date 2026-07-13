@@ -14,6 +14,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     dbFile: ":memory:",
     logDir: "",
     defaultTimeoutMs: 60_000,
+    maxTaskTimeoutMs: 3_600_000,
     activeTaskGraceMs: 5_000,
     heartbeatStaleMs: 30_000,
     sessionActiveMs: 30_000,
@@ -55,6 +56,21 @@ test("createTask returns queued task", () => {
   assert.equal(t.text, "hello");
   assert.equal(t.reply, null);
   assert.ok(t.expiresAt > t.submittedAt);
+});
+
+test("createTask caps requested timeout at configured maximum", () => {
+  const store = makeStore({
+    defaultTimeoutMs: 900_000,
+    maxTaskTimeoutMs: 3_600_000,
+  });
+  const task = store.createTask({
+    session: "s1",
+    text: "long review",
+    timeoutMs: 90 * 60_000,
+    now: 100,
+  });
+  assert.equal(task.timeoutMs, 3_600_000);
+  assert.equal(task.expiresAt, 3_600_100);
 });
 
 test("claimNextTask picks oldest queued and marks in_progress", () => {

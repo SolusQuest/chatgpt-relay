@@ -100,6 +100,8 @@ test("internal next_task returns null then task on demand", async () => {
   await post("/v1/tasks", { session: "sD", text: "hi" });
   const got = await get("/internal/next_task?session=sD");
   assert.equal(got.json.task?.text, "hi");
+  assert.equal(typeof got.json.task?.expiresAt, "number");
+  assert.equal(typeof got.json.task?.completionDeadlineAt, "number");
 });
 
 test("internal next_task honors long-poll wait", async () => {
@@ -111,6 +113,23 @@ test("internal next_task honors long-poll wait", async () => {
   const elapsed = Date.now() - t0;
   assert.ok(elapsed >= 100, `should wait, elapsed=${elapsed}`);
   assert.equal(r.json.task?.text, "delayed");
+});
+
+test("internal user-stop cancels an in-progress task", async () => {
+  const created = await post("/v1/tasks", { session: "stop-api", text: "stop me" });
+  const taskId = created.json.taskId;
+  const claim = await get("/internal/next_task?session=stop-api");
+  assert.equal(claim.json.task?.taskId, taskId);
+
+  const stopped = await post(`/internal/tasks/${taskId}/user-stop`, {
+    reason: "user stopped before reply",
+  });
+  assert.equal(stopped.status, 200);
+  assert.equal(stopped.json.status, "cancelled");
+
+  const task = await get(`/v1/tasks/${taskId}`);
+  assert.equal(task.json.status, "cancelled");
+  assert.equal(task.json.error, "user stopped before reply");
 });
 
 test("internal requeue moves in_progress back to queued", async () => {

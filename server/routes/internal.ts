@@ -38,6 +38,8 @@ export function createInternalRouter(store: TaskStore): Router {
         text: task.text,
         timeoutMs: task.timeoutMs,
         submittedAt: task.submittedAt,
+        expiresAt: task.expiresAt,
+        completionDeadlineAt: task.expiresAt + store.getActiveTaskGraceMs(),
         requeueCount: task.requeueCount,
       },
     });
@@ -52,6 +54,24 @@ export function createInternalRouter(store: TaskStore): Router {
         text: typeof body.text === "string" ? body.text : undefined,
         error: typeof body.error === "string" ? body.error : undefined,
       });
+      return res.json({ status: task.status, taskId: task.id });
+    } catch (err) {
+      if (err instanceof TaskStoreError) {
+        return res.status(400).json({ error: err.code, message: err.message });
+      }
+      throw err;
+    }
+  });
+
+  // 用户在 ChatGPT 页面点击 Stop：立即释放 task，避免刷新后重复提交。
+  router.post("/tasks/:id/user-stop", (req: Request, res: Response) => {
+    const id = String(req.params.id ?? "");
+    const body = (req.body ?? {}) as { reason?: unknown };
+    const reason = typeof body.reason === "string" && body.reason.length > 0
+      ? body.reason
+      : "user stopped before reply";
+    try {
+      const task = store.cancelTask(id, Date.now(), reason);
       return res.json({ status: task.status, taskId: task.id });
     } catch (err) {
       if (err instanceof TaskStoreError) {

@@ -149,6 +149,10 @@
     if (!msgs.length) return null;
     return msgs[msgs.length - 1].getAttribute("data-message-id") || null;
   }
+  function getLastUserId(msgs) {
+    if (!msgs.length) return null;
+    return msgs[msgs.length - 1].getAttribute("data-message-id") || null;
+  }
 
   function getSessionId() {
     const m = location.pathname.match(/\/c\/([a-f0-9-]+)/);
@@ -193,6 +197,21 @@
   function clearInflight() {
     sessionStorage.removeItem(INFLIGHT_KEY);
   }
+
+  // Stop 点击只记录用户意图；最终是否停止由后续 DOM 状态采样确认。
+  document.addEventListener("click", (event) => {
+    const target = event.target instanceof Element
+      ? event.target.closest(SELECTORS.stopButton.join(","))
+      : null;
+    const rec = readInflight();
+    if (!target || !rec?.taskId) return;
+    rec.stopRequestedAt = Date.now();
+    writeInflight(rec);
+    chrome.runtime.sendMessage({
+      type: "user-stop-requested",
+      taskId: rec.taskId,
+    }).catch(() => {});
+  }, true);
 
   // ── waitForCondition helper ──
   async function waitForCondition(pred, timeoutMs, checkEveryMs, ctx) {
@@ -354,7 +373,15 @@
       await waitForCondition(() => document.body ? true : null, 10000, 200, "wait body");
       await delay(1500);
       const now = getAssistantMessages();
-      const hasNew = now.length > (rec.baseline?.assistantCount ?? 0);
+      const users = getUserMessages();
+      const currentAssistantId = getLastAssistantId(now);
+      const currentUserId = getLastUserId(users);
+      const hasNew = rec.baseline?.lastAssistantId != null
+        ? !!currentAssistantId && currentAssistantId !== rec.baseline.lastAssistantId
+        : now.length > (rec.baseline?.assistantCount ?? 0);
+      const hasNewUser = rec.baseline?.lastUserId != null
+        ? !!currentUserId && currentUserId !== rec.baseline.lastUserId
+        : users.length > (rec.baseline?.userCount ?? 0);
 
       if (hasNew && !isGenerating()) {
         const last = getLastText(now);
@@ -370,6 +397,13 @@
           return;
         }
       }
+      if (rec.stopRequestedAt) {
+        chrome.runtime.sendMessage({
+          type: "user-stop-requested",
+          taskId: rec.taskId,
+        }).catch(() => {});
+        return;
+      }
       if (isGenerating()) {
         // 还在生成中：改由 SW 通过 poll-reply 主动采样，避免后台 tab observer 冻结。
         updateBanner(`回捞（生成中）: ${rec.taskId.slice(0, 8)}`, "#f39c12");
@@ -379,6 +413,15 @@
           baseline: rec.baseline ?? {
             assistantCount: 0, lastAssistantText: "", userCount: 0, startedAt: Date.now(),
           },
+        }).catch(() => {});
+        return;
+      }
+      if (hasNewUser) {
+        // user message 已经发送，但 assistant 尚未出现：不要重发 prompt。
+        chrome.runtime.sendMessage({
+          type: rec.stopRequestedAt ? "user-stop-requested" : "reattach-pending",
+          taskId: rec.taskId,
+          baseline: rec.baseline ?? {},
         }).catch(() => {});
         return;
       }
@@ -507,6 +550,7 @@
             assistantCount: _msgsAtSubmit.length,
             lastAssistantText: getLastText(_msgsAtSubmit),
             lastAssistantId: getLastAssistantId(_msgsAtSubmit),
+            lastUserId: getLastUserId(getUserMessages()),
             userCount: getUserMessages().length,
             startedAt: Date.now(),
           };

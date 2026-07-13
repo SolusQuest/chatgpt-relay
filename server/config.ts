@@ -10,6 +10,7 @@ export interface Config {
   dbFile: string;
   logDir: string;
   defaultTimeoutMs: number;
+  maxTaskTimeoutMs: number;
   activeTaskGraceMs: number;
   heartbeatStaleMs: number;
   sessionActiveMs: number;
@@ -41,8 +42,9 @@ export function loadConfig(): Config {
     dataDir,
     dbFile: envStr("GPT_RELAY_DB_FILE", path.join(dataDir, "gpt-relay.db")),
     logDir: envStr("GPT_RELAY_LOG_DIR", path.join(dataDir, "logs")),
-    defaultTimeoutMs: envInt("GPT_RELAY_DEFAULT_TIMEOUT_MS", 10 * 60_000),
-    activeTaskGraceMs: envInt("GPT_RELAY_ACTIVE_TASK_GRACE_MS", 30_000),
+    defaultTimeoutMs: envInt("GPT_RELAY_DEFAULT_TIMEOUT_MS", 15 * 60_000),
+    maxTaskTimeoutMs: envInt("GPT_RELAY_MAX_TASK_TIMEOUT_MS", 60 * 60_000),
+    activeTaskGraceMs: envInt("GPT_RELAY_ACTIVE_TASK_GRACE_MS", 60_000),
     heartbeatStaleMs: envInt("GPT_RELAY_HEARTBEAT_STALE_MS", 60_000),
     sessionActiveMs: envInt("GPT_RELAY_SESSION_ACTIVE_MS", 30_000),
     maintenanceIntervalMs: envInt("GPT_RELAY_MAINTENANCE_INTERVAL_MS", 5_000),

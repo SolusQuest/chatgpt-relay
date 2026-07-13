@@ -188,7 +188,8 @@ context is one of gpt-relay's advantages over stateless API calls).
 ## Handling long reviews
 
 ChatGPT can take several minutes on large prompts. Defaults are:
-- `--timeout` 600000 (10 min) end-to-end
+- 默认客户端等待 600000 (10 min)；task 默认超时 900000 (15 min)
+- `--timeout` 可显式设置 task/client timeout，最大 3600000 (60 min)
 - Long-poll chunks of 30s -- the script never busy-loops.
 
 If the shell/agent is interrupted mid-wait, the taskId is preserved in

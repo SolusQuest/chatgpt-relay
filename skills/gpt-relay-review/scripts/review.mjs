@@ -12,7 +12,7 @@ import { randomUUID } from "node:crypto";
 import { httpJson, isTerminal, writePending, clearPending } from "./lib.mjs";
 
 function parseArgs(argv) {
-  const o = { wait: true, timeoutMs: 10 * 60_000 };
+  const o = { wait: true, waitTimeoutMs: 10 * 60_000, taskTimeoutMs: undefined };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--session") o.session = argv[++i];
@@ -20,7 +20,10 @@ function parseArgs(argv) {
     else if (a === "--stdin") o.stdin = true;
     else if (a === "--file") o.file = argv[++i];
     else if (a === "--no-wait") o.wait = false;
-    else if (a === "--timeout") o.timeoutMs = Number(argv[++i]);
+    else if (a === "--timeout") {
+      o.taskTimeoutMs = Number(argv[++i]);
+      o.waitTimeoutMs = o.taskTimeoutMs;
+    }
     else if (a === "--cri") o.clientRequestId = argv[++i];
     else if (a === "-h" || a === "--help") o.help = true;
   }
@@ -46,9 +49,9 @@ if (!text) { console.error("no text provided"); process.exit(64); }
 
 const started = Date.now();
 const cri = args.clientRequestId ?? randomUUID();
-const created = await httpJson("POST", "/v1/tasks", {
-  session: args.session, text, timeout: args.timeoutMs, clientRequestId: cri,
-});
+const taskBody = { session: args.session, text, clientRequestId: cri };
+if (args.taskTimeoutMs != null) taskBody.timeout = args.taskTimeoutMs;
+const created = await httpJson("POST", "/v1/tasks", taskBody);
 const taskId = created.taskId;
 if (created.encodingWarning) {
   process.stderr.write(`[gpt-relay] WARNING: server flagged suspicious encoding: ${created.encodingWarning}\n`);
@@ -66,7 +69,7 @@ if (!args.wait) {
   process.exit(0);
 }
 
-const deadline = started + args.timeoutMs;
+const deadline = started + args.waitTimeoutMs;
 while (Date.now() < deadline) {
   const remaining = deadline - Date.now();
   const wait = Math.min(remaining, 30_000);
@@ -78,5 +81,5 @@ while (Date.now() < deadline) {
     process.exit(2);
   }
 }
-console.error(`timeout after ${args.timeoutMs}ms (taskId=${taskId} still pending; try 'resume')`);
+console.error(`timeout after ${args.waitTimeoutMs}ms (taskId=${taskId} still pending; try 'resume')`);
 process.exit(3);

@@ -2,8 +2,9 @@
 // bin/gpt-relay.ts
 // gpt-relay CLI: start/health/tasks/show/cancel/sessions/resume/review。
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   cancelTask,
   getTask,
@@ -16,12 +17,14 @@ import { http } from "../client/http.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
+const require = createRequire(import.meta.url);
+const TSX_LOADER = pathToFileURL(require.resolve("tsx")).href;
 const PORT = Number(process.env.GPT_RELAY_PORT ?? 8765);
 const BASE = process.env.GPT_RELAY_URL ?? `http://127.0.0.1:${PORT}`;
 
 async function cmdStart(args: string[]): Promise<number> {
   const entry = path.join(REPO_ROOT, "server", "index.ts");
-  const proc = spawn(process.execPath, ["--import", "tsx", entry, ...args], {
+  const proc = spawn(process.execPath, ["--import", TSX_LOADER, entry, ...args], {
     stdio: "inherit",
     env: process.env,
   });

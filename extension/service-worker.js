@@ -276,12 +276,17 @@ async function startDispatchLoop(session, tabId) {
           session,
           tabId,
           taskId,
+          expiresAt: claim.task.expiresAt,
+          completionDeadlineAt: claim.task.completionDeadlineAt,
           baseline: runRes.baseline ?? { assistantCount: 0, lastAssistantText: "", userCount: 0 },
           submittedAt: Date.now(),
           lastPollAt: 0,
           notStartedCount: 0,
           stableSampleCount: 0,
           lastSampleText: "",
+          wasGenerating: false,
+          stoppedNoReplyCount: 0,
+          stopRequestedAt: null,
         });
 
         // 等待当前任务完成（done/failed/recover/requeue 都会 deletePendingReply）
@@ -403,7 +408,9 @@ async function pollOnePending(taskId, rec) {
   const now = Date.now();
   dlog("[relay sw] pollOnePending", taskId.slice(0,8), "tab=", rec.tabId, "session=", rec.session?.slice?.(0,8), "notStarted=", rec.notStartedCount, "stable=", rec.stableSampleCount);
   // 硬超时
-  if (now - rec.submittedAt > POLL_HARD_TIMEOUT_MS) {
+  const hardDeadline = rec.completionDeadlineAt ??
+    ((rec.expiresAt ?? rec.submittedAt + POLL_HARD_TIMEOUT_MS) + 60_000);
+  if (now > hardDeadline) {
     console.warn("[relay sw] pending reply hard timeout", taskId);
     await failPending(taskId, rec, "pending reply hard timeout");
     return;
@@ -484,6 +491,8 @@ async function pollOnePending(taskId, rec) {
   if (snap.status === "generating") {
     // 进入生成中说明提交成功；重置 not-started 计数
     rec.notStartedCount = 0;
+    rec.wasGenerating = true;
+    rec.stoppedNoReplyCount = 0;
     rec.stableSampleCount = 0;
     rec.lastSampleText = snap.lastText ?? rec.lastSampleText ?? "";
     await setPendingReply(taskId, rec);
@@ -493,12 +502,23 @@ async function pollOnePending(taskId, rec) {
   if (snap.status === "posted-no-reply-yet") {
     // 用户已发出去但还没生成
     rec.notStartedCount = 0;
+    if (rec.stopRequestedAt || rec.wasGenerating) {
+      rec.stoppedNoReplyCount = (rec.stoppedNoReplyCount ?? 0) + 1;
+      if (rec.stoppedNoReplyCount >= 2) {
+        await cancelPending(taskId, rec, "user stopped before reply");
+        return;
+      }
+    }
     rec.lastSampleText = snap.lastText ?? rec.lastSampleText ?? "";
     await setPendingReply(taskId, rec);
     return;
   }
 
   if (snap.status === "not-started") {
+    if (rec.stopRequestedAt) {
+      await cancelPending(taskId, rec, "user stopped before request was sent");
+      return;
+    }
     rec.notStartedCount = (rec.notStartedCount ?? 0) + 1;
     if (rec.notStartedCount >= POLL_NOT_STARTED_MAX) {
       console.warn("[relay sw] pending never left not-started; failing", taskId);
@@ -518,6 +538,20 @@ async function failPending(taskId, rec, reason) {
     await httpJson("POST", `/internal/tasks/${taskId}/complete`, { error: reason });
   } catch (e) {
     console.warn("[relay sw] failPending POST failed", taskId, e.message);
+  }
+  await deletePendingReply(taskId);
+  await clearInflight(rec.session);
+  await notifyTabCleared(rec.tabId);
+  await setStorage(STORAGE_KEYS.LAST_ERROR, {
+    taskId, session: rec.session, error: reason, at: Date.now(),
+  });
+}
+
+async function cancelPending(taskId, rec, reason) {
+  try {
+    await httpJson("POST", `/internal/tasks/${taskId}/user-stop`, { reason });
+  } catch (e) {
+    console.warn("[relay sw] cancelPending POST failed", taskId, e.message);
   }
   await deletePendingReply(taskId);
   await clearInflight(rec.session);
@@ -742,22 +776,50 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (!sender.tab?.id) { sendResponse({ error: "no tab" }); return; }
         const sid = await getTabSession(sender.tab.id);
         if (!sid) { sendResponse({ error: "no session for tab" }); return; }
+        const existing = await getPendingReply(msg.taskId);
         await setPendingReply(msg.taskId, {
+          ...(existing ?? {}),
           session: sid,
           tabId: sender.tab.id,
           taskId: msg.taskId,
           baseline: msg.baseline ?? { assistantCount: 0, lastAssistantText: "", userCount: 0 },
-          submittedAt: Date.now(),
+          submittedAt: existing?.submittedAt ?? Date.now(),
           lastPollAt: 0,
           notStartedCount: 0,
           stableSampleCount: 0,
           lastSampleText: "",
+          wasGenerating: true,
+          stoppedNoReplyCount: existing?.stoppedNoReplyCount ?? 0,
+          stopRequestedAt: existing?.stopRequestedAt ?? null,
         });
         await markInflight(sid, msg.taskId);
         // 立即触发一次采样
         void pollPendingReplies();
         startDispatchLoop(sid, sender.tab.id).catch(() => {});
         sendResponse({ status: "ok" });
+      } catch (e) {
+        sendResponse({ error: e.message });
+      }
+    })();
+    return true;
+  }
+
+  if (type === "user-stop-requested") {
+    (async () => {
+      try {
+        const rec = await getPendingReply(msg.taskId);
+        if (!rec) {
+          await httpJson("POST", `/internal/tasks/${msg.taskId}/user-stop`, {
+            reason: "user stopped before reply",
+          }).catch(() => {});
+          sendResponse({ status: "cancelled" });
+          return;
+        }
+        rec.stopRequestedAt = Date.now();
+        rec.stoppedNoReplyCount = 0;
+        await setPendingReply(msg.taskId, rec);
+        setTimeout(() => { void pollPendingReplies(); }, 400);
+        sendResponse({ status: "stop-requested" });
       } catch (e) {
         sendResponse({ error: e.message });
       }

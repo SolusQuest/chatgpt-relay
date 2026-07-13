@@ -148,7 +148,11 @@ export class TaskStore {
 
   createTask(input: CreateTaskInput): Task {
     const now = input.now ?? Date.now();
-    const timeoutMs = normalizeTimeout(input.timeoutMs, this.config.defaultTimeoutMs);
+    const timeoutMs = normalizeTimeout(
+      input.timeoutMs,
+      this.config.defaultTimeoutMs,
+      this.config.maxTaskTimeoutMs,
+    );
     if (Buffer.byteLength(input.text, "utf8") > this.config.maxTaskTextBytes) {
       throw new TaskStoreError(
         `task text exceeds ${this.config.maxTaskTextBytes} bytes`,
@@ -213,6 +217,10 @@ export class TaskStore {
       | TaskRowRaw
       | undefined;
     return row ? rowToTask(row) : null;
+  }
+
+  getActiveTaskGraceMs(): number {
+    return this.config.activeTaskGraceMs;
   }
 
   listTasks(query: ListTasksQuery = {}): Task[] {
@@ -317,17 +325,17 @@ export class TaskStore {
     return task;
   }
 
-  cancelTask(id: string, now = Date.now()): Task {
+  cancelTask(id: string, now = Date.now(), reason = "cancelled by client"): Task {
     const existing = this.getTask(id);
     if (!existing) throw new TaskStoreError(`task ${id} not found`, "task_not_found");
     if (TERMINAL_STATUSES.includes(existing.status)) {
       return existing;
     }
-    this.db
-      .prepare(
-        `UPDATE tasks SET status = 'cancelled', completed_at = ?, error = ? WHERE id = ?`,
-      )
-      .run(now, "cancelled by client", id);
+      this.db
+        .prepare(
+          `UPDATE tasks SET status = 'cancelled', completed_at = ?, error = ? WHERE id = ?`,
+        )
+      .run(now, reason, id);
     const task = this.mustGetTask(id);
     this.emitTaskChange(task);
     return task;
@@ -528,8 +536,10 @@ export class TaskStore {
   }
 }
 
-function normalizeTimeout(input: number | undefined, fallback: number): number {
+function normalizeTimeout(input: number | undefined, fallback: number, max: number): number {
+  const cap = Math.max(1000, Math.floor(max));
+  const defaultTimeout = Math.min(cap, Math.max(1000, Math.floor(fallback)));
   const n = Number(input);
-  if (!Number.isFinite(n) || n <= 0) return fallback;
-  return Math.max(1000, Math.floor(n));
+  if (!Number.isFinite(n) || n <= 0) return defaultTimeout;
+  return Math.min(cap, Math.max(1000, Math.floor(n)));
 }
