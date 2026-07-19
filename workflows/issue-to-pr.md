@@ -230,6 +230,29 @@ Iterate:
 - Convergence: relay explicitly says "no blocking issues" or "safe to
   request human review"
 
+Before handoff, gate on GitHub inline comments:
+
+1. Query unresolved/OPEN inline comments.
+2. For each open comment:
+   - If it's a real issue: fix it, `commit + push`, then re-run Phase 7
+     review.
+   - If you decide not to fix: still post an inline reply explaining why.
+3. If open comments remain, continue until each one is responded to inline.
+4. Only when there are **no open inline comments** execute `gh pr ready`.
+
+示例命令（按需改写）：
+```bash
+OWNER_REPO=<owner/repo>
+PR_NUMBER=<n>
+OPEN_COMMENTS=$(gh api repos/$OWNER_REPO/pulls/$PR_NUMBER/comments --paginate --jq '[.[] | select(.state == "OPEN")]')
+echo "$OPEN_COMMENTS" | jq -r '.[] | "id=\(.id) file=\(.path) line=\(.line) state=\(.state)"'
+```
+
+对每条 comment id：修复后或不修复都要回一条 inline reply，例如：
+```bash
+gh api repos/$OWNER_REPO/pulls/comments/<comment-id>/replies -X POST -f body="已修复：<说明 commit 或不修复原因>"
+```
+
 Do **not** merge or mark ready-for-review autonomously.
 
 ---
@@ -243,7 +266,9 @@ Present to the user:
 4. **Decisions and disagreements** — where relay and agent initially
    disagreed (in Phase 1 or Phase 5), how it was resolved, and any
    remaining risks / open questions relay flagged
-5. **Run `gh pr ready`** to mark the PR ready for review.
+5. **Check inline comments before `gh pr ready`**: if open comments exist,
+   回复每条（修复后 / 不修复都要回），修复则 `commit + push` 后继续 re-review；
+   只有无 open comments 后再 `gh pr ready`。
 6. **Explicitly ask**: after ready-for-review, merge criteria / remaining reviewer handoff points.
 User confirms → done. User performs review and merge as they see fit.
 
