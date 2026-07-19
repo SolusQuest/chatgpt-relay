@@ -106,7 +106,7 @@ gpt-relay review --session <id> --stdin         # 提交 review
 | `GPT_RELAY_HOST`                | `127.0.0.1`                   | 监听地址                |
 | `GPT_RELAY_DATA_DIR`            | `~/.gpt-relay`                    | 数据目录                |
 | `GPT_RELAY_DB_FILE`             | `~/.gpt-relay/gpt-relay.db`           | SQLite 文件             |
-| `GPT_RELAY_DEFAULT_TIMEOUT_MS`  | `900000`                      | 单 task 默认超时（15 分钟） |
+| `GPT_RELAY_DEFAULT_TIMEOUT_MS`  | `1800000`                     | 单 task 默认超时（30 分钟） |
 | `GPT_RELAY_MAX_TASK_TIMEOUT_MS` | `3600000`                     | 单 task 最大超时（60 分钟，超出时 capped） |
 | `GPT_RELAY_ACTIVE_TASK_GRACE_MS` | `60000`                    | hard deadline 后进行中 task 的 grace（60 秒） |
 | `GPT_RELAY_MAX_TASK_BYTES`      | `524288`                      | prompt 上限             |
@@ -140,7 +140,7 @@ rm ~/.gpt-relay/gpt-relay.db*         # 全清
 | session paused                    | 看 popup 里 pauseReason；解决验证码/限速后自动恢复      |
 | 文本注入失败                      | ChatGPT 前端改版，需要更新 `content-script.js` 选择器   |
 | 手动点击 Stop                   | 扩展会结合 user/assistant message ID、生成状态和稳定快照判断；不会仅凭一次点击重复提交 |
-| review 超时                       | 客户端默认等待 10 分钟；`gpt-relay resume` 事后拿结果，task 默认最多 15 分钟 |
+| review 超时                       | 客户端默认等待 10 分钟；`gpt-relay resume` 事后拿结果，task 默认最多 30 分钟 |
 
 ## 相关文档
 

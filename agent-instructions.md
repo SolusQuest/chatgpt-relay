@@ -230,7 +230,7 @@ Round N: 收敛后写 tests
 
 - 单个 prompt 上限 512 KB（body）。超过就分批：先发第一段，回复里包含"收到，
   等下一段"之类确认，再发下一段
-- prompt 建议给 ≥10 min timeout（客户端默认等待 10 min，task 默认 15 min）；PR 特别大可以传
+- prompt 建议给 ≥10 min timeout（客户端轮询/等待默认 10 min；task 默认 30 min）；PR 特别大可以传
   `"timeout": 3600000`（60 min，上限）
 - 长 prompt 建议开启幂等：给 `clientRequestId`（例如 `pr-1234-round-1`），
   agent 崩溃重启同一 CRI 不会重复提交
@@ -288,7 +288,7 @@ Round N: 收敛后写 tests
   "text": "…原始 prompt（仅 GET /v1/tasks/:id 返回）…",
   "reply": "…ChatGPT 回复（仅 done 时非 null）…",
   "error": null,                           // failed/cancelled/expired 时的原因
-  "timeoutMs": 900000,                     // 从 submittedAt 起算的 task 超时（默认 15 min）
+  "timeoutMs": 1800000,                    // 从 submittedAt 起算的 task 超时（默认 30 min）
   "submittedAt": 1783846951352,
   "dispatchedAt": 1783846986252,           // 扩展 claim 的时间；null 表示还未 claim
   "completedAt": 1783847074944,            // terminal 时间
@@ -304,7 +304,7 @@ Round N: 收敛后写 tests
 {
   "session": "<sessionId>",       // 必填。UUID 或 ChatGPT conversation id
   "text": "<prompt>",             // 必填。≤ 512 KB
-  "timeout": 900000,              // 可选。默认 GPT_RELAY_DEFAULT_TIMEOUT_MS (15 min)，最大 3600000 (60 min)
+  "timeout": 1800000,             // 可选。默认 GPT_RELAY_DEFAULT_TIMEOUT_MS (30 min)，最大 3600000 (60 min)
   "clientRequestId": "cli-abc"    // 可选。幂等 key，同 session 重复 POST 返回同一 taskId
 }
 ```
@@ -351,7 +351,7 @@ Round N: 收敛后写 tests
 
 `expired` 是唯一**不可挽回**的失败：一旦 `Date.now() > expiresAt`
 （= `submittedAt + timeoutMs`）且仍未进入 terminal，服务端维护线程会把它标为
-expired，扩展会在服务端 deadline 加 grace 后停止处理它。所以 `timeoutMs` 要给足；默认 task 超时为 15 分钟，客户端默认只等待 10 分钟；长 PR / 大文档可以显式传更大的
+expired，扩展会在服务端 deadline 加 grace 后停止处理它。所以 `timeoutMs` 要给足；默认任务超时为 30 分钟，客户端等待仍按默认 10 分钟发起轮询；长 PR / 大文档可显式增大客户端等待与任务超时（互相独立、均受上限约束）。
 `timeout`（最多 60 分钟）。
 
 ### 推荐拉取方式
@@ -532,7 +532,7 @@ curl -sf http://127.0.0.1:8765/v1/sessions | jq '.sessions[] | select(.paused==f
 1. **session 必传且必须有效**：非空 ≤128 字符。空字符串 / null → 400。
 2. **不要短轮询**：用 `?wait=30000` 让服务器挂起。持续 `curl` 空转是错误做法。
 3. **taskId 是 UUID**：不要构造或猜 taskId，永远从 POST 响应拿。
-4. **timeout 是从 submittedAt 起算的墙钟**：即使 queued 期间也在消耗。默认 15 min，最大 60 min。
+4. **timeout 是从 submittedAt 起算的墙钟**：即使 queued 期间也在消耗。任务超时默认 30 min，最大 60 min。客户端等待仍默认 10 min，可在接口按需加大（与任务超时分离）。
 5. **encodingWarning ≠ 错误**：如果响应带这个字段，说明 shell 编码可能有损；
    task 仍会执行，但 CJK 输入的 agent 环境建议改用 `--stdin` + UTF-8。
 6. **一个 session 同一时刻只能一个 task 在跑**：想并发就多用几个 session。
@@ -548,7 +548,7 @@ curl -sf http://127.0.0.1:8765/v1/sessions | jq '.sessions[] | select(.paused==f
 | `GPT_RELAY_HOST` | `127.0.0.1` | server 监听地址 |
 | `GPT_RELAY_DATA_DIR` | `~/.gpt-relay` | 数据目录 |
 | `GPT_RELAY_DB_FILE` | `$DATA_DIR/gpt-relay.db` | SQLite 文件 |
-| `GPT_RELAY_DEFAULT_TIMEOUT_MS` | `900000` | 单 task 默认超时（15 min，**仅当 POST 未传 `timeout` 字段时生效**） |
+| `GPT_RELAY_DEFAULT_TIMEOUT_MS` | `1800000` | 单 task 默认超时（30 min，**仅当 POST 未传 `timeout` 字段时生效**） |
 | `GPT_RELAY_MAX_TASK_TIMEOUT_MS` | `3600000` | 单 task 最大超时（60 min，超出时 capped） |
 | `GPT_RELAY_ACTIVE_TASK_GRACE_MS` | `60000` | hard deadline 后进行中 task 的 grace（60 sec） |
 | `GPT_RELAY_MAX_TASK_BYTES` | `524288` | prompt 上限 |
@@ -563,3 +563,4 @@ curl -sf http://127.0.0.1:8765/v1/sessions | jq '.sessions[] | select(.paused==f
 - `skills/gpt-relay-review/SKILL.md` — Codex/Claude skill 定义（推荐给 skill runner 直接引用）
 - `workflows/` — 多步 orchestration 模板；本文件里的模式在那里被组合成端到端流程
 - `extension/README.md` — 扩展加载、恢复行为
+
