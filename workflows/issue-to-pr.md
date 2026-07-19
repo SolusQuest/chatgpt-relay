@@ -243,16 +243,15 @@ Present to the user:
 4. **Decisions and disagreements** — where relay and agent initially
    disagreed (in Phase 1 or Phase 5), how it was resolved, and any
    remaining risks / open questions relay flagged
-5. **Explicitly ask**: draft or ready-for-review? merge criteria?
-
-User confirms → done. User promotes to ready-for-review or merges as they
-see fit.
+5. **Run `gh pr ready`** to mark the PR ready for review.
+6. **Explicitly ask**: after ready-for-review, merge criteria / remaining reviewer handoff points.
+User confirms → done. User performs review and merge as they see fit.
 
 ---
 
 ## Global rules
 
-- **Never merge, mark ready-for-review, or close the issue autonomously.**
+- **Never merge or close the issue autonomously.**
   Every phase either continues or hands to user.
 - **Same session across all phases.** Non-negotiable — the workflow relies
   on relay's accumulating context.
