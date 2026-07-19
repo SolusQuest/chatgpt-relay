@@ -55,7 +55,8 @@ guarantee independence, and within those barriers **run both concurrently** to
 save the ~20–90s relay round-trip:
 
 1. **Submit relay first (non-blocking)** with only the placeholder issue text
-   (full, not summary). **No hint** of anything you (agent) already thought.
+   (full, not summary) unless a remote issue/placeholder URL already exists. **No hint** of
+   anything you (agent) already thought.
 2. **After submit, immediately start agent's own thinking in scratchpad**:
    list the decision points you'd want resolved — scope boundaries, in/out,
    acceptance criteria, edge cases, dependencies, risks, naming, non-goals,
@@ -73,6 +74,14 @@ Prompt skeleton:
 动手前必须明确的 decision points（scope 边界、AC、edge cases、依赖、风险、
 naming、non-goals、migration 问题等），按类别分组，每点简述为什么重要。
 
+--- issue ---
+https://github.com/<org>/<repo>/issues/<n>
+
+```
+
+或者（无远端链接时）贴出 placeholder 全文：
+
+```text
 --- issue ---
 <placeholder 全文>
 ```

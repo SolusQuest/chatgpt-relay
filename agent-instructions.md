@@ -62,8 +62,10 @@ PR: https://github.com/<user>/<repo>/pull/<n>
 
 ## Issue / draft / 短文本 review
 
-无远端 URL 的内容（issue body draft、design note、prompt draft、commit message
-草稿），直接把**完整文本**贴进 prompt。不要只贴摘要或"关键部分"。
+有远端 URL（如 issue/PR placeholder、草稿链接）的内容，优先只发 URL；没有
+可访问链接时才贴**完整文本**。不要只贴摘要或"关键部分"。
+
+如果 relay 反馈“看不到链接/缺上下文”，再按降级路径补齐对应文本。
 
 多个 draft 一次性提交时按顺序编号：
 
