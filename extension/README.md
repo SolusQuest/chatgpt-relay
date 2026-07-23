@@ -89,7 +89,7 @@ npm start
 
 # 4. 发一个 review（另一个 shell）
 "帮我 review 这段代码：function add(a,b){return a+b}" | \
-  gpt-relay review --session <id-from-popup> --stdin --timeout 60000
+  gpt-relay review --session <id-from-popup> --stdin --wait-timeout 60000
 
 # 5. 恢复测试：
 #    a) 发一个 review，看到"处理中"banner 时立即 F5

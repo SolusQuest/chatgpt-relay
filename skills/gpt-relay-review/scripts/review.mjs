@@ -20,10 +20,8 @@ function parseArgs(argv) {
     else if (a === "--stdin") o.stdin = true;
     else if (a === "--file") o.file = argv[++i];
     else if (a === "--no-wait") o.wait = false;
-    else if (a === "--timeout") {
-      o.taskTimeoutMs = Number(argv[++i]);
-      o.waitTimeoutMs = o.taskTimeoutMs;
-    }
+    else if (a === "--timeout" || a === "--wait-timeout") o.waitTimeoutMs = Number(argv[++i]);
+    else if (a === "--task-timeout") o.taskTimeoutMs = Number(argv[++i]);
     else if (a === "--cri") o.clientRequestId = argv[++i];
     else if (a === "-h" || a === "--help") o.help = true;
   }
@@ -38,7 +36,7 @@ async function readStdin() {
 
 const args = parseArgs(process.argv.slice(2));
 if (args.help || !args.session) {
-  console.error("usage: review.mjs --session <id> (--text T | --stdin | --file F) [--no-wait] [--timeout ms] [--cri key]");
+  console.error("usage: review.mjs --session <id> (--text T | --stdin | --file F) [--no-wait] [--wait-timeout ms] [--task-timeout ms] [--cri key]");
   process.exit(64);
 }
 
@@ -75,9 +73,16 @@ while (Date.now() < deadline) {
   const wait = Math.min(remaining, 30_000);
   const t = await httpJson("GET", `/v1/tasks/${taskId}?wait=${wait}`);
   if (isTerminal(t.status)) {
-    clearPending(taskId);
+    const keepForLate = t.status === "failed" && !t.lateReply &&
+      t.lateReplyDeadlineAt > Date.now() &&
+      ["任务处理超时", "pending reply hard timeout", "session 心跳丢失，任务被释放", "aborted"].includes(t.error);
+    if (!keepForLate) clearPending(taskId);
     if (t.status === "done") { process.stdout.write(t.reply ?? ""); process.exit(0); }
-    console.error(`task ${taskId} ${t.status}: ${t.error ?? "(no error)"}`);
+    if (t.lateReply) {
+      process.stdout.write(t.lateReply);
+      process.exit(0);
+    }
+    console.error(`task ${taskId} ${t.status}: ${t.error ?? "(no error)"}${keepForLate ? " (late reply still being tracked; try 'resume')" : ""}`);
     process.exit(2);
   }
 }

@@ -26,4 +26,7 @@ export const STORAGE_KEYS = {
 export const POLL_REPLY_STABLE_SAMPLES = 2;      // 需要 N 次连续相同快照才判定 done
 export const POLL_NOT_STARTED_MAX = 6;           // 连续 N 次都是 not-started 视为提交丢失
 export const POLL_HARD_TIMEOUT_MS = 15 * 60_000; // 旧 pending 记录的 fallback（15 分钟）
+export const POLL_LATE_REPLY_GRACE_MS = 30 * 60_000;
 export const POLL_REPLY_SENDMSG_TIMEOUT_MS = 6000;
+export const RUN_TASK_ACK_TIMEOUT_MS = 45_000;
+export const PAGE_STATE_SENDMSG_TIMEOUT_MS = 5000;

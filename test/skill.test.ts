@@ -109,6 +109,37 @@ test("review.mjs --no-wait submits and returns taskId immediately", async () => 
   }
 });
 
+test("review.mjs separates client wait timeout from task timeout", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-relay-p-"));
+  try {
+    const waitOnly = await runNode("review.mjs", [
+      "--session", "skill-timeout-wait",
+      "--text", "wait only",
+      "--no-wait",
+      "--timeout", "1000",
+    ], { GPT_RELAY_PENDING_DIR: tmp });
+    assert.equal(waitOnly.code, 0, `stderr: ${waitOnly.stderr}`);
+    const waitTaskId = JSON.parse(waitOnly.stdout).taskId;
+    const waitTask = await fetch(`${baseUrl}/v1/tasks/${waitTaskId}`)
+      .then((r) => r.json()) as { timeoutMs: number };
+    assert.ok(waitTask.timeoutMs > 1000);
+
+    const hardTask = await runNode("review.mjs", [
+      "--session", "skill-timeout-hard",
+      "--text", "hard timeout",
+      "--no-wait",
+      "--task-timeout", "1000",
+    ], { GPT_RELAY_PENDING_DIR: tmp });
+    assert.equal(hardTask.code, 0, `stderr: ${hardTask.stderr}`);
+    const hardTaskId = JSON.parse(hardTask.stdout).taskId;
+    const hardTaskView = await fetch(`${baseUrl}/v1/tasks/${hardTaskId}`)
+      .then((r) => r.json()) as { timeoutMs: number };
+    assert.equal(hardTaskView.timeoutMs, 1000);
+  } finally {
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* */ }
+  }
+});
+
 test("resume.mjs reports no pending when dir empty", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-relay-p-"));
   try {

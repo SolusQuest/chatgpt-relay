@@ -102,6 +102,7 @@ test("internal next_task returns null then task on demand", async () => {
   assert.equal(got.json.task?.text, "hi");
   assert.equal(typeof got.json.task?.expiresAt, "number");
   assert.equal(typeof got.json.task?.completionDeadlineAt, "number");
+  assert.equal(typeof got.json.task?.lateReplyDeadlineAt, "number");
 });
 
 test("internal next_task honors long-poll wait", async () => {
@@ -194,6 +195,62 @@ test("recover on already-done task is idempotent", async () => {
   assert.equal(rec.json.recovered, false);
   const t = await get(`/v1/tasks/${id}`);
   assert.equal(t.json.reply, "original");
+});
+
+test("capture stores timeout reply as late without rewriting failed status", async () => {
+  const c = await post("/v1/tasks", {
+    session: "late-capture",
+    text: "slow answer",
+    timeout: 1000,
+  });
+  const id = c.json.taskId;
+  await get("/internal/next_task?session=late-capture");
+
+  // Force the same timeout terminal state the maintenance loop produces.
+  await post(`/internal/tasks/${id}/complete`, { error: "任务处理超时" });
+  const captured = await post(`/internal/tasks/${id}/capture`, {
+    text: "eventual browser reply",
+  });
+  assert.equal(captured.status, 200);
+  assert.equal(captured.json.captured, true);
+  assert.equal(captured.json.late, true);
+
+  const task = await get(`/v1/tasks/${id}`);
+  assert.equal(task.json.status, "failed");
+  assert.equal(task.json.reply, null);
+  assert.equal(task.json.lateReply, "eventual browser reply");
+  assert.equal(typeof task.json.lateCompletedAt, "number");
+});
+
+test("progress endpoint records page lifecycle timestamps", async () => {
+  const c = await post("/v1/tasks", { session: "progress-api", text: "trace me" });
+  const id = c.json.taskId;
+  for (const phase of [
+    "submit_started",
+    "submit_acknowledged",
+    "generating_seen",
+    "reply_detected",
+  ]) {
+    const progress = await post(`/internal/tasks/${id}/progress`, { phase });
+    assert.equal(progress.status, 200);
+  }
+  const task = await get(`/v1/tasks/${id}`);
+  assert.equal(typeof task.json.submitStartedAt, "number");
+  assert.equal(typeof task.json.submitAcknowledgedAt, "number");
+  assert.equal(typeof task.json.generatingSeenAt, "number");
+  assert.equal(typeof task.json.replyDetectedAt, "number");
+});
+
+test("defer endpoint returns a claimed page-busy task to queued", async () => {
+  const c = await post("/v1/tasks", { session: "defer-api", text: "wait for page" });
+  const id = c.json.taskId;
+  await get("/internal/next_task?session=defer-api");
+  const deferred = await post(`/internal/tasks/${id}/defer`, {});
+  assert.equal(deferred.status, 200);
+  assert.equal(deferred.json.status, "queued");
+  const task = await get(`/v1/tasks/${id}`);
+  assert.equal(task.json.status, "queued");
+  assert.equal(task.json.requeueCount, 0);
 });
 
 test("recover on unknown task returns 404", async () => {

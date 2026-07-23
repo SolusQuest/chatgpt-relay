@@ -13,7 +13,10 @@ const TERMINAL = new Set(["done", "failed", "cancelled", "expired"]);
 
 export interface ReviewOptions {
   session: string;
+  /** @deprecated Use waitTimeoutMs. This no longer changes server task lifetime. */
   timeoutMs?: number;
+  waitTimeoutMs?: number;
+  taskTimeoutMs?: number;
   waitChunkMs?: number;
   clientRequestId?: string;
   baseUrl?: string;
@@ -25,6 +28,7 @@ export interface ReviewResult {
   taskId: string;
   status: "done" | "failed" | "cancelled" | "expired";
   reply: string | null;
+  lateReply: string | null;
   error: string | null;
   elapsedMs: number;
 }
@@ -35,11 +39,20 @@ export interface TaskView {
   status: string;
   text?: string;
   reply: string | null;
+  lateReply: string | null;
   error: string | null;
+  timeoutMs: number;
   submittedAt: number;
   dispatchedAt: number | null;
   completedAt: number | null;
+  lateCompletedAt: number | null;
+  submitStartedAt: number | null;
+  submitAcknowledgedAt: number | null;
+  generatingSeenAt: number | null;
+  replyDetectedAt: number | null;
   expiresAt: number;
+  completionDeadlineAt: number;
+  lateReplyDeadlineAt: number;
   requeueCount: number;
 }
 
@@ -101,7 +114,7 @@ async function submitTask(
     session: opts.session,
     text,
   };
-  if (opts.timeoutMs != null) body.timeout = opts.timeoutMs;
+  if (opts.taskTimeoutMs != null) body.timeout = opts.taskTimeoutMs;
   if (opts.clientRequestId) body.clientRequestId = opts.clientRequestId;
   return http.post<{ taskId: string; status: string; encodingWarning?: string; encodingFixed?: string }>("/v1/tasks", body, {
     baseUrl,
@@ -157,15 +170,16 @@ export async function review(
   try {
     const t = await waitForTask(taskId, {
       baseUrl: opts.baseUrl,
-      timeoutMs: opts.timeoutMs,
+      timeoutMs: opts.waitTimeoutMs ?? opts.timeoutMs,
       waitChunkMs: opts.waitChunkMs,
       signal: opts.signal,
     });
-    clearPending(taskId);
+    if (!shouldKeepPendingForLateReply(t)) clearPending(taskId);
     return {
       taskId: t.taskId,
       status: t.status as ReviewResult["status"],
       reply: t.reply,
+      lateReply: t.lateReply,
       error: t.error,
       elapsedMs: Date.now() - started,
     };
@@ -233,10 +247,22 @@ export async function resumePending(
       out.push({ record: rec, task: null });
       continue;
     }
-    if (TERMINAL.has(t.status)) {
+    if (TERMINAL.has(t.status) && !shouldKeepPendingForLateReply(t)) {
       clearPending(rec.taskId);
     }
     out.push({ record: rec, task: t });
   }
   return out;
+}
+
+function shouldKeepPendingForLateReply(task: TaskView): boolean {
+  return task.status === "failed" &&
+    task.lateReply === null &&
+    task.lateReplyDeadlineAt > Date.now() &&
+    (
+      task.error === "任务处理超时" ||
+      task.error === "pending reply hard timeout" ||
+      task.error === "session 心跳丢失，任务被释放" ||
+      task.error === "aborted"
+    );
 }

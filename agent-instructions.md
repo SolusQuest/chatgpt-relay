@@ -275,7 +275,9 @@ Round N: 收敛后写 tests
 | `cancelled` | agent 主动 DELETE |
 | `expired` | 超过 `timeoutMs` 未完成 |
 
-`done | failed | cancelled | expired` 称为 **terminal**，之后不再变化。
+`done | failed | cancelled | expired` 称为 **terminal**，之后不再变化。若 ChatGPT
+在 timeout failure 后才完成，内容单独写入 `lateReply`，不会把 `failed` 改回
+`done`。
 
 ## Task 对象
 
@@ -287,12 +289,20 @@ Round N: 收敛后写 tests
   "status": "done",
   "text": "…原始 prompt（仅 GET /v1/tasks/:id 返回）…",
   "reply": "…ChatGPT 回复（仅 done 时非 null）…",
+  "lateReply": null,                       // timeout 后回收的晚到回复；不改写 status
   "error": null,                           // failed/cancelled/expired 时的原因
   "timeoutMs": 1800000,                    // 从 submittedAt 起算的 task 超时（默认 30 min）
   "submittedAt": 1783846951352,
   "dispatchedAt": 1783846986252,           // 扩展 claim 的时间；null 表示还未 claim
   "completedAt": 1783847074944,            // terminal 时间
+  "lateCompletedAt": null,                 // lateReply 捕获时间
+  "submitStartedAt": 1783846986255,        // 扩展开始页面提交
+  "submitAcknowledgedAt": 1783846987312,   // content script 确认已点击 Send
+  "generatingSeenAt": 1783846989344,       // 首次观察到页面生成中
+  "replyDetectedAt": 1783847074200,        // 首次观察到稳定回复
   "expiresAt": 1783847251352,              // submittedAt + timeoutMs
+  "completionDeadlineAt": 1783847311352,   // expiresAt + active task grace
+  "lateReplyDeadlineAt": 1783849111352,    // hard deadline + bounded late window
   "requeueCount": 0                        // 被打回队列重试的次数
 }
 ```
@@ -346,13 +356,15 @@ Round N: 收敛后写 tests
 
 具体：
 - 拿到 `done` → `reply` 是最终答复
-- 拿到 `failed | cancelled | expired` → `error` 是原因，reply 永远为 null
+- 拿到 `failed | cancelled | expired` → `error` 是原因，`reply` 为 null；timeout
+  failure 仍可能在有界窗口内随后出现 `lateReply`
 - 拿到 `queued | in_progress` → 任务仍在推进，隔一会儿再拉
 
-`expired` 是唯一**不可挽回**的失败：一旦 `Date.now() > expiresAt`
-（= `submittedAt + timeoutMs`）且仍未进入 terminal，服务端维护线程会把它标为
-expired，扩展会在服务端 deadline 加 grace 后停止处理它。所以 `timeoutMs` 要给足；默认任务超时为 30 分钟，客户端等待仍按默认 10 分钟发起轮询；长 PR / 大文档可显式增大客户端等待与任务超时（互相独立、均受上限约束）。
-`timeout`（最多 60 分钟）。
+queued task 越过 `expiresAt` 会变成不可挽回的 `expired`。已经发到页面的
+in-progress task 越过 hard deadline 后会保持 `failed`，但扩展继续占用该 session
+并在 `lateReplyDeadlineAt` 前回收网页最终回复到 `lateReply`。客户端等待默认
+10 分钟，task 默认 30 分钟；CLI 用 `--wait-timeout`（兼容别名 `--timeout`）
+和 `--task-timeout` 分别配置，后者最多 60 分钟。
 
 ### 推荐拉取方式
 
@@ -532,7 +544,10 @@ curl -sf http://127.0.0.1:8765/v1/sessions | jq '.sessions[] | select(.paused==f
 1. **session 必传且必须有效**：非空 ≤128 字符。空字符串 / null → 400。
 2. **不要短轮询**：用 `?wait=30000` 让服务器挂起。持续 `curl` 空转是错误做法。
 3. **taskId 是 UUID**：不要构造或猜 taskId，永远从 POST 响应拿。
-4. **timeout 是从 submittedAt 起算的墙钟**：即使 queued 期间也在消耗。任务超时默认 30 min，最大 60 min。客户端等待仍默认 10 min，可在接口按需加大（与任务超时分离）。
+4. **task timeout 是从 submittedAt 起算的墙钟**：即使 queued 期间也在消耗。
+   任务超时默认 30 min，最大 60 min。客户端等待默认 10 min；CLI
+   `--wait-timeout`/`--timeout` 不再缩短 task 生命周期，只有
+   `--task-timeout` 会设置 POST 的 task timeout。
 5. **encodingWarning ≠ 错误**：如果响应带这个字段，说明 shell 编码可能有损；
    task 仍会执行，但 CJK 输入的 agent 环境建议改用 `--stdin` + UTF-8。
 6. **一个 session 同一时刻只能一个 task 在跑**：想并发就多用几个 session。
@@ -551,6 +566,7 @@ curl -sf http://127.0.0.1:8765/v1/sessions | jq '.sessions[] | select(.paused==f
 | `GPT_RELAY_DEFAULT_TIMEOUT_MS` | `1800000` | 单 task 默认超时（30 min，**仅当 POST 未传 `timeout` 字段时生效**） |
 | `GPT_RELAY_MAX_TASK_TIMEOUT_MS` | `3600000` | 单 task 最大超时（60 min，超出时 capped） |
 | `GPT_RELAY_ACTIVE_TASK_GRACE_MS` | `60000` | hard deadline 后进行中 task 的 grace（60 sec） |
+| `GPT_RELAY_LATE_REPLY_GRACE_MS` | `1800000` | hard deadline 后继续回收晚到回复的窗口（30 min） |
 | `GPT_RELAY_MAX_TASK_BYTES` | `524288` | prompt 上限 |
 | `GPT_RELAY_MAX_QUEUED_PER_SESSION` | `50` | 单 session 队列上限 |
 | `GPT_RELAY_PENDING_DIR` | `$DATA_DIR/pending` | client-side pending files 目录 |

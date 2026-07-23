@@ -73,6 +73,7 @@ interface CliTask {
   completedAt: number | null;
   error: string | null;
   reply: string | null;
+  lateReply: string | null;
 }
 
 async function cmdTasks(args: string[]): Promise<number> {
@@ -140,6 +141,10 @@ async function cmdShow(args: string[]): Promise<number> {
     console.log("\n─── reply ──────────────────────────────────────");
     console.log(t.reply);
   }
+  if (t.lateReply) {
+    console.log("\n─── late reply ────────────────────────────────");
+    console.log(t.lateReply);
+  }
   if (t.error) {
     console.log("\n─── error ──────────────────────────────────────");
     console.log(t.error);
@@ -181,6 +186,11 @@ async function cmdResume(): Promise<number> {
       console.log(task.reply);
       console.log("──────────────────────────");
     }
+    if (task.lateReply) {
+      console.log("─── late reply ───────────");
+      console.log(task.lateReply);
+      console.log("──────────────────────────");
+    }
     if (task.error) console.log(`  error: ${task.error}`);
   }
   return 0;
@@ -192,7 +202,8 @@ async function cmdReview(args: string[]): Promise<number> {
   let readStdin = false;
   let file: string | null = null;
   let wait = true;
-  let timeoutMs: number | undefined;
+  let waitTimeoutMs: number | undefined;
+  let taskTimeoutMs: number | undefined;
   let cri: string | undefined;
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
@@ -201,11 +212,14 @@ async function cmdReview(args: string[]): Promise<number> {
     else if (a === "--stdin") readStdin = true;
     else if (a === "--file") file = args[++i] ?? null;
     else if (a === "--no-wait") wait = false;
-    else if (a === "--timeout") timeoutMs = Number(args[++i]);
+    else if (a === "--timeout" || a === "--wait-timeout") {
+      waitTimeoutMs = Number(args[++i]);
+    }
+    else if (a === "--task-timeout") taskTimeoutMs = Number(args[++i]);
     else if (a === "--cri") cri = args[++i];
   }
   if (!session) {
-    console.error("usage: gpt-relay review --session <id> (--text T | --stdin | --file F) [--no-wait] [--timeout ms] [--cri key]");
+    console.error("usage: gpt-relay review --session <id> (--text T | --stdin | --file F) [--no-wait] [--wait-timeout ms] [--task-timeout ms] [--cri key]");
     return 64;
   }
   if (readStdin) {
@@ -222,12 +236,13 @@ async function cmdReview(args: string[]): Promise<number> {
     session,
     baseUrl: BASE,
     wait,
-    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    ...(waitTimeoutMs !== undefined ? { waitTimeoutMs } : {}),
+    ...(taskTimeoutMs !== undefined ? { taskTimeoutMs } : {}),
     ...(cri !== undefined ? { clientRequestId: cri } : {}),
   });
   if ("reply" in r) {
-    if (r.status === "done") {
-      process.stdout.write(r.reply ?? "");
+    if (r.status === "done" || r.lateReply) {
+      process.stdout.write(r.reply ?? r.lateReply ?? "");
       return 0;
     }
     console.error(`task ${r.taskId} ${r.status}: ${r.error ?? "(no error)"}`);
@@ -256,6 +271,7 @@ commands:
   cancel <taskId>          cancel a task
   resume                   check pending tasks from previous run
   review --session ID (--text T | --stdin)
+         [--wait-timeout ms] [--task-timeout ms]
                            submit a review and wait
 
 env:

@@ -41,7 +41,7 @@
  **目的**：验证最简单的端到端链路正常。
  
  **步骤**：
- 1. 执行 `npx tsx bin/gpt-relay.ts review --session <sid> --text "hello" --timeout 30000`
+ 1. 执行 `npx tsx bin/gpt-relay.ts review --session <sid> --text "hello" --wait-timeout 30000`
  2. 观察 CLI 输出
  3. 观察 ChatGPT 页面：prompt 被填入、点击发送、出现新 assistant 消息
  4. 观察 Relay bar 颜色变化：绿色 -> 橙色（处理中）-> 蓝色（等待回复）-> 绿色（完成）
@@ -67,7 +67,7 @@
  **步骤**：
  1. 生成 35k+ 文本：`"x" * 35000`
  2. 保存到文件 `long.txt`
- 3. 执行 `npx tsx bin/gpt-relay.ts review --session <sid> --file long.txt --timeout 120000`
+ 3. 执行 `npx tsx bin/gpt-relay.ts review --session <sid> --file long.txt --wait-timeout 120000`
  4. 观察 ChatGPT 页面：输入框出现 "粘贴的文本 (1)" 附件 chip，send 按钮 enabled 后自动点击
  
  **预期结果**：
@@ -89,7 +89,7 @@
  
  **步骤**：
  1. 向 ChatGPT 发送一个需要较长时间回复的 prompt，例如 `"请用 500 字总结机器学习的三个主要分支"`
- 2. 客户端使用短 timeout：`--timeout 3000`，预期 3 秒后超时退出
+ 2. 客户端使用短 wait timeout：`--wait-timeout 3000`，预期 3 秒后超时退出
  3. 等待 ChatGPT 实际生成完回复（约 10~20s）
  4. 执行 `npx tsx bin/gpt-relay.ts resume`
  
@@ -168,7 +168,7 @@
  
  **步骤**：
  1. 关闭/暂停 extension，使任务无法被及时处理
- 2. 执行 `npx tsx bin/gpt-relay.ts review --session <sid> --text "expire me" --no-wait --timeout 2000`
+ 2. 执行 `npx tsx bin/gpt-relay.ts review --session <sid> --text "expire me" --no-wait --task-timeout 2000`
  3. 等待 5s 以上
  4. 查询任务状态
  
@@ -302,7 +302,7 @@
  
  **步骤**：
  1. 提交一个需要较长时间生成的复杂 prompt
- 2. 使用 `--timeout 300000`
+ 2. 使用 `--wait-timeout 300000 --task-timeout 300000`
  3. 等待 ChatGPT 完成
  
  **预期结果**：

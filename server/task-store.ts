@@ -27,11 +27,17 @@ export interface Task {
   status: TaskStatus;
   text: string;
   reply: string | null;
+  lateReply: string | null;
   error: string | null;
   timeoutMs: number;
   submittedAt: number;
   dispatchedAt: number | null;
   completedAt: number | null;
+  lateCompletedAt: number | null;
+  submitStartedAt: number | null;
+  submitAcknowledgedAt: number | null;
+  generatingSeenAt: number | null;
+  replyDetectedAt: number | null;
   expiresAt: number;
   requeueCount: number;
 }
@@ -53,11 +59,17 @@ interface TaskRowRaw {
   status: TaskStatus;
   text: string;
   reply: string | null;
+  late_reply: string | null;
   error: string | null;
   timeout_ms: number;
   submitted_at: number;
   dispatched_at: number | null;
   completed_at: number | null;
+  late_completed_at: number | null;
+  submit_started_at: number | null;
+  submit_acknowledged_at: number | null;
+  generating_seen_at: number | null;
+  reply_detected_at: number | null;
   expires_at: number;
   requeue_count: number;
 }
@@ -78,11 +90,17 @@ function rowToTask(r: TaskRowRaw): Task {
     status: r.status,
     text: r.text,
     reply: r.reply,
+    lateReply: r.late_reply,
     error: r.error,
     timeoutMs: r.timeout_ms,
     submittedAt: r.submitted_at,
     dispatchedAt: r.dispatched_at,
     completedAt: r.completed_at,
+    lateCompletedAt: r.late_completed_at,
+    submitStartedAt: r.submit_started_at,
+    submitAcknowledgedAt: r.submit_acknowledged_at,
+    generatingSeenAt: r.generating_seen_at,
+    replyDetectedAt: r.reply_detected_at,
     expiresAt: r.expires_at,
     requeueCount: r.requeue_count,
   };
@@ -117,6 +135,18 @@ export interface CompleteTaskInput {
   text?: string;
   error?: string;
   now?: number;
+}
+
+export type TaskProgressPhase =
+  | "submit_started"
+  | "submit_acknowledged"
+  | "generating_seen"
+  | "reply_detected";
+
+export interface CaptureReplyResult {
+  task: Task;
+  captured: boolean;
+  late: boolean;
 }
 
 export class TaskStoreError extends Error {
@@ -223,6 +253,14 @@ export class TaskStore {
     return this.config.activeTaskGraceMs;
   }
 
+  getLateReplyGraceMs(): number {
+    return this.config.lateReplyGraceMs;
+  }
+
+  getLateReplyDeadlineAt(task: Task): number {
+    return task.expiresAt + this.config.activeTaskGraceMs + this.config.lateReplyGraceMs;
+  }
+
   listTasks(query: ListTasksQuery = {}): Task[] {
     const clauses: string[] = [];
     const params: unknown[] = [];
@@ -320,6 +358,70 @@ export class TaskStore {
         isError ? (input.error ?? null) : null,
         id,
       );
+    const task = this.mustGetTask(id);
+    this.emitTaskChange(task);
+    return task;
+  }
+
+  captureReply(id: string, text: string, now = Date.now()): CaptureReplyResult {
+    const existing = this.getTask(id);
+    if (!existing) throw new TaskStoreError(`task ${id} not found`, "task_not_found");
+    if (existing.status === "queued" || existing.status === "in_progress") {
+      return { task: this.completeTask(id, { text, now }), captured: true, late: false };
+    }
+    if (existing.status === "done") {
+      return { task: existing, captured: false, late: false };
+    }
+    if (
+      existing.status === "failed" &&
+      isLateReplyEligible(existing.error) &&
+      now <= this.getLateReplyDeadlineAt(existing)
+    ) {
+      if (existing.lateReply !== null) {
+        return { task: existing, captured: false, late: true };
+      }
+      this.db
+        .prepare(
+          `UPDATE tasks
+             SET late_reply = ?, late_completed_at = ?,
+                 reply_detected_at = COALESCE(reply_detected_at, ?)
+             WHERE id = ?`,
+        )
+        .run(text, now, now, id);
+      const task = this.mustGetTask(id);
+      this.emitTaskChange(task);
+      return { task, captured: true, late: true };
+    }
+    return { task: existing, captured: false, late: false };
+  }
+
+  markTaskProgress(id: string, phase: TaskProgressPhase, now = Date.now()): Task {
+    const existing = this.getTask(id);
+    if (!existing) throw new TaskStoreError(`task ${id} not found`, "task_not_found");
+    const column: Record<TaskProgressPhase, string> = {
+      submit_started: "submit_started_at",
+      submit_acknowledged: "submit_acknowledged_at",
+      generating_seen: "generating_seen_at",
+      reply_detected: "reply_detected_at",
+    };
+    this.db
+      .prepare(`UPDATE tasks SET ${column[phase]} = COALESCE(${column[phase]}, ?) WHERE id = ?`)
+      .run(now, id);
+    return this.mustGetTask(id);
+  }
+
+  deferTask(id: string): Task {
+    const existing = this.getTask(id);
+    if (!existing) throw new TaskStoreError(`task ${id} not found`, "task_not_found");
+    if (existing.status !== "in_progress") {
+      throw new TaskStoreError(
+        `task ${id} cannot defer from status ${existing.status}`,
+        "invalid_transition",
+      );
+    }
+    this.db
+      .prepare(`UPDATE tasks SET status = 'queued', dispatched_at = NULL WHERE id = ?`)
+      .run(id);
     const task = this.mustGetTask(id);
     this.emitTaskChange(task);
     return task;
@@ -542,4 +644,11 @@ function normalizeTimeout(input: number | undefined, fallback: number, max: numb
   const n = Number(input);
   if (!Number.isFinite(n) || n <= 0) return defaultTimeout;
   return Math.min(cap, Math.max(1000, Math.floor(n)));
+}
+
+export function isLateReplyEligible(error: string | null): boolean {
+  return error === "任务处理超时" ||
+    error === "pending reply hard timeout" ||
+    error === "session 心跳丢失，任务被释放" ||
+    error === "aborted";
 }

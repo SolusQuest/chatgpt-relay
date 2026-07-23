@@ -66,6 +66,8 @@ test("config.js exports required constants", () => {
     "POLL_ALARM_NAME",
     "HEARTBEAT_ALARM_NAME",
     "STORAGE_KEYS",
+    "RUN_TASK_ACK_TIMEOUT_MS",
+    "POLL_LATE_REPLY_GRACE_MS",
   ]) {
     assert.match(src, new RegExp(`export const ${sym}`), `missing export: ${sym}`);
   }
@@ -73,7 +75,22 @@ test("config.js exports required constants", () => {
 
 test("content-script contains required message handlers", () => {
   const src = fs.readFileSync(path.join(EXT, "content-script.js"), "utf8");
-  for (const t of ["get-session-id", "check-safety", "update-banner", "run-task", "recover-task", "requeue-task", "offline", "online"]) {
+  for (const t of ["get-session-id", "get-inflight", "get-page-state", "check-safety", "update-banner", "run-task", "recover-task", "requeue-task", "offline", "online"]) {
     assert.match(src, new RegExp(`"${t}"`), `missing handler: ${t}`);
   }
+});
+
+test("generation detection ignores hidden stop buttons", () => {
+  const src = fs.readFileSync(path.join(EXT, "content-script.js"), "utf8");
+  assert.match(
+    src,
+    /function isGenerating\(\)[\s\S]*querySelectorAll[\s\S]*isVisible/,
+  );
+});
+
+test("run-task acknowledgement and late reply capture are bounded", () => {
+  const src = fs.readFileSync(path.join(EXT, "service-worker.js"), "utf8");
+  assert.match(src, /RUN_TASK_ACK_TIMEOUT_MS/);
+  assert.match(src, /lateReplyDeadlineAt/);
+  assert.match(src, /\/capture/);
 });

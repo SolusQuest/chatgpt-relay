@@ -17,10 +17,18 @@ for (const rec of items) {
     throw e;
   }
   console.log(`${t.taskId.slice(0,8)}\t${t.status}\t"${rec.textPreview.replace(/\s+/g," ")}"`);
-  if (isTerminal(t.status)) clearPending(t.taskId);
+  const keepForLate = t.status === "failed" && !t.lateReply &&
+    t.lateReplyDeadlineAt > Date.now() &&
+    ["任务处理超时", "pending reply hard timeout", "session 心跳丢失，任务被释放", "aborted"].includes(t.error);
+  if (isTerminal(t.status) && !keepForLate) clearPending(t.taskId);
   if (t.status === "done" && t.reply) {
     console.log("─── reply ─────────────────────────────────");
     console.log(t.reply);
+    console.log("───────────────────────────────────────────");
+  }
+  if (t.lateReply) {
+    console.log("─── late reply ─────────────────────────────");
+    console.log(t.lateReply);
     console.log("───────────────────────────────────────────");
   }
   if (t.error) console.log(`  error: ${t.error}`);

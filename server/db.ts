@@ -19,11 +19,17 @@ CREATE TABLE IF NOT EXISTS tasks (
                        ('queued','in_progress','done','failed','cancelled','expired')),
   text               TEXT NOT NULL,
   reply              TEXT,
+  late_reply         TEXT,
   error              TEXT,
   timeout_ms         INTEGER NOT NULL,
   submitted_at       INTEGER NOT NULL,
   dispatched_at      INTEGER,
   completed_at       INTEGER,
+  late_completed_at  INTEGER,
+  submit_started_at  INTEGER,
+  submit_acknowledged_at INTEGER,
+  generating_seen_at INTEGER,
+  reply_detected_at  INTEGER,
   expires_at         INTEGER NOT NULL,
   requeue_count      INTEGER NOT NULL DEFAULT 0
 );
@@ -54,5 +60,23 @@ export function openDatabase(dbFile: string): Db {
   fs.mkdirSync(path.dirname(dbFile), { recursive: true });
   const db = new DatabaseSync(dbFile);
   db.exec(SCHEMA);
+  ensureTaskColumns(db);
   return db;
+}
+
+function ensureTaskColumns(db: Db): void {
+  const columns = new Set(
+    (db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[]).map((r) => r.name),
+  );
+  const additions: [string, string][] = [
+    ["late_reply", "TEXT"],
+    ["late_completed_at", "INTEGER"],
+    ["submit_started_at", "INTEGER"],
+    ["submit_acknowledged_at", "INTEGER"],
+    ["generating_seen_at", "INTEGER"],
+    ["reply_detected_at", "INTEGER"],
+  ];
+  for (const [name, type] of additions) {
+    if (!columns.has(name)) db.exec(`ALTER TABLE tasks ADD COLUMN ${name} ${type}`);
+  }
 }

@@ -35,8 +35,8 @@
  **目的**：验证每个 session 有独立 dispatch loop，互不阻塞。
  
  **步骤**：
- 1. 在终端 A 执行：`npx tsx bin/gpt-relay.ts review --session <sid-A> --text "task A" --timeout 30000`
- 2. 在终端 B 同时执行：`npx tsx bin/gpt-relay.ts review --session <sid-B> --text "task B" --timeout 30000`
+ 1. 在终端 A 执行：`npx tsx bin/gpt-relay.ts review --session <sid-A> --text "task A" --wait-timeout 30000`
+ 2. 在终端 B 同时执行：`npx tsx bin/gpt-relay.ts review --session <sid-B> --text "task B" --wait-timeout 30000`
  3. 观察两个 ChatGPT 页面是否几乎同时开始处理
  
  **预期结果**：
@@ -172,7 +172,7 @@
  **步骤**：
  1. 准备两份 35k+ 文本
  2. 同时向 session A 和 session B 提交 `--file` 任务
- 3. 使用 `--timeout 120000`
+ 3. 使用 `--wait-timeout 120000`
  4. 等待两个任务都完成
  
  **预期结果**：

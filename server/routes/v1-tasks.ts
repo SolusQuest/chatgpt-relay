@@ -24,28 +24,44 @@ export interface TaskView {
   status: TaskStatus;
   text?: string;
   reply: string | null;
+  lateReply: string | null;
   error: string | null;
   timeoutMs: number;
   submittedAt: number;
   dispatchedAt: number | null;
   completedAt: number | null;
+  lateCompletedAt: number | null;
+  submitStartedAt: number | null;
+  submitAcknowledgedAt: number | null;
+  generatingSeenAt: number | null;
+  replyDetectedAt: number | null;
   expiresAt: number;
+  completionDeadlineAt: number;
+  lateReplyDeadlineAt: number;
   requeueCount: number;
 }
 
-export function toTaskView(t: Task, includeText = false): TaskView {
+export function toTaskView(store: TaskStore, t: Task, includeText = false): TaskView {
   const v: TaskView = {
     taskId: t.id,
     session: t.session,
     clientRequestId: t.clientRequestId,
     status: t.status,
     reply: t.reply,
+    lateReply: t.lateReply,
     error: t.error,
     timeoutMs: t.timeoutMs,
     submittedAt: t.submittedAt,
     dispatchedAt: t.dispatchedAt,
     completedAt: t.completedAt,
+    lateCompletedAt: t.lateCompletedAt,
+    submitStartedAt: t.submitStartedAt,
+    submitAcknowledgedAt: t.submitAcknowledgedAt,
+    generatingSeenAt: t.generatingSeenAt,
+    replyDetectedAt: t.replyDetectedAt,
     expiresAt: t.expiresAt,
+    completionDeadlineAt: t.expiresAt + store.getActiveTaskGraceMs(),
+    lateReplyDeadlineAt: store.getLateReplyDeadlineAt(t),
     requeueCount: t.requeueCount,
   };
   if (includeText) v.text = t.text;
@@ -102,7 +118,7 @@ export function createV1TasksRouter(store: TaskStore): Router {
       isDone: (t) => TERMINAL_STATUSES.includes(t.status),
     });
     if (!task) return res.status(404).json({ error: "task not found" });
-    return res.json(toTaskView(task, true));
+    return res.json(toTaskView(store, task, true));
   });
 
   // 取消
@@ -110,7 +126,7 @@ export function createV1TasksRouter(store: TaskStore): Router {
     const id = String(req.params.id ?? "");
     try {
       const task = store.cancelTask(id);
-      return res.json(toTaskView(task));
+      return res.json(toTaskView(store, task));
     } catch (err) {
       return respondStoreError(res, err);
     }
@@ -135,7 +151,7 @@ export function createV1TasksRouter(store: TaskStore): Router {
     const limit = asPositiveInt(req.query.limit) ?? undefined;
     const includeText = req.query.include_text === "1";
     const rows = store.listTasks({ session, status, since, limit });
-    return res.json({ tasks: rows.map((r) => toTaskView(r, includeText)) });
+    return res.json({ tasks: rows.map((r) => toTaskView(store, r, includeText)) });
   });
 
   return router;

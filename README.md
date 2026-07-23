@@ -9,6 +9,8 @@
 - **多 session 并发**：同时开多个 chatgpt.com 标签页，多个 review 并行进行
 - **SQLite 持久化 + 状态机**：所有 task 落盘，进程崩溃、页面刷新、浏览器重启后
   都能恢复；agent 中断后 `gpt-relay resume` 拿回结果
+- **晚到回复回收**：客户端等待、task hard timeout 独立；页面越过 hard timeout
+  后才完成的回复会单独保存为 `lateReply`，不会静默丢失或改写既有终态
 - **后台 tab 也能工作**：MV3 Service Worker + focus-independent 注入
 - **断网自愈**：`fetch` hook + `online`/`offline` 事件，自动 reload
 - **Agent 友好**：v1 REST API，长轮询、幂等、可批量、可回查
@@ -109,13 +111,14 @@ gpt-relay review --session <id> --stdin         # 提交 review
 | `GPT_RELAY_DEFAULT_TIMEOUT_MS`  | `1800000`                     | 单 task 默认超时（30 分钟） |
 | `GPT_RELAY_MAX_TASK_TIMEOUT_MS` | `3600000`                     | 单 task 最大超时（60 分钟，超出时 capped） |
 | `GPT_RELAY_ACTIVE_TASK_GRACE_MS` | `60000`                    | hard deadline 后进行中 task 的 grace（60 秒） |
+| `GPT_RELAY_LATE_REPLY_GRACE_MS` | `1800000`                   | hard deadline 后继续占用页面并回收晚到回复（30 分钟） |
 | `GPT_RELAY_MAX_TASK_BYTES`      | `524288`                      | prompt 上限             |
 | `GPT_RELAY_MAX_QUEUED_PER_SESSION` | `50`                       | 单 session 队列上限     |
 
 ## 测试
 
 ```bash
-npm test                # 57 个测试（单元 + HTTP 集成 + e2e + skill + 扩展静态）
+npm test                # 94 个测试（单元 + migration + HTTP 集成 + e2e + skill + 扩展静态）
 npm run typecheck       # tsc --noEmit
 ```
 

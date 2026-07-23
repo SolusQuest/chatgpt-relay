@@ -133,7 +133,9 @@
   }
 
   function isGenerating() {
-    return SELECTORS.stopButton.some((sel) => document.querySelector(sel));
+    return SELECTORS.stopButton.some((sel) =>
+      Array.from(document.querySelectorAll(sel)).some((button) => isVisible(button)),
+    );
   }
 
   function getAssistantMessages() { return Array.from(document.querySelectorAll(SELECTORS.assistantMessage)); }
@@ -152,6 +154,18 @@
   function getLastUserId(msgs) {
     if (!msgs.length) return null;
     return msgs[msgs.length - 1].getAttribute("data-message-id") || null;
+  }
+
+  function captureBaseline() {
+    const assistants = getAssistantMessages();
+    const users = getUserMessages();
+    return {
+      assistantCount: assistants.length,
+      lastAssistantId: getLastAssistantId(assistants),
+      lastUserId: getLastUserId(users),
+      userCount: users.length,
+      startedAt: Date.now(),
+    };
   }
 
   function getSessionId() {
@@ -425,6 +439,17 @@
         }).catch(() => {});
         return;
       }
+      if (rec.phase === "send-attempted" || rec.phase === "send-clicked") {
+        // 点击边界附近刷新时无法证明请求未发送；保守交给 pending 状态机采样，
+        // 避免把同一 prompt 再发一次。
+        chrome.runtime.sendMessage({
+          type: "reattach-pending",
+          taskId: rec.taskId,
+          baseline: rec.baseline ?? {},
+          submissionState: rec.phase,
+        }).catch(() => {});
+        return;
+      }
       console.log("[relay content] no new reply found; requeuing", rec.taskId);
       await chrome.runtime.sendMessage({ type: "requeue-task", taskId: rec.taskId });
       clearInflight();
@@ -508,7 +533,10 @@
             // user 消息也可能被虚拟滚动 unmount，同样不能靠 count。只用来在极端情况下
             // 分辨"提交都没生效"（既没有新 assistant 也完全没有 user）。保守：只要页面
             // 有任何 user 消息就认为提交生效了。
-            const hasNewUser = users.length > 0;
+            const currentUserId = getLastUserId(users);
+            const hasNewUser = baseline.lastUserId != null
+              ? !!currentUserId && currentUserId !== baseline.lastUserId
+              : users.length > (baseline.userCount ?? 0);
             const lastText = getLastText(msgs);
             if (generating) {
               sendResponse({ status: "generating", lastText: lastText, assistantCount: msgs.length });
@@ -534,6 +562,13 @@
           sendResponse({ status: "ok" });
         } else if (msg.type === "get-session-id") {
           sendResponse({ session: getSessionId() });
+        } else if (msg.type === "get-inflight") {
+          sendResponse({ inflight: readInflight() });
+        } else if (msg.type === "get-page-state") {
+          sendResponse({
+            generating: isGenerating(),
+            baseline: captureBaseline(),
+          });
         } else if (msg.type === "check-safety") {
           sendResponse({ block: findSafetyBlock() });
         } else if (msg.type === "update-banner") {
@@ -545,30 +580,42 @@
           updateBanner(`处理中: ${msg.taskId?.slice?.(0, 8) ?? ""}…`, "#e67e22");
 
           // 记录 baseline + inflight，供刷新恢复用
-          const _msgsAtSubmit = getAssistantMessages();
-          const baseline = {
-            assistantCount: _msgsAtSubmit.length,
-            lastAssistantText: getLastText(_msgsAtSubmit),
-            lastAssistantId: getLastAssistantId(_msgsAtSubmit),
-            lastUserId: getLastUserId(getUserMessages()),
-            userCount: getUserMessages().length,
-            startedAt: Date.now(),
-          };
-          writeInflight({
+          const baseline = msg.baseline ?? captureBaseline();
+          const inflight = {
             taskId: msg.taskId,
             session: getSessionId(),
             submittedAt: Date.now(),
             baseline,
-          });
+            phase: "preparing",
+          };
+          writeInflight(inflight);
 
-          await pasteIntoInput(msg.text);
-          await pacedDelay(500, 1200);
-          await clickSend();
-          updateBanner(`等待回复: ${msg.taskId?.slice?.(0, 8) ?? ""}…`, "#3498db");
+          try {
+            await pasteIntoInput(msg.text);
+            await pacedDelay(500, 1200);
+            inflight.phase = "send-attempted";
+            inflight.sendAttemptedAt = Date.now();
+            writeInflight(inflight);
+            await clickSend();
+            inflight.phase = "send-clicked";
+            inflight.sendClickedAt = Date.now();
+            writeInflight(inflight);
+            updateBanner(`等待回复: ${msg.taskId?.slice?.(0, 8) ?? ""}…`, "#3498db");
 
-          // run-task 只做提交：注入 → click send → 记 baseline 到 sessionStorage → 立即返回。
-          // 后续 poll 由 SW 的 pending-reply 状态机负责（见 service-worker.js）。
-          sendResponse({ status: "submitted", baseline });
+            // run-task 只做提交：注入 → click send → 记 baseline 到 sessionStorage → 立即返回。
+            // 后续 poll 由 SW 的 pending-reply 状态机负责（见 service-worker.js）。
+            sendResponse({ status: "submitted", baseline, submissionState: "send-clicked" });
+          } catch (e) {
+            console.warn("[relay content] run-task failed", e);
+            updateBanner(`错误: ${e.message.slice(0, 40)}`, "#e74c3c");
+            sendResponse({
+              error: e.message,
+              baseline,
+              submissionState: inflight.phase === "preparing"
+                ? "not-submitted"
+                : "send-attempted",
+            });
+          }
         } else {
           sendResponse({ error: `unknown message type: ${msg.type}` });
         }

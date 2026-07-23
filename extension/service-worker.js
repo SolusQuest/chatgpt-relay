@@ -13,7 +13,10 @@ import {
   POLL_REPLY_STABLE_SAMPLES,
   POLL_NOT_STARTED_MAX,
   POLL_HARD_TIMEOUT_MS,
+  POLL_LATE_REPLY_GRACE_MS,
   POLL_REPLY_SENDMSG_TIMEOUT_MS,
+  RUN_TASK_ACK_TIMEOUT_MS,
+  PAGE_STATE_SENDMSG_TIMEOUT_MS,
 } from "./lib/config.js";
 
 // 开发调试：把 DEBUG 改成 true 或在 popup 里设置 window.__gptRelayDebug = true
@@ -139,9 +142,15 @@ async function forgetTabSession(tabId) {
 }
 
 // ── inflight tracking ──
-async function markInflight(session, taskId) {
+async function markInflight(session, taskId, details = {}) {
   const inflight = (await getStorage(STORAGE_KEYS.INFLIGHT, {}));
-  inflight[session] = { taskId, submittedAt: Date.now() };
+  const existing = inflight[session]?.taskId === taskId ? inflight[session] : {};
+  inflight[session] = {
+    ...existing,
+    taskId,
+    submittedAt: existing.submittedAt ?? Date.now(),
+    ...details,
+  };
   await setStorage(STORAGE_KEYS.INFLIGHT, inflight);
 }
 async function clearInflight(session) {
@@ -158,11 +167,87 @@ async function getInflight(session) {
 const offlineSessions = new Set();
 
 // 通知 content-script 清 sessionStorage 里的 inflight 并复位 banner。
-// task 完成 / 失败 / 服务端强制超时 均走这里，避免 banner 卡在"等待回复"蓝色。
+// task 完成 / 明确失败 / late-reply 窗口结束时走这里，避免 banner 卡住。
 async function notifyTabCleared(tabId) {
   if (!tabId) return;
   // clear-inflight handler 里会同步复位 banner 到 "Relay: <sess8>…"
-  try { await chrome.tabs.sendMessage(tabId, { type: "clear-inflight" }); } catch {}
+  try {
+    await sendTabMessage(
+      tabId,
+      { type: "clear-inflight" },
+      PAGE_STATE_SENDMSG_TIMEOUT_MS,
+      "clear-inflight",
+    );
+  } catch {}
+}
+
+async function sendTabMessage(tabId, message, timeoutMs, label) {
+  let timer;
+  try {
+    return await Promise.race([
+      chrome.tabs.sendMessage(tabId, message),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} timeout`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function getPageState(tabId) {
+  const state = await sendTabMessage(
+    tabId,
+    { type: "get-page-state" },
+    PAGE_STATE_SENDMSG_TIMEOUT_MS,
+    "get-page-state",
+  );
+  if (!state || state.error || typeof state.generating !== "boolean") {
+    throw new Error(state?.error ?? "get-page-state invalid response");
+  }
+  return state;
+}
+
+async function reportTaskProgress(taskId, phase) {
+  await httpJson("POST", `/internal/tasks/${taskId}/progress`, { phase }).catch((e) => {
+    dlog("[relay sw] progress report failed", taskId.slice(0, 8), phase, e.message);
+  });
+}
+
+async function getSessionPendingReply(session) {
+  const pending = await listPendingReplies();
+  return Object.values(pending).find((rec) => rec?.session === session) ?? null;
+}
+
+async function setClaimPendingReply(claim, session, tabId, baseline, ackState) {
+  const taskId = claim.task.taskId;
+  await setPendingReply(taskId, {
+    session,
+    tabId,
+    taskId,
+    expiresAt: claim.task.expiresAt,
+    completionDeadlineAt: claim.task.completionDeadlineAt,
+    lateReplyDeadlineAt: claim.task.lateReplyDeadlineAt,
+    baseline: baseline ?? {
+      assistantCount: 0,
+      lastAssistantText: "",
+      lastAssistantId: null,
+      lastUserId: null,
+      userCount: 0,
+    },
+    submittedAt: Date.now(),
+    lastPollAt: 0,
+    notStartedCount: 0,
+    stableSampleCount: 0,
+    lastSampleText: "",
+    wasGenerating: false,
+    stoppedNoReplyCount: 0,
+    stopRequestedAt: null,
+    ackState,
+    hardTimedOutAt: null,
+    generatingProgressReported: false,
+    replyProgressReported: false,
+  });
 }
 
 // ── per-session dispatch loop ──
@@ -189,6 +274,13 @@ async function startDispatchLoop(session, tabId) {
 
   try {
     while (!controller.signal.aborted) {
+      const existingPending = await getSessionPendingReply(session);
+      if (existingPending) {
+        void scheduleFastPending();
+        await waitForPendingReply(existingPending.taskId, controller.signal);
+        continue;
+      }
+
       const tabInfo = await chrome.tabs.get(tabId).catch(() => null);
       if (!tabInfo) {
         console.log("[relay sw] dispatch loop exit: tab gone", session.slice(0, 8));
@@ -209,7 +301,12 @@ async function startDispatchLoop(session, tabId) {
       // safety / pause 检查：与旧 handleTab 行为保持一致
       let safety = null;
       try {
-        const r = await chrome.tabs.sendMessage(tabId, { type: "check-safety" });
+        const r = await sendTabMessage(
+          tabId,
+          { type: "check-safety" },
+          PAGE_STATE_SENDMSG_TIMEOUT_MS,
+          "check-safety",
+        );
         safety = r?.block ?? null;
       } catch { /* content script gone */ }
       if (safety) {
@@ -222,6 +319,20 @@ async function startDispatchLoop(session, tabId) {
       await httpJson("POST", `/internal/sessions/${encodeURIComponent(session)}/status`, {
         paused: false,
       }).catch(() => {});
+
+      // 页面仍在生成上一轮（包括已在 server hard-timeout 的晚到回复）时，
+      // 不 claim 新任务，避免新任务在 waitForPageReady 上失败或错配回复。
+      try {
+        const state = await getPageState(tabId);
+        if (state?.generating) {
+          await delay(DISPATCH_LOOP_RETRY_MS);
+          continue;
+        }
+      } catch (e) {
+        console.warn("[relay sw] page state unavailable", session.slice(0, 8), e.message);
+        await delay(DISPATCH_LOOP_RETRY_MS);
+        continue;
+      }
 
       const loopStart = Date.now();
       let claim;
@@ -259,8 +370,74 @@ async function startDispatchLoop(session, tabId) {
       await markInflight(session, taskId);
 
       try {
-        const runRes = await chrome.tabs.sendMessage(tabId, { type: "run-task", taskId, text });
-        if (runRes?.error) throw new Error(runRes.error);
+        let pageState;
+        try {
+          pageState = await getPageState(tabId);
+        } catch (e) {
+          await httpJson("POST", `/internal/tasks/${taskId}/defer`, {}).catch(() => {});
+          await clearInflight(session);
+          await notifyTabCleared(tabId);
+          await delay(DISPATCH_LOOP_RETRY_MS);
+          continue;
+        }
+        if (pageState?.generating) {
+          await httpJson("POST", `/internal/tasks/${taskId}/defer`, {}).catch(() => {});
+          await clearInflight(session);
+          await notifyTabCleared(tabId);
+          await delay(DISPATCH_LOOP_RETRY_MS);
+          continue;
+        }
+        await markInflight(session, taskId, {
+          tabId,
+          baseline: pageState?.baseline,
+          expiresAt: claim.task.expiresAt,
+          completionDeadlineAt: claim.task.completionDeadlineAt,
+          lateReplyDeadlineAt: claim.task.lateReplyDeadlineAt,
+        });
+        await reportTaskProgress(taskId, "submit_started");
+
+        let runRes;
+        try {
+          runRes = await sendTabMessage(
+            tabId,
+            { type: "run-task", taskId, text, baseline: pageState?.baseline },
+            RUN_TASK_ACK_TIMEOUT_MS,
+            "run-task acknowledgement",
+          );
+        } catch (e) {
+          console.warn("[relay sw] run-task acknowledgement unknown", taskId.slice(0, 8), e.message);
+          await setClaimPendingReply(
+            claim,
+            session,
+            tabId,
+            pageState?.baseline,
+            "unknown",
+          );
+          await waitForPendingReply(taskId, controller.signal);
+          continue;
+        }
+
+        if (runRes?.error) {
+          if (runRes.submissionState === "not-submitted" && /waitForPageReady/.test(runRes.error)) {
+            await httpJson("POST", `/internal/tasks/${taskId}/defer`, {}).catch(() => {});
+            await clearInflight(session);
+            await notifyTabCleared(tabId);
+            await delay(DISPATCH_LOOP_RETRY_MS);
+            continue;
+          }
+          if (runRes.submissionState !== "not-submitted") {
+            await setClaimPendingReply(
+              claim,
+              session,
+              tabId,
+              runRes.baseline ?? pageState?.baseline,
+              "unknown",
+            );
+            await waitForPendingReply(taskId, controller.signal);
+            continue;
+          }
+          throw new Error(runRes.error);
+        }
         if (runRes?.status !== "submitted") {
           // content-script 老版本兼容
           if (typeof runRes?.reply === "string") {
@@ -272,22 +449,14 @@ async function startDispatchLoop(session, tabId) {
           throw new Error("run-task did not acknowledge submission");
         }
 
-        await setPendingReply(taskId, {
+        await reportTaskProgress(taskId, "submit_acknowledged");
+        await setClaimPendingReply(
+          claim,
           session,
           tabId,
-          taskId,
-          expiresAt: claim.task.expiresAt,
-          completionDeadlineAt: claim.task.completionDeadlineAt,
-          baseline: runRes.baseline ?? { assistantCount: 0, lastAssistantText: "", userCount: 0 },
-          submittedAt: Date.now(),
-          lastPollAt: 0,
-          notStartedCount: 0,
-          stableSampleCount: 0,
-          lastSampleText: "",
-          wasGenerating: false,
-          stoppedNoReplyCount: 0,
-          stopRequestedAt: null,
-        });
+          runRes.baseline ?? pageState?.baseline,
+          "acknowledged",
+        );
 
         // 等待当前任务完成（done/failed/recover/requeue 都会 deletePendingReply）
         await waitForPendingReply(taskId, controller.signal);
@@ -296,10 +465,13 @@ async function startDispatchLoop(session, tabId) {
         console.warn("[relay sw] task failed", taskId.slice(0, 8), e.message);
         await httpJson("POST", `/internal/tasks/${taskId}/complete`, { error: e.message }).catch(() => {});
         await clearInflight(session);
+        await notifyTabCleared(tabId);
       }
     }
   } finally {
-    dispatchLoops.delete(session);
+    if (dispatchLoops.get(session)?.controller === controller) {
+      dispatchLoops.delete(session);
+    }
   }
 }
 
@@ -407,13 +579,23 @@ async function pollPendingReplies() {
 async function pollOnePending(taskId, rec) {
   const now = Date.now();
   dlog("[relay sw] pollOnePending", taskId.slice(0,8), "tab=", rec.tabId, "session=", rec.session?.slice?.(0,8), "notStarted=", rec.notStartedCount, "stable=", rec.stableSampleCount);
-  // 硬超时
+  // server hard-timeout 后继续占用 session 并采样一段有界的 late-reply 窗口。
+  // 这样页面最终完成时仍能保存结论，同时不会把下一任务发进仍在生成的页面。
   const hardDeadline = rec.completionDeadlineAt ??
     ((rec.expiresAt ?? rec.submittedAt + POLL_HARD_TIMEOUT_MS) + 60_000);
-  if (now > hardDeadline) {
-    console.warn("[relay sw] pending reply hard timeout", taskId);
-    await failPending(taskId, rec, "pending reply hard timeout");
+  const lateDeadline = rec.lateReplyDeadlineAt ??
+    (hardDeadline + POLL_LATE_REPLY_GRACE_MS);
+  if (now > lateDeadline) {
+    console.warn("[relay sw] late reply window expired", taskId);
+    await abandonPending(taskId, rec, "late reply window expired");
     return;
+  }
+  if (now > hardDeadline) {
+    if (!rec.hardTimedOutAt) {
+      rec.hardTimedOutAt = now;
+      console.warn("[relay sw] server deadline passed; tracking late reply", taskId);
+      await setPendingReply(taskId, rec);
+    }
   }
 
   // 定位 tab
@@ -432,10 +614,12 @@ async function pollOnePending(taskId, rec) {
   // 调 content-script 单次快照
   let snap;
   try {
-    snap = await Promise.race([
-      chrome.tabs.sendMessage(rec.tabId, { type: "poll-reply", baseline: rec.baseline }),
-      new Promise((_, rej) => setTimeout(() => rej(new Error("poll-reply sendMessage timeout")), POLL_REPLY_SENDMSG_TIMEOUT_MS)),
-    ]);
+    snap = await sendTabMessage(
+      rec.tabId,
+      { type: "poll-reply", baseline: rec.baseline },
+      POLL_REPLY_SENDMSG_TIMEOUT_MS,
+      "poll-reply sendMessage",
+    );
   } catch (e) {
     console.warn("[relay sw] poll-reply sendMessage failed", taskId, e.message);
     // 一次失败不结算；下次 alarm 再试。
@@ -472,10 +656,19 @@ async function pollOnePending(taskId, rec) {
     }
     if (rec.stableSampleCount >= POLL_REPLY_STABLE_SAMPLES && text.length > 0) {
       console.log("[relay sw] pending complete", taskId, "len=", text.length);
+      if (!rec.replyProgressReported) {
+        await reportTaskProgress(taskId, "reply_detected");
+        rec.replyProgressReported = true;
+      }
       try {
-        await httpJson("POST", `/internal/tasks/${taskId}/complete`, { text });
+        const captured = await httpJson("POST", `/internal/tasks/${taskId}/capture`, { text });
+        console.log(
+          "[relay sw] reply captured",
+          taskId.slice(0, 8),
+          captured?.late ? "late" : "on-time",
+        );
       } catch (e) {
-        console.warn("[relay sw] complete POST failed", taskId, e.message);
+        console.warn("[relay sw] capture POST failed", taskId, e.message);
         await setPendingReply(taskId, rec);
         return;
       }
@@ -495,6 +688,10 @@ async function pollOnePending(taskId, rec) {
     rec.stoppedNoReplyCount = 0;
     rec.stableSampleCount = 0;
     rec.lastSampleText = snap.lastText ?? rec.lastSampleText ?? "";
+    if (!rec.generatingProgressReported) {
+      await reportTaskProgress(taskId, "generating_seen");
+      rec.generatingProgressReported = true;
+    }
     await setPendingReply(taskId, rec);
     return;
   }
@@ -520,6 +717,10 @@ async function pollOnePending(taskId, rec) {
       return;
     }
     rec.notStartedCount = (rec.notStartedCount ?? 0) + 1;
+    if (rec.hardTimedOutAt && rec.notStartedCount >= 2) {
+      await abandonPending(taskId, rec, "server deadline passed before page submission");
+      return;
+    }
     if (rec.notStartedCount >= POLL_NOT_STARTED_MAX) {
       console.warn("[relay sw] pending never left not-started; failing", taskId);
       await failPending(taskId, rec, "send appears to have failed (no user/assistant message change)");
@@ -539,6 +740,15 @@ async function failPending(taskId, rec, reason) {
   } catch (e) {
     console.warn("[relay sw] failPending POST failed", taskId, e.message);
   }
+  await deletePendingReply(taskId);
+  await clearInflight(rec.session);
+  await notifyTabCleared(rec.tabId);
+  await setStorage(STORAGE_KEYS.LAST_ERROR, {
+    taskId, session: rec.session, error: reason, at: Date.now(),
+  });
+}
+
+async function abandonPending(taskId, rec, reason) {
   await deletePendingReply(taskId);
   await clearInflight(rec.session);
   await notifyTabCleared(rec.tabId);
@@ -637,13 +847,67 @@ async function reconcileInflight() {
       await clearInflight(s);
     }
   }
-  // 2) 若 task 已经 terminal（server 判 failed/expired 等），也清 inflight + pending
+  // 2) terminal task 通常清理；可回收的 timeout failure 在 late-reply 窗口内保留，
+  // 继续阻塞该 session 的下一次 dispatch。
   const still = await getStorage(STORAGE_KEYS.INFLIGHT, {});
   for (const [session, entry] of Object.entries(still)) {
     if (!entry?.taskId) continue;
     try {
       const t = await httpJson("GET", `/v1/tasks/${entry.taskId}`);
-      if (t && ["done", "failed", "cancelled", "expired"].includes(t.status)) {
+      const keepForLate = t?.status === "failed" &&
+        !t.lateReply &&
+        t.lateReplyDeadlineAt > Date.now() &&
+        ["任务处理超时", "pending reply hard timeout", "session 心跳丢失，任务被释放", "aborted"].includes(t.error);
+      if (keepForLate) {
+        const pmap = await listPendingReplies();
+        if (!pmap[entry.taskId]) {
+          let tabId = entry.tabId ?? null;
+          if (!tabId) {
+            for (const [tid, sid] of tabSessionCache.entries()) {
+              if (sid === session) { tabId = tid; break; }
+            }
+          }
+          let baseline = entry.baseline ?? null;
+          if (tabId && !baseline) {
+            const pageInflight = await sendTabMessage(
+              tabId,
+              { type: "get-inflight" },
+              PAGE_STATE_SENDMSG_TIMEOUT_MS,
+              "get-inflight",
+            ).catch(() => null);
+            if (pageInflight?.inflight?.taskId === entry.taskId) {
+              baseline = pageInflight.inflight.baseline ?? null;
+            }
+          }
+          if (tabId && baseline) {
+            await setPendingReply(entry.taskId, {
+              session,
+              tabId,
+              taskId: entry.taskId,
+              expiresAt: entry.expiresAt ?? t.expiresAt,
+              completionDeadlineAt:
+                entry.completionDeadlineAt ?? t.completionDeadlineAt,
+              lateReplyDeadlineAt:
+                entry.lateReplyDeadlineAt ?? t.lateReplyDeadlineAt,
+              baseline,
+              submittedAt: entry.submittedAt ?? Date.now(),
+              lastPollAt: 0,
+              notStartedCount: 0,
+              stableSampleCount: 0,
+              lastSampleText: "",
+              wasGenerating: true,
+              stoppedNoReplyCount: 0,
+              stopRequestedAt: null,
+              ackState: "unknown",
+              hardTimedOutAt: t.completedAt ?? Date.now(),
+              generatingProgressReported: !!t.generatingSeenAt,
+              replyProgressReported: !!t.replyDetectedAt,
+            });
+          }
+        }
+        continue;
+      }
+      if (t && ["done", "failed", "cancelled", "expired"].includes(t.status) && !keepForLate) {
         console.log("[relay sw] reconcile: task", entry.taskId.slice(0, 8), "already", t.status, "→ clearing inflight");
         // 找到对应 tabId（优先从 pendingReplies 拿，回退到反查 tab_session_map）
         let tabId = null;
@@ -777,20 +1041,29 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const sid = await getTabSession(sender.tab.id);
         if (!sid) { sendResponse({ error: "no session for tab" }); return; }
         const existing = await getPendingReply(msg.taskId);
+        const task = await httpJson("GET", `/v1/tasks/${msg.taskId}`).catch(() => null);
         await setPendingReply(msg.taskId, {
           ...(existing ?? {}),
           session: sid,
           tabId: sender.tab.id,
           taskId: msg.taskId,
+          expiresAt: existing?.expiresAt ?? task?.expiresAt,
+          completionDeadlineAt: existing?.completionDeadlineAt ??
+            (task ? task.expiresAt + 60_000 : undefined),
+          lateReplyDeadlineAt: existing?.lateReplyDeadlineAt ?? task?.lateReplyDeadlineAt,
           baseline: msg.baseline ?? { assistantCount: 0, lastAssistantText: "", userCount: 0 },
           submittedAt: existing?.submittedAt ?? Date.now(),
           lastPollAt: 0,
           notStartedCount: 0,
           stableSampleCount: 0,
           lastSampleText: "",
-          wasGenerating: true,
+          wasGenerating: existing?.wasGenerating ?? false,
           stoppedNoReplyCount: existing?.stoppedNoReplyCount ?? 0,
           stopRequestedAt: existing?.stopRequestedAt ?? null,
+          ackState: existing?.ackState ?? msg.submissionState ?? "unknown",
+          hardTimedOutAt: existing?.hardTimedOutAt ?? null,
+          generatingProgressReported: existing?.generatingProgressReported ?? false,
+          replyProgressReported: existing?.replyProgressReported ?? false,
         });
         await markInflight(sid, msg.taskId);
         // 立即触发一次采样

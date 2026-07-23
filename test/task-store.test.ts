@@ -16,6 +16,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     defaultTimeoutMs: 60_000,
     maxTaskTimeoutMs: 3_600_000,
     activeTaskGraceMs: 5_000,
+    lateReplyGraceMs: 30_000,
     heartbeatStaleMs: 30_000,
     sessionActiveMs: 30_000,
     maintenanceIntervalMs: 5_000,
@@ -31,9 +32,12 @@ function makeStore(overrides: Partial<Config> = {}): TaskStore {
   db.exec(`
     CREATE TABLE tasks (
       id TEXT PRIMARY KEY, session TEXT NOT NULL, client_request_id TEXT,
-      status TEXT NOT NULL, text TEXT NOT NULL, reply TEXT, error TEXT,
+      status TEXT NOT NULL, text TEXT NOT NULL, reply TEXT, late_reply TEXT, error TEXT,
       timeout_ms INTEGER NOT NULL, submitted_at INTEGER NOT NULL,
-      dispatched_at INTEGER, completed_at INTEGER, expires_at INTEGER NOT NULL,
+      dispatched_at INTEGER, completed_at INTEGER, late_completed_at INTEGER,
+      submit_started_at INTEGER, submit_acknowledged_at INTEGER,
+      generating_seen_at INTEGER, reply_detected_at INTEGER,
+      expires_at INTEGER NOT NULL,
       requeue_count INTEGER NOT NULL DEFAULT 0
     );
     CREATE UNIQUE INDEX uniq_tasks_cri ON tasks(session, client_request_id)
@@ -117,6 +121,75 @@ test("completeTask with error sets failed", () => {
   assert.equal(failed.status, "failed");
   assert.equal(failed.error, "boom");
   assert.equal(failed.reply, null);
+});
+
+test("captureReply stores a late reply without rewriting timeout failure", () => {
+  const store = makeStore({ activeTaskGraceMs: 500, lateReplyGraceMs: 5_000 });
+  const t = store.createTask({ session: "s1", text: "q", timeoutMs: 1000, now: 100 });
+  store.claimNextTask("s1", 200);
+  store.expireDueTasks(1601);
+
+  const captured = store.captureReply(t.id, "eventual answer", 2000);
+  assert.equal(captured.captured, true);
+  assert.equal(captured.late, true);
+  assert.equal(captured.task.status, "failed");
+  assert.equal(captured.task.reply, null);
+  assert.equal(captured.task.lateReply, "eventual answer");
+  assert.equal(captured.task.lateCompletedAt, 2000);
+});
+
+test("captureReply rejects a late reply after the bounded recovery window", () => {
+  const store = makeStore({ activeTaskGraceMs: 500, lateReplyGraceMs: 5_000 });
+  const t = store.createTask({ session: "s1", text: "q", timeoutMs: 1000, now: 100 });
+  store.claimNextTask("s1", 200);
+  store.expireDueTasks(1601);
+
+  const captured = store.captureReply(t.id, "too late", 6601);
+  assert.equal(captured.captured, false);
+  assert.equal(captured.task.lateReply, null);
+});
+
+test("captureReply does not attach output to unrelated failures or overwrite the first late reply", () => {
+  const store = makeStore({ activeTaskGraceMs: 500, lateReplyGraceMs: 5_000 });
+  const unrelated = store.createTask({ session: "s1", text: "q", now: 100 });
+  store.claimNextTask("s1", 200);
+  store.completeTask(unrelated.id, { error: "text injection failed", now: 300 });
+  const rejected = store.captureReply(unrelated.id, "wrong owner", 400);
+  assert.equal(rejected.captured, false);
+  assert.equal(rejected.task.lateReply, null);
+
+  const timedOut = store.createTask({ session: "s2", text: "q", timeoutMs: 1000, now: 100 });
+  store.claimNextTask("s2", 200);
+  store.expireDueTasks(1601);
+  store.captureReply(timedOut.id, "first", 2000);
+  const duplicate = store.captureReply(timedOut.id, "second", 2100);
+  assert.equal(duplicate.captured, false);
+  assert.equal(duplicate.late, true);
+  assert.equal(duplicate.task.lateReply, "first");
+});
+
+test("deferTask releases the session without incrementing requeue count", () => {
+  const store = makeStore();
+  const t = store.createTask({ session: "s1", text: "q" });
+  store.claimNextTask("s1");
+  const deferred = store.deferTask(t.id);
+  assert.equal(deferred.status, "queued");
+  assert.equal(deferred.dispatchedAt, null);
+  assert.equal(deferred.requeueCount, 0);
+});
+
+test("markTaskProgress records each page lifecycle phase once", () => {
+  const store = makeStore();
+  const t = store.createTask({ session: "s1", text: "q" });
+  store.markTaskProgress(t.id, "submit_started", 100);
+  store.markTaskProgress(t.id, "submit_started", 200);
+  store.markTaskProgress(t.id, "submit_acknowledged", 300);
+  store.markTaskProgress(t.id, "generating_seen", 400);
+  const progressed = store.markTaskProgress(t.id, "reply_detected", 500);
+  assert.equal(progressed.submitStartedAt, 100);
+  assert.equal(progressed.submitAcknowledgedAt, 300);
+  assert.equal(progressed.generatingSeenAt, 400);
+  assert.equal(progressed.replyDetectedAt, 500);
 });
 
 test("cancelTask cancels queued task", () => {

@@ -82,7 +82,7 @@ If no unpaused session exists, stop and report `pauseReason` to the user.
 printf %s "$PROMPT" | node $SKILL_DIR/scripts/review.mjs \
     --session "$SESSION_ID" \
     --stdin \
-    --timeout 600000
+    --wait-timeout 600000
 ```
 
 **Content shape**:
@@ -108,6 +108,9 @@ Flags worth knowing:
 - `--no-wait` fire-and-forget; prints `{"taskId":"…","status":"queued"}` and
   exits. Use when submitting several reviews in parallel to different
   sessions.
+- `--wait-timeout <ms>` controls only how long this client waits (`--timeout`
+  remains a compatibility alias).
+- `--task-timeout <ms>` explicitly changes the server task hard deadline.
 - `--cri <key>` supplies a client_request_id for idempotency. Reissuing the
   same key within the same session returns the original taskId instead of
   creating a duplicate. Recommended if the caller may retry.
@@ -189,8 +192,8 @@ context is one of gpt-relay's advantages over stateless API calls).
 
 ChatGPT can take several minutes on large prompts. Defaults are:
 - 默认客户端等待 600000 (10 min)；task 默认超时 1800000 (30 min)
-- `--timeout` 同时用于 task timeout 与客户端 wait timeout（脚本默认将两者同步），单独上限均是
-  3600000 (60 min)
+- `--wait-timeout`（兼容别名 `--timeout`）只控制客户端等待；`--task-timeout`
+  才控制 task 生命周期，最大 3600000 (60 min)
 - Long-poll chunks of 30s -- the script never busy-loops.
 
 If the shell/agent is interrupted mid-wait, the taskId is preserved in
@@ -201,7 +204,8 @@ node $SKILL_DIR/scripts/resume.mjs
 ```
 
 This prints each pending task's current status and, for `done` tasks, the
-full reply. Terminal tasks are auto-cleaned from the pending dir.
+full reply. Timeout failures remain pending during the bounded late-reply
+window; a captured `lateReply` is printed and then cleaned.
 
 ## Listing recent tasks
 
@@ -222,7 +226,7 @@ user has the gpt-relay binary installed.
 | `sessions.mjs` returns `[]`                | no chatgpt.com tab active              | open chatgpt.com and confirm green banner      |
 | session `paused: true, pauseReason: ...`   | captcha / rate limit / unusual activity | solve in browser; extension will auto-resume  |
 | `review.mjs` exits 2, error mentions "文本注入失败" | ChatGPT frontend changed selectors     | update extension selectors                     |
-| `review.mjs` exits 3 (timeout)             | reply took longer than timeout         | run `resume.mjs` later to reclaim              |
+| `review.mjs` exits 3 (wait timeout)        | client stopped waiting; task still runs | run `resume.mjs` later to reclaim              |
 | HTTP 429 queue_full                        | too many pending tasks in this session | wait or cancel with `gpt-relay cancel <taskId>`    |
 | HTTP 413 task_too_large                    | prompt bigger than server limit        | split the prompt                               |
 

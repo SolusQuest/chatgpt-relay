@@ -210,9 +210,42 @@ test("client wait timeout then resume gets reply", async () => {
     assert.ok(row);
     assert.equal(row!.task?.status, "done");
     assert.equal(row!.task?.reply, "slow: timeout me");
+    assert.ok((row!.task?.timeoutMs ?? 0) > 1000, "client wait timeout must not shorten task lifetime");
   } finally {
     stop();
   }
+});
+
+test("resume keeps timeout failure pending until a late reply is captured", async () => {
+  const submitted = await review("capture me later", {
+    session: "late-pending",
+    baseUrl,
+    wait: false,
+  });
+  const claim = await fetch(`${baseUrl}/internal/next_task?session=late-pending`)
+    .then((r) => r.json()) as { task: { taskId: string } };
+  assert.equal(claim.task.taskId, submitted.taskId);
+  await fetch(`${baseUrl}/internal/tasks/${submitted.taskId}/complete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ error: "任务处理超时" }),
+  });
+
+  const beforeLate = await resumePending(baseUrl);
+  const waiting = beforeLate.find((row) => row.record.taskId === submitted.taskId);
+  assert.equal(waiting?.task?.status, "failed");
+  assert.equal(waiting?.task?.lateReply, null);
+  assert.ok(listPending().some((row) => row.taskId === submitted.taskId));
+
+  await fetch(`${baseUrl}/internal/tasks/${submitted.taskId}/capture`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "late but preserved" }),
+  });
+  const afterLate = await resumePending(baseUrl);
+  const captured = afterLate.find((row) => row.record.taskId === submitted.taskId);
+  assert.equal(captured?.task?.lateReply, "late but preserved");
+  assert.ok(!listPending().some((row) => row.taskId === submitted.taskId));
 });
 
 test("sequential tasks in same session are queued and processed in order", async () => {
@@ -283,7 +316,7 @@ test("task expires when timeout is too short", async () => {
     session: "expire-test",
     baseUrl,
     wait: false,
-    timeoutMs: 1000,
+    taskTimeoutMs: 1000,
   });
   await new Promise((r) => setTimeout(r, 2500));
   // 维护任务默认 1s 跑一次，给足时间窗口清理过期 queued 任务

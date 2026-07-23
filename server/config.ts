@@ -12,6 +12,7 @@ export interface Config {
   defaultTimeoutMs: number;
   maxTaskTimeoutMs: number;
   activeTaskGraceMs: number;
+  lateReplyGraceMs: number;
   heartbeatStaleMs: number;
   sessionActiveMs: number;
   maintenanceIntervalMs: number;
@@ -45,6 +46,7 @@ export function loadConfig(): Config {
     defaultTimeoutMs: envInt("GPT_RELAY_DEFAULT_TIMEOUT_MS", 30 * 60_000),
     maxTaskTimeoutMs: envInt("GPT_RELAY_MAX_TASK_TIMEOUT_MS", 60 * 60_000),
     activeTaskGraceMs: envInt("GPT_RELAY_ACTIVE_TASK_GRACE_MS", 60_000),
+    lateReplyGraceMs: envInt("GPT_RELAY_LATE_REPLY_GRACE_MS", 30 * 60_000),
     heartbeatStaleMs: envInt("GPT_RELAY_HEARTBEAT_STALE_MS", 60_000),
     sessionActiveMs: envInt("GPT_RELAY_SESSION_ACTIVE_MS", 30_000),
     maintenanceIntervalMs: envInt("GPT_RELAY_MAINTENANCE_INTERVAL_MS", 5_000),
