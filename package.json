@@ -33,7 +33,8 @@
     "dev": "tsx watch server/index.ts",
     "cli": "tsx bin/gpt-relay.ts",
     "test": "tsx --test test/**/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "check:public": "node scripts/check-public-release.mjs"
   },
   "dependencies": {
     "express": "^4.18.0",

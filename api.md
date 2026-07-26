@@ -34,8 +34,8 @@ terminal status back to `done`.
 
 ```jsonc
 {
-  "taskId": "11111111-1111-4111-8111-111111111111",
-  "session": "22222222-2222-4222-8222-222222222222",
+  "taskId": "<task-id>",
+  "session": "<session-id>",
   "clientRequestId": null,
   "status": "done",
   "text": "original prompt",
@@ -181,7 +181,7 @@ List active sessions:
 {
   "sessions": [
     {
-      "session": "22222222-2222-4222-8222-222222222222",
+      "session": "<session-id>",
       "lastSeen": 1783852452632,
       "lastStatusAt": 1783852452628,
       "paused": false,
