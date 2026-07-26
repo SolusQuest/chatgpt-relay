@@ -65,6 +65,11 @@
   const INFLIGHT_KEY = "gpt_relay_inflight_v3";
   const FETCH_FAIL_THRESHOLD = 3;
   const RELOAD_COOLDOWN_MS = 60_000;
+  // document_idle 早于 ChatGPT React 会话水合完成。页面刷新后必须看到
+  // conversation DOM + composer 连续稳定一段时间，才能领取并发送新任务。
+  const PAGE_READY_STABLE_MS = 4000;
+  const PAGE_READY_TIMEOUT_MS = 60_000;
+  const SUBMISSION_ACCEPT_TIMEOUT_MS = 15_000;
 
   const delay = (ms) => new Promise((r) => setTimeout(r, ms));
   const randBetween = (a, b) => Math.floor(a + Math.random() * (b - a + 1));
@@ -112,11 +117,14 @@
   }
 
   function findInput() {
+    let fallback = null;
     for (const sel of SELECTORS.input) {
-      const el = document.querySelector(sel);
-      if (el) return el;
+      for (const el of document.querySelectorAll(sel)) {
+        fallback ??= el;
+        if (isVisible(el)) return el;
+      }
     }
-    return null;
+    return fallback;
   }
 
   function findSendButton() {
@@ -165,6 +173,68 @@
       lastUserId: getLastUserId(users),
       userCount: users.length,
       startedAt: Date.now(),
+    };
+  }
+
+  let pageReadyCandidate = null;
+
+  function getPageReadiness(now = Date.now()) {
+    const baseline = captureBaseline();
+    const generating = isGenerating();
+    const input = findInput();
+    const conversationRoute = location.pathname.match(/\/c\/([a-f0-9-]+)/);
+
+    let reason = null;
+    if (document.readyState !== "complete") {
+      reason = "document-loading";
+    } else if (generating) {
+      reason = "generating";
+    } else if (!input || !isVisible(input)) {
+      reason = "composer-loading";
+    } else if (
+      conversationRoute &&
+      baseline.userCount + baseline.assistantCount === 0
+    ) {
+      // /c/<id> 必然是已有会话。消息为 0 表示 React 仍在加载 history，
+      // 此时点击 composer 可能随着后续水合被替换，造成 prompt 丢失。
+      reason = "conversation-hydrating";
+    }
+
+    if (reason) {
+      pageReadyCandidate = null;
+      return {
+        ready: false,
+        reason,
+        stableForMs: 0,
+        generating,
+        baseline,
+      };
+    }
+
+    const signature = [
+      location.pathname,
+      baseline.userCount,
+      baseline.lastUserId ?? "",
+      baseline.assistantCount,
+      baseline.lastAssistantId ?? "",
+    ].join("|");
+
+    if (
+      !pageReadyCandidate ||
+      pageReadyCandidate.signature !== signature ||
+      pageReadyCandidate.input !== input
+    ) {
+      pageReadyCandidate = { signature, input, since: now };
+    }
+
+    const stableForMs = Math.max(0, now - pageReadyCandidate.since);
+    const ready = stableForMs >= PAGE_READY_STABLE_MS;
+    return {
+      ready,
+      reason: ready ? null : "page-stabilizing",
+      stableForMs,
+      generating,
+      baseline,
     };
   }
 
@@ -241,7 +311,12 @@
   }
 
   async function waitForInput()      { return waitForCondition(() => { const i = findInput(); return i && isVisible(i) ? i : null; }, 15000, 200, "waitForInput"); }
-  async function waitForPageReady()  { return waitForCondition(() => (!isGenerating() ? true : null), 30000, 500, "waitForPageReady"); }
+  async function waitForPageReady()  {
+    return waitForCondition(() => {
+      const state = getPageReadiness();
+      return state.ready && !state.generating ? state : null;
+    }, PAGE_READY_TIMEOUT_MS, 250, "waitForPageReady");
+  }
   async function waitForSendReady()  { return waitForCondition(() => {
     const b = findSendButton();
     if (b && isVisible(b) && !b.disabled && b.getAttribute("aria-disabled") !== "true") return b;
@@ -369,6 +444,18 @@
     await pacedDelay(200, 500);
     b.click();
     return true;
+  }
+
+  async function waitForSubmissionAccepted(baseline) {
+    return waitForCondition(() => {
+      const users = getUserMessages();
+      const lastUserId = getLastUserId(users);
+      const hasNewUser = baseline.lastUserId != null
+        ? !!lastUserId && lastUserId !== baseline.lastUserId
+        : users.length > (baseline.userCount ?? 0);
+      if (hasNewUser || isGenerating()) return true;
+      return null;
+    }, SUBMISSION_ACCEPT_TIMEOUT_MS, 250, "waitForSubmissionAccepted");
   }
 
   // ── 页面加载后尝试回捞上次的 inflight ──
@@ -565,10 +652,7 @@
         } else if (msg.type === "get-inflight") {
           sendResponse({ inflight: readInflight() });
         } else if (msg.type === "get-page-state") {
-          sendResponse({
-            generating: isGenerating(),
-            baseline: captureBaseline(),
-          });
+          sendResponse(getPageReadiness());
         } else if (msg.type === "check-safety") {
           sendResponse({ block: findSafetyBlock() });
         } else if (msg.type === "update-banner") {
@@ -600,11 +684,15 @@
             inflight.phase = "send-clicked";
             inflight.sendClickedAt = Date.now();
             writeInflight(inflight);
+            await waitForSubmissionAccepted(baseline);
+            inflight.phase = "accepted";
+            inflight.acceptedAt = Date.now();
+            writeInflight(inflight);
             updateBanner(`等待回复: ${msg.taskId?.slice?.(0, 8) ?? ""}…`, "#3498db");
 
             // run-task 只做提交：注入 → click send → 记 baseline 到 sessionStorage → 立即返回。
             // 后续 poll 由 SW 的 pending-reply 状态机负责（见 service-worker.js）。
-            sendResponse({ status: "submitted", baseline, submissionState: "send-clicked" });
+            sendResponse({ status: "submitted", baseline, submissionState: "accepted" });
           } catch (e) {
             console.warn("[relay content] run-task failed", e);
             updateBanner(`错误: ${e.message.slice(0, 40)}`, "#e74c3c");

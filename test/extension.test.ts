@@ -88,6 +88,17 @@ test("generation detection ignores hidden stop buttons", () => {
   );
 });
 
+test("dispatch waits for hydrated stable page and verified submission", () => {
+  const content = fs.readFileSync(path.join(EXT, "content-script.js"), "utf8");
+  const worker = fs.readFileSync(path.join(EXT, "service-worker.js"), "utf8");
+  assert.match(content, /document\.readyState !== "complete"/);
+  assert.match(content, /conversation-hydrating/);
+  assert.match(content, /PAGE_READY_STABLE_MS/);
+  assert.match(content, /waitForSubmissionAccepted/);
+  assert.match(worker, /!state\.ready \|\| state\.generating/);
+  assert.match(worker, /!pageState\.ready \|\| pageState\.generating/);
+});
+
 test("run-task acknowledgement and late reply capture are bounded", () => {
   const src = fs.readFileSync(path.join(EXT, "service-worker.js"), "utf8");
   assert.match(src, /RUN_TASK_ACK_TIMEOUT_MS/);

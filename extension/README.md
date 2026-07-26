@@ -58,6 +58,8 @@ Agent → HTTP POST /v1/tasks → Server (Express + SQLite)
 
 - **Content script**：只做同步 DOM 操作：注入 prompt、点击 send、快照回复
 - **Service Worker**：驱动一切
+  - 刷新后等待 document complete、已有会话消息水合完成，以及 composer/消息
+    基线连续稳定 4 秒，再允许领取任务
   - 定时通过 alarms + setTimeout 拉 `/internal/next_task` 长轮询任务
   - 认领后 `chrome.tabs.sendMessage(run-task)` 让 content script 提交
   - 提交后立即返回，SW 登记 `pending_replies` 状态机

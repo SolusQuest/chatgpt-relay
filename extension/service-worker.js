@@ -202,7 +202,12 @@ async function getPageState(tabId) {
     PAGE_STATE_SENDMSG_TIMEOUT_MS,
     "get-page-state",
   );
-  if (!state || state.error || typeof state.generating !== "boolean") {
+  if (
+    !state ||
+    state.error ||
+    typeof state.generating !== "boolean" ||
+    typeof state.ready !== "boolean"
+  ) {
     throw new Error(state?.error ?? "get-page-state invalid response");
   }
   return state;
@@ -320,11 +325,17 @@ async function startDispatchLoop(session, tabId) {
         paused: false,
       }).catch(() => {});
 
-      // 页面仍在生成上一轮（包括已在 server hard-timeout 的晚到回复）时，
-      // 不 claim 新任务，避免新任务在 waitForPageReady 上失败或错配回复。
+      // 页面仍在加载/水合，或仍在生成上一轮（包括已在 server hard-timeout
+      // 的晚到回复）时，不 claim 新任务，避免 prompt 被 React 水合覆盖。
       try {
         const state = await getPageState(tabId);
-        if (state?.generating) {
+        if (!state.ready || state.generating) {
+          dlog(
+            "[relay sw] page not dispatchable",
+            session.slice(0, 8),
+            state.reason,
+            state.stableForMs,
+          );
           await delay(DISPATCH_LOOP_RETRY_MS);
           continue;
         }
@@ -380,7 +391,7 @@ async function startDispatchLoop(session, tabId) {
           await delay(DISPATCH_LOOP_RETRY_MS);
           continue;
         }
-        if (pageState?.generating) {
+        if (!pageState.ready || pageState.generating) {
           await httpJson("POST", `/internal/tasks/${taskId}/defer`, {}).catch(() => {});
           await clearInflight(session);
           await notifyTabCleared(tabId);
