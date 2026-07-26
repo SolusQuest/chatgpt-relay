@@ -131,8 +131,14 @@ requirements. Focus on:
   work;
 - implementation or test ordering that could create unnecessary rework.
 
-List findings by severity. If no issue blocks implementation, state explicitly
-that implementation can begin.
+Return the complete set of currently identifiable blocking findings rather than
+intentionally deferring known findings to later rounds. For each blocker, cite
+the acceptance criterion, repository contract, or authoritative source; explain
+the concrete implementation failure; and state the minimum required correction.
+
+Separate blockers from implementation-local details, optional hardening, style
+preferences, and follow-up work. If no issue blocks implementation, state
+explicitly that implementation can begin.
 
 Issue: https://github.com/<org>/<repo>/issues/<n>
 
@@ -140,14 +146,135 @@ Issue: https://github.com/<org>/<repo>/issues/<n>
 <complete plan>
 ```
 
+### Review budget and finding ledger
+
+Phase 2 allows at most **three full plan-review submissions**:
+
+1. The initial complete review.
+2. A first correction review.
+3. A final convergence review.
+
+Do not reset this budget when a later response introduces another finding. The
+budget limits unrestricted re-review; it does not make a real blocker
+non-blocking or force implementation to begin.
+
+After the initial response, maintain a visible finding ledger. Give every
+finding a stable ID and record:
+
+- classification and blocking rationale;
+- cited acceptance criterion, repository contract, or authoritative source;
+- status: `open`, `resolved`, `rejected`, `deferred`, or `disputed`;
+- the plan sections changed;
+- the agent's disposition and local verification evidence.
+
+Use a compact ledger such as:
+
+| ID | Classification / basis | Status | Plan sections | Disposition and evidence |
+|---|---|---|---|---|
+| `P1` | `<initial blocker or later-round class>` | `<status>` | `<sections>` | `<agent action and verified source>` |
+
+For the second and third submissions, include the latest complete plan, the
+ledger, and a concise revision summary. Relay must reconcile prior finding IDs
+instead of silently renaming or reopening them.
+
+Any blocker first raised after the initial review must be classified as one of:
+
+- `revision-regression` — directly introduced by the latest plan revision;
+- `new-evidence` — supported by newly verified repository evidence that was not
+  reasonably available in the earlier round;
+- `late-finding` — discoverable earlier and not caused by the latest revision;
+- `out-of-scope` — requires changing frozen issue scope or acceptance criteria.
+
+Only an unresolved prior blocker, a `revision-regression`, or a
+`new-evidence` finding can normally continue to block Phase 2. A `late-finding`
+does not become blocking merely because it was labeled a blocker; the agent must
+verify its concrete impact. Treat `out-of-scope` findings as deferred work or a
+product ambiguity requiring the user, not as silent plan expansion.
+
 Evaluate every response rather than accepting it mechanically:
 
-- Real implementation or coverage gap → update the plan and request another review.
+- Real implementation or coverage gap → update the plan and request another review only while the three-submission budget remains.
 - Repository fact that can be verified locally → inspect the authoritative code or document before changing the plan.
 - Suggestion that changes frozen scope → do not adopt it silently; record it as out of scope or ask the user if it reveals a genuine product ambiguity.
 - Style preference with no correctness or maintainability impact → note it and continue.
 
-Terminate when relay reports no blocking plan issue and the agent independently confirms complete acceptance-criteria coverage. If two correction rounds still leave a substantive disagreement, present the concrete trade-off to the user.
+### Third submission — final convergence review
+
+The third submission is not another unrestricted review. Send the complete plan,
+ledger, and latest revision summary with this prompt:
+
+```text
+This is the final convergence review for the implementation/test plan.
+
+The issue scope and acceptance criteria are frozen. Do not restart a broad
+design review, reopen resolved findings without new evidence, or introduce
+optional scope.
+
+Review only:
+1. Whether previously accepted blocking findings are now resolved.
+2. Whether the latest plan revisions directly introduced a new implementation
+   blocker.
+3. Whether newly verified repository evidence exposes a blocker that could not
+   reasonably have been established in the earlier rounds.
+
+For every remaining blocker, provide:
+- finding ID;
+- classification: carried, revision-regression, or new-evidence;
+- the exact acceptance criterion, repository contract, or authoritative source;
+- the concrete implementation failure that would result;
+- why this blocks implementation rather than being an implementation-local
+  detail, optional hardening, style preference, or follow-up;
+- the minimum required correction.
+
+Do not classify a late finding as blocking unless it is supported by new
+evidence or was directly introduced by the latest revision.
+
+Return exactly one convergence verdict:
+- READY: no admissible implementation blocker remains.
+- CORRECT: one or more admissible blockers remain, but each has a deterministic,
+  implementation-local correction that does not change frozen scope or a
+  material contract or risk boundary.
+- ESCALATE: one or more admissible blockers require a product decision,
+  material trade-off, or fundamental re-plan.
+
+Do not request another full review round.
+
+Issue: https://github.com/<org>/<repo>/issues/<n>
+
+--- finding ledger ---
+<complete ledger>
+
+--- latest revision summary ---
+<changes since the previous round>
+
+--- implementation/test plan ---
+<complete plan>
+```
+
+### Decision after the review budget is exhausted
+
+Relay wording is evidence, not an automatic veto. After the third submission,
+the agent makes one explicit decision:
+
+- **No agent-verified admissible blocker remains** → close the ledger and begin
+  implementation, even if relay still lists non-blocking preferences.
+- **A real blocker has a deterministic, implementation-local correction** →
+  make the minimum plan correction, verify it against the cited source and
+  affected acceptance criteria, record it in the ledger, and begin
+  implementation without another unrestricted plan review. Ensure later tests
+  and PR review cover the corrected area.
+- **A blocker changes product scope, a public contract, compatibility or
+  migration policy, security/privacy posture, or another material trade-off** →
+  present the concrete decision and both rationales to the user.
+- **Agent and relay still disagree about a repository fact or severity** →
+  present the authoritative evidence, impact, and competing rationale to the
+  user rather than starting a fourth review.
+- **Several fundamental blockers show that the plan or issue is not actually
+  ready** → stop implementation and return to planning or `issue-to-pr.md` with
+  the user's agreement.
+
+Never start a fourth unrestricted Phase 2 review. The maximum-round rule is a
+convergence and escalation boundary, not an automatic pass.
 
 There is no routine user approval checkpoint after plan review. Once this gate passes, proceed directly to implementation.
 
@@ -264,6 +391,7 @@ The user owns final human review, `gh pr ready`, and merge decisions.
 - **Default to agent-authored planning; use parallel independent discovery only for high-risk or non-obvious implementation paths.**
 - **Parallel discovery informs one agent-owned plan and never replaces the final Phase 2 plan review.**
 - **Plan review is mandatory for non-trivial work using this workflow, but routine user approval of the plan is not.**
+- **Phase 2 permits at most three full plan-review submissions; after the final convergence review, proceed, make a deterministic verified correction, or escalate—never restart unrestricted review.**
 - **Implement tests with production behavior instead of bolting them on after the code is pushed.**
 - **Never merge, close the issue, or mark the PR ready-for-review autonomously.**
 - **Use the same user-supplied, task-specific relay session across plan and PR review.**
