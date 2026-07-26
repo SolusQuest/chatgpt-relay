@@ -3,6 +3,7 @@
 **References**:
 
 - Relay agent usage patterns: [`agent-instructions.md`](../agent-instructions.md)
+- Shared execution modes: [`workflows/README.md`](./README.md#execution-modes)
 - Rough-issue refinement workflow: [`issue-to-pr.md`](./issue-to-pr.md)
 
 ---
@@ -14,6 +15,8 @@ This is the shared implementation workflow for a GitHub issue whose product deci
 It does not repeat decision-point discovery or rewrite the issue. It reviews how the fixed issue maps onto the current repository, then continues autonomously through implementation and tests, validation, a remote draft PR, CI, relay code review, review-thread handling, and user handoff.
 
 The implementation-plan review is an engineering gate, not a new product-design phase and not a routine user checkpoint.
+
+In `default`, preserve the explicit checkpoints and escalation behavior below. In `auto`, continue without routine user intervention through either `READY_FOR_HUMAN_REVIEW` or `BLOCKED_HANDOFF`; execution mode does not change review budgets or quality gates.
 
 ## When to use / not to use
 
@@ -39,6 +42,7 @@ Readiness is determined from the issue body and authoritative repository context
 - gpt-relay is reachable.
 - The user has supplied a non-paused, task-specific ChatGPT session. Do not select an idle or previous-task session on the user's behalf.
 - **Pin the supplied session before Phase 1 and reuse it for implementation-plan and PR review.**
+- Record the execution mode before Phase 1, or preserve the mode inherited from `issue-to-pr.md`. Use `default` when none is specified.
 
 ---
 
@@ -55,17 +59,17 @@ Confirm that:
 
 This is a classification check, not issue refinement. Do not rewrite or silently reinterpret the issue.
 
-If the issue is not actually ready, stop and identify the missing decisions. Recommend [`issue-to-pr.md`](./issue-to-pr.md) when broader refinement is needed.
+If the issue is not actually ready, identify the complete set of missing decisions and recommend [`issue-to-pr.md`](./issue-to-pr.md) when broader refinement is needed. In `default`, present one consolidated checkpoint. In `auto`, do not silently rewrite a supposedly frozen issue; complete independent safe analysis and end with `BLOCKED_HANDOFF`.
 
-If it is ready, choose the plan-creation mode before drafting implementation opinions.
+If it is ready, choose the plan-creation path before drafting implementation opinions.
 
-### Default mode — agent drafts the plan
+### Standard plan path — agent drafts the plan
 
-Use the default mode when the change is narrow, follows an established repository pattern, has a largely obvious implementation path, and does not cross a high-risk boundary.
+Use the standard path when the change is narrow, follows an established repository pattern, has a largely obvious implementation path, and does not cross a high-risk boundary.
 
 The agent inspects the repository and writes the implementation/test plan. Phase 2 then uses relay as an independent reviewer of that concrete artifact.
 
-### High-risk mode — parallel independent discovery
+### High-risk plan path — parallel independent discovery
 
 Use parallel discovery when one or more of these signals apply:
 
@@ -82,7 +86,7 @@ Follow the discussion-mode barriers from `agent-instructions.md`:
 2. After submission, the agent independently inspects the repository and writes its complete implementation/test plan to a visible draft.
 3. The agent draft must be persisted before reading relay's response.
 4. Compare the outputs, verify relay-only repository claims locally, and incorporate justified blind spots or alternatives into one agent-owned plan.
-5. If the outputs expose a genuine product decision rather than an implementation choice, stop and ask the user.
+5. If the outputs expose a genuine product decision rather than an implementation choice, stop dependent work. Use one consolidated checkpoint in `default`, or `BLOCKED_HANDOFF` in `auto`.
 
 Prompt skeleton:
 
@@ -102,7 +106,7 @@ Do not use parallel discovery merely because the issue is non-trivial. It is a r
 
 ### The resulting plan
 
-In either mode, produce one concise, visible, agent-owned implementation/test plan containing:
+In either plan-creation path, produce one concise, visible, agent-owned implementation/test plan containing:
 
 1. Affected components and expected files.
 2. Implementation sequence and key engineering choices.
@@ -182,14 +186,22 @@ Any blocker first raised after the initial review must be classified as one of:
 - `revision-regression` — directly introduced by the latest plan revision;
 - `new-evidence` — supported by newly verified repository evidence that was not
   reasonably available in the earlier round;
-- `late-finding` — discoverable earlier and not caused by the latest revision;
+- `critical-late-finding` — discoverable earlier, but supported by concrete
+  evidence that the plan would violate an acceptance criterion or repository
+  contract, omit a required failure path, or create a severe implementation
+  risk;
+- `late-nonblocking` — a late implementation preference, optional hardening
+  idea, or follow-up that is not required before implementation;
 - `out-of-scope` — requires changing frozen issue scope or acceptance criteria.
 
-Only an unresolved prior blocker, a `revision-regression`, or a
-`new-evidence` finding can normally continue to block Phase 2. A `late-finding`
-does not become blocking merely because it was labeled a blocker; the agent must
-verify its concrete impact. Treat `out-of-scope` findings as deferred work or a
-product ambiguity requiring the user, not as silent plan expansion.
+An unresolved prior blocker, `revision-regression`, `new-evidence`, or
+`critical-late-finding` can block Phase 2. A `critical-late-finding` has a high
+burden of proof: it must cite the exact acceptance criterion, code path,
+repository contract, or authoritative source; explain the concrete failure;
+and show why implementation must address it now. Timing alone neither admits
+nor waives a real blocker. Treat `late-nonblocking` and `out-of-scope` findings
+as deferred work, remaining risk, or a product ambiguity requiring the user,
+not as silent plan expansion.
 
 Evaluate every response rather than accepting it mechanically:
 
@@ -219,15 +231,18 @@ Review only:
 
 For every remaining blocker, provide:
 - finding ID;
-- classification: carried, revision-regression, or new-evidence;
+- classification: carried, revision-regression, new-evidence, or
+  critical-late-finding;
 - the exact acceptance criterion, repository contract, or authoritative source;
 - the concrete implementation failure that would result;
 - why this blocks implementation rather than being an implementation-local
   detail, optional hardening, style preference, or follow-up;
 - the minimum required correction.
 
-Do not classify a late finding as blocking unless it is supported by new
-evidence or was directly introduced by the latest revision.
+A critical-late-finding must include concrete evidence that the plan would
+violate an acceptance criterion or repository contract, omit a required failure
+path, or create a severe implementation risk. Do not promote a late preference
+or optional improvement into a blocker.
 
 Return exactly one convergence verdict:
 - READY: no admissible implementation blocker remains.
@@ -265,18 +280,29 @@ the agent makes one explicit decision:
   and PR review cover the corrected area.
 - **A blocker changes product scope, a public contract, compatibility or
   migration policy, security/privacy posture, or another material trade-off** →
-  present the concrete decision and both rationales to the user.
-- **Agent and relay still disagree about a repository fact or severity** →
-  present the authoritative evidence, impact, and competing rationale to the
-  user rather than starting a fourth review.
+  in `default`, present one consolidated checkpoint with the concrete decision
+  and both rationales; in `auto`, record an authority blocker and end with
+  `BLOCKED_HANDOFF` after completing independent safe work.
+- **Agent and relay disagree about a repository fact or severity** → inspect
+  authoritative evidence and make an agent-owned semantic decision. Escalate
+  only when the disagreement meets the workflow definition of absolute
+  disagreement: use one consolidated checkpoint in `default`, or
+  `BLOCKED_HANDOFF` in `auto`.
 - **Several fundamental blockers show that the plan or issue is not actually
-  ready** → stop implementation and return to planning or `issue-to-pr.md` with
-  the user's agreement.
+  ready** → in `default`, stop implementation and present one consolidated
+  return-to-planning recommendation; in `auto`, do not reset the review budget
+  or silently refine the frozen issue, and end with `BLOCKED_HANDOFF`.
 
 Never start a fourth unrestricted Phase 2 review. The maximum-round rule is a
 convergence and escalation boundary, not an automatic pass.
 
-There is no routine user approval checkpoint after plan review. Once this gate passes, proceed directly to implementation.
+The three-review budget belongs to the current plan revision cycle. Relay
+feedback, deterministic corrections, implementation commits, and selection of
+`auto` do not reset it. A new full plan-review cycle requires an explicit
+user-authorized material change to the issue or engineering risk boundary; carry
+the prior finding ledger forward and record the reason.
+
+There is no routine user approval checkpoint after plan review in either mode. Once this gate passes, proceed directly to implementation.
 
 ## Phase 3 — Implement code and tests, then validate
 
@@ -293,7 +319,18 @@ Do not require artificial “naive/no-op implementation” evidence when it woul
 
 Plans may evolve when the code reveals better implementation-local details. Update the visible plan and continue when the change preserves issue scope and acceptance-criteria coverage.
 
-Return to Phase 2 when a change materially alters architecture, a public contract, data migration, security behavior, or the test strategy. Stop and ask the user when implementation exposes a missing product decision.
+If implementation reveals a material architecture, public-contract, migration,
+security, or test-strategy change:
+
+- Use a remaining Phase 2 submission only when the original review budget has
+  not been exhausted.
+- After the budget is exhausted, continue only when the change has a
+  deterministic in-scope correction that the agent can verify against
+  authoritative evidence and later cover in tests and PR review.
+- If a fresh broad plan review or missing product decision is genuinely
+  required, do not reset the budget automatically. Use one consolidated
+  checkpoint in `default`, or finish independent safe work and return
+  `BLOCKED_HANDOFF` in `auto`.
 
 ## Phase 4 — Push and open a remote draft PR
 
@@ -345,6 +382,7 @@ and follow-up work. If there are no blocking issues, return
 READY_FOR_HUMAN_REVIEW and list the remaining risks.
 
 PR: <url>
+Issue: <url>
 Current pushed head: <sha>
 ```
 
@@ -392,7 +430,36 @@ Handle each response as follows:
 
 For the second full review, provide the PR URL, previous reviewed head, current pushed head, complete finding ledger, fix summary, and the diff between those heads. Ask relay to verify prior findings, inspect revision-caused regressions and new evidence, and complete its review without silently renaming or reopening resolved findings.
 
+In parallel, inspect required checks:
+
+- Wait for required CI to reach a terminal state.
+- Investigate failures and distinguish PR-caused failures from external or pre-existing failures.
+- Fix PR-caused failures and repeat the relevant validation and review.
+- Treat CI-only coverage as unverified until the corresponding remote check succeeds.
+
+Inspect GitHub review **threads**, not only the flat REST comment list:
+
+1. Query `PullRequestReviewThread` through GitHub GraphQL and paginate all `reviewThreads`.
+2. Use `isResolved` to identify unresolved threads; REST review-comment objects do not carry thread-resolution state.
+3. For each unresolved thread, determine whether it is actionable.
+4. Fix actionable findings, or reply inline with the concrete reason for deliberately deferring or rejecting them.
+5. Resolve a thread only when repository policy permits and the finding has actually been handled. A reply and a resolution are separate actions.
+6. Re-run relay review after fixes that materially change the implementation only within the remaining review budget. After the budget is exhausted, use the targeted closure check only when eligible; otherwise keep the PR draft and record a blocked handoff.
+
+The gate is **no unaddressed actionable thread**, not mechanically zero unresolved threads. Reviewer-owned unresolved threads that have been answered must be listed in the handoff.
+
 ### Third full review — final convergence
+
+Reserve the third full review until the candidate head is evidence-stable:
+
+- Complete the full relevant local validation.
+- Wait for required CI on that head to reach a successful terminal state.
+- Perform a complete GitHub review-thread sweep, handle every actionable finding, and push any resulting fixes.
+- If those fixes change the head, rerun the affected validation and required checks before spending the final full review.
+
+If an external CI or review-system blocker prevents an evidence-stable candidate
+head, do not spend the third round merely to exhaust the budget; preserve the
+remaining review state and return `BLOCKED_HANDOFF`.
 
 The third full review is not another unrestricted restart. Send the PR URL, current and previous heads, complete ledger, latest fix summary, and relevant head-to-head diff with this prompt:
 
@@ -439,7 +506,16 @@ Current pushed head: <sha>
 
 Only a third-round `CORRECT_AND_CLOSE` verdict permits **one targeted closure check**. This is not a fourth full review.
 
-Apply and verify the minimum corrections for the named finding IDs, commit and push them, then send:
+Apply the minimum corrections for the named finding IDs, run the affected local
+validation, commit and push them, wait for required CI on the fix head, and
+perform another GitHub review-thread sweep. Send the targeted closure request
+only after that head is evidence-stable:
+
+If the closure-head sweep requires an unrelated substantive implementation
+change, the targeted closure is no longer an admissible substitute for broad
+review. Handle the concrete defect when it is in scope, but keep the PR in
+`BLOCKED_HANDOFF` unless the user explicitly authorizes a new review budget.
+Changes directly required by the named closure findings remain eligible.
 
 ```text
 This is a targeted closure check, not a full PR review.
@@ -477,23 +553,26 @@ After the targeted closure check:
 - If a concrete severe defect is discovered after the review budget, fix and test it when the required correction is in scope, but do not restart the full relay loop automatically. The resulting head lacks a clean relay verdict and must remain a blocked draft handoff unless the user explicitly authorizes a new review budget.
 - Never interpret exhausted review rounds as approval.
 
-In parallel, inspect required checks:
+Do not submit a separate relay task asking whether `auto` execution may
+continue. After each relay response, the agent records and applies the semantic
+continuation decision defined in `workflows/README.md`.
 
-- Wait for required CI to reach a terminal state.
-- Investigate failures and distinguish PR-caused failures from external or pre-existing failures.
-- Fix PR-caused failures and repeat the relevant validation and review.
-- Treat CI-only coverage as unverified until the corresponding remote check succeeds.
+In `auto`, a real accepted blocker is fixed without a user checkpoint; an
+unsupported preference is recorded and does not block; and an authority blocker,
+absolute disagreement, or inability to obtain a clean exact-head verdict ends
+in one consolidated `BLOCKED_HANDOFF` rather than an automatic review-budget
+extension.
 
-Inspect GitHub review **threads**, not only the flat REST comment list:
+Before classifying the final head, synchronize the remote PR body with the
+actual implementation:
 
-1. Query `PullRequestReviewThread` through GitHub GraphQL and paginate all `reviewThreads`.
-2. Use `isResolved` to identify unresolved threads; REST review-comment objects do not carry thread-resolution state.
-3. For each unresolved thread, determine whether it is actionable.
-4. Fix actionable findings, or reply inline with the concrete reason for deliberately deferring or rejecting them.
-5. Resolve a thread only when repository policy permits and the finding has actually been handled. A reply and a resolution are separate actions.
-6. Re-run relay review after fixes that materially change the implementation only within the remaining review budget. After the budget is exhausted, use the targeted closure check only when eligible; otherwise keep the PR draft and record a blocked handoff.
-
-The gate is **no unaddressed actionable thread**, not mechanically zero unresolved threads. Reviewer-owned unresolved threads that have been answered must be listed in the handoff.
+1. Re-read required-check status and paginate review threads once more; handle
+   any newly actionable result under the remaining review budget.
+2. Update the implementation summary, acceptance-criteria mapping, validation
+   evidence, material plan deviations, and remaining risks after all substantive
+   review fixes.
+3. Read the remote PR back and verify its rendered body and metadata.
+4. Confirm that the remote diff and body both describe the exact current head.
 
 A `READY_FOR_HUMAN_REVIEW` handoff requires all of:
 
@@ -501,6 +580,7 @@ A `READY_FOR_HUMAN_REVIEW` handoff requires all of:
 - No agent-verified, evidence-backed blocking finding remains unaddressed on the exact current pushed head, and relay returned `READY_FOR_HUMAN_REVIEW` or `CLOSED` for that head.
 - Every actionable review thread has been fixed or deliberately answered.
 - The issue acceptance criteria remain fully covered.
+- The rendered remote PR body accurately describes the exact current head.
 
 If the bounded review process ends with a verified blocker, an external CI blocker, an unaddressed actionable thread, or no clean relay verdict for the current head, terminate with `BLOCKED_HANDOFF`: keep the PR draft, report the exact blocker and evidence, and do not claim readiness. The user may explicitly authorize a new review budget after deciding how to proceed.
 
@@ -510,14 +590,15 @@ Do **not** merge the PR or mark it ready-for-review autonomously.
 
 Present:
 
-1. Handoff status: `READY_FOR_HUMAN_REVIEW` or `BLOCKED_HANDOFF`.
+1. Execution mode and handoff status: `READY_FOR_HUMAN_REVIEW` or `BLOCKED_HANDOFF`.
 2. The draft PR link and exact current head SHA, plus the exact relay-reviewed head when different.
 3. A concise implementation summary.
 4. Acceptance-criteria coverage mapped to code and tests.
 5. Local validation and required-CI status.
 6. Material deviations from the reviewed plan.
 7. Relay's final verdict, review-round count, and targeted closure result if used.
-8. Remaining risks, deferred follow-ups, external blockers, open finding IDs, and answered-but-unresolved reviewer-owned threads.
+8. The final agent-owned continuation decision.
+9. Remaining risks, deferred follow-ups, external blockers, open finding IDs, and answered-but-unresolved reviewer-owned threads.
 
 The user owns final human review, `gh pr ready`, and merge decisions.
 
@@ -526,11 +607,15 @@ The user owns final human review, `gh pr ready`, and merge decisions.
 ## Global rules
 
 - **Treat the issue as a frozen contract.** Implement it; do not casually refine or rewrite it.
+- **Preserve the selected `default` or `auto` mode across every phase and any composed workflow.**
+- **`auto` changes checkpoint behavior, not finding admissibility, validation, review budgets, or exact-head gates.**
+- **Never ask relay separately whether auto execution may continue; continuation is an agent-owned semantic decision.**
 - **Default to agent-authored planning; use parallel independent discovery only for high-risk or non-obvious implementation paths.**
 - **Parallel discovery informs one agent-owned plan and never replaces the final Phase 2 plan review.**
 - **Plan review is mandatory for non-trivial work using this workflow, but routine user approval of the plan is not.**
 - **Phase 2 permits at most three full plan-review submissions; after the final convergence review, proceed, make a deterministic verified correction, or escalate—never restart unrestricted review.**
 - **Phase 5 permits at most three full relay PR reviews and, only after `CORRECT_AND_CLOSE`, one targeted closure check; never restart unrestricted review without explicit user authorization.**
+- **Reserve the third full PR review for an evidence-stable head after required CI and the actionable-thread sweep.**
 - **Review limits are convergence boundaries, not waivers: an evidence-backed PR blocker keeps the draft in `BLOCKED_HANDOFF`.**
 - **CI failures and actionable GitHub review threads remain independent gates and do not consume relay review rounds.**
 - **Implement tests with production behavior instead of bolting them on after the code is pushed.**
@@ -538,6 +623,6 @@ The user owns final human review, `gh pr ready`, and merge decisions.
 - **Use the same user-supplied, task-specific relay session across plan and PR review.**
 - **Review remote artifacts at an identified head SHA.**
 - **Use GraphQL review-thread state for unresolved-thread gates; do not infer it from flat REST comments.**
-- **If relay pauses or hits a captcha:** stop, tell the user, and do not retry automatically.
-- **If readiness classification fails:** stop or switch to `issue-to-pr.md` with the user's agreement.
-- **If implementation reveals a product decision:** stop and ask the user. Relay review cannot substitute for product authority.
+- **If relay pauses or hits a captcha:** do not retry automatically; complete independent safe work, then use one consolidated checkpoint in `default` or `BLOCKED_HANDOFF` in `auto`.
+- **If readiness classification fails:** use one consolidated switch-to-`issue-to-pr.md` recommendation in `default`, or `BLOCKED_HANDOFF` in `auto`.
+- **If implementation reveals a product decision:** relay review cannot substitute for product authority; use one consolidated checkpoint in `default`, or `BLOCKED_HANDOFF` in `auto`.

@@ -24,9 +24,17 @@ or behavior that the CLI does not expose.
 - **Review the remote artifact.** PR review must target a committed and pushed
   remote PR. Do not substitute an unpushed local diff.
 - **The user owns product decisions and the final merge decision.** Agent and
-  relay agreement does not replace user approval.
-- **Stop on pause, captcha, or explicit rate limiting.** Report the reason to
-  the user and do not retry automatically.
+  relay agreement does not replace required user authorization.
+- **Follow the active workflow's execution mode.** The canonical `default` and
+  `auto` definitions live in [`workflows/README.md`](./workflows/README.md).
+  Mode controls human checkpoints, not review rigor.
+- **Review budgets belong to the active workflow.** Never reset a budget
+  automatically, treat budget exhaustion as approval, add review rounds merely
+  because the mode is `auto`, or ask relay separately whether auto execution may
+  continue.
+- **Stop relay submission on pause, captcha, or explicit rate limiting.** Do not
+  retry automatically. When a workflow is active, complete independent safe
+  work and apply its mode-aware checkpoint or blocked-handoff rule.
 
 ## Session assumptions
 
@@ -51,7 +59,8 @@ When degrading:
 1. If the agent already has the necessary context, include the complete relevant
    material in the next round and explain why.
 2. If the missing input is authorization, session selection, or sensitive
-   information, stop and ask the user.
+   information, stop dependent work and use the active workflow's consolidated
+   checkpoint or blocked-handoff rule.
 
 ## Preflight
 
@@ -158,7 +167,9 @@ implementation plan, or PR still passes through its normal review gate.
 - By default, stop after at most three follow-up rounds.
 
 If a substantive disagreement remains about product behavior, policy, UX,
-public contracts, or scope, stop and present both rationales to the user.
+public contracts, or scope, stop dependent work. Without an active workflow,
+present both rationales to the user; with one, apply its mode-aware consolidated
+checkpoint or blocked-handoff rule.
 
 ### When not to use parallel discovery
 

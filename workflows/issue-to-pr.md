@@ -3,6 +3,7 @@
 **References**:
 
 - Relay agent usage patterns: [`agent-instructions.md`](../agent-instructions.md)
+- Shared execution modes: [`workflows/README.md`](./README.md#execution-modes)
 - Shared implementation and PR workflow: [`agent-ready-issue-to-pr.md`](./agent-ready-issue-to-pr.md)
 
 ---
@@ -11,9 +12,11 @@
 
 This workflow turns a placeholder or under-specified GitHub issue into an agent-ready issue, then continues through the shared implementation workflow.
 
-Its responsibility is refinement: discover the material decisions, turn them into an explicit issue contract, obtain user approval, and publish the approved issue. It does not maintain a second copy of implementation, CI, PR-review, or handoff rules; after refinement it delegates those phases to [`agent-ready-issue-to-pr.md`](./agent-ready-issue-to-pr.md).
+Its responsibility is refinement: discover the material decisions, turn them into an explicit issue contract, satisfy the selected publication checkpoint, and publish the authorized issue. It does not maintain a second copy of implementation, CI, PR-review, or handoff rules; after refinement it delegates those phases to [`agent-ready-issue-to-pr.md`](./agent-ready-issue-to-pr.md).
 
 Use this slower path when getting scope and acceptance criteria wrong would be more expensive than discussing them first.
+
+In `default` mode, the exact refined issue body passes through a user-approval checkpoint before publication. In `auto` mode, the user's initial authorization replaces that routine checkpoint only when refinement stays within the stated product intent and no user-owned decision remains.
 
 ## When to use / not to use
 
@@ -39,6 +42,7 @@ If routing is unclear, inspect the full issue and repository context first. Rout
 - gpt-relay is reachable.
 - The user has supplied a non-paused, task-specific ChatGPT session. Do not select an idle or previous-task session on the user's behalf.
 - **Pin the supplied session before Phase 1 and reuse it throughout this workflow and the downstream agent-ready workflow.**
+- Record the execution mode before Phase 1. Use `default` when none is specified, and pass the same mode to the downstream workflow.
 
 ---
 
@@ -68,9 +72,12 @@ Terminate when:
 - A further round adds no substantive point.
 - Remaining differences are wording or optional follow-up suggestions.
 
-Use at most three discussion rounds after the independent outputs. If a substantive disagreement remains, present both rationales to the user for a decision.
+Use at most three discussion rounds after the independent outputs. A further relay discussion does not become available merely because the workflow uses `auto`.
 
-Any product, policy, UX, public-contract, or scope trade-off belongs to the user. Relay and the agent may clarify the trade-off but must not silently decide it.
+Any product, policy, UX, public-contract, or scope trade-off belongs to the user unless the user explicitly delegated that exact decision boundary. Relay and the agent may clarify the trade-off but must not silently decide it.
+
+- In `default`, batch every unresolved material decision and substantive disagreement into one user checkpoint with both rationales.
+- In `auto`, resolve repository facts and deterministic in-scope choices from authoritative evidence. If an authority blocker or absolute disagreement remains, complete any independent safe work and end with one consolidated `BLOCKED_HANDOFF`; do not ask a sequence of questions or add relay rounds.
 
 ## Phase 2 — Draft and review the agent-ready issue
 
@@ -86,7 +93,10 @@ The draft should contain:
 6. Risks and explicitly deferred follow-ups.
 7. Resolved decisions needed to prevent implementation ambiguity.
 
-Do not leave unresolved product decisions disguised as “open questions.” If a user decision is still required, return to Phase 1's user checkpoint.
+Do not leave unresolved product decisions disguised as “open questions.” If a
+user decision is still required, use one consolidated Phase 1 checkpoint in
+`default`, or record an authority blocker and return `BLOCKED_HANDOFF` in
+`auto`.
 
 Send the complete draft to the pinned relay session for strict PM and engineering review:
 
@@ -150,21 +160,29 @@ Any blocker first raised after the initial review must be classified as one of:
 - `revision-regression` — directly introduced by the latest issue-body revision;
 - `new-evidence` — supported by newly verified repository, dependency, or
   contract evidence that was not reasonably available in the earlier round;
-- `late-finding` — discoverable earlier and not caused by the latest revision;
+- `critical-late-finding` — discoverable earlier, but supported by concrete
+  evidence that the current issue would remain materially ambiguous,
+  untestable, internally contradictory, or unsafe to implement;
+- `late-nonblocking` — a late wording improvement, optional hardening idea, or
+  follow-up that is not required for an agent-ready contract;
 - `out-of-scope` — requires adding behavior outside the proposed scope;
 - `user-decision` — exposes a product, policy, UX, public-contract, or scope
   trade-off that the agent cannot settle.
 
-Only an unresolved prior blocker, a `revision-regression`, or a
-`new-evidence` finding can normally continue to block contract convergence. A
-`late-finding` does not become blocking merely because it was labeled a blocker;
-the agent must verify its concrete impact. Record `out-of-scope` findings as
-excluded or deferred. Route `user-decision` findings to the user.
+An unresolved prior blocker, `revision-regression`, `new-evidence`,
+`critical-late-finding`, or `user-decision` can block contract convergence. A
+`critical-late-finding` has a high burden of proof: it must cite the exact issue
+section or authoritative source, the implementation ambiguity or failure that
+would result, the affected acceptance criterion or contract boundary, and why
+the current issue must resolve it. Timing alone neither admits nor waives a real
+blocker. Record `late-nonblocking` and `out-of-scope` findings as excluded,
+deferred, or remaining risk.
 
 Evaluate the response semantically:
 
 - Real contract gap → revise the draft and request another review only while the three-submission budget remains.
-- Missing user decision → present the concrete choice to the user.
+- Missing user decision → collect the concrete choice for the consolidated
+  `default` checkpoint or `auto` blocked handoff.
 - Scope expansion or optional follow-up → record it as excluded or deferred.
 - Style-only preference → adopt only when it improves the repository's issue contract.
 
@@ -188,7 +206,8 @@ Review only:
 
 For every remaining blocker, provide:
 - finding ID;
-- classification: carried, revision-regression, new-evidence, or user-decision;
+- classification: carried, revision-regression, new-evidence,
+  critical-late-finding, or user-decision;
 - the exact issue section, repository contract, template rule, dependency, or
   authoritative source;
 - the concrete implementation ambiguity or failure that would result;
@@ -196,8 +215,9 @@ For every remaining blocker, provide:
   wording polish, style preference, or follow-up work;
 - the minimum required correction or user decision.
 
-Do not classify a late finding as blocking unless it is supported by new
-evidence or was directly introduced by the latest revision.
+A critical-late-finding must include concrete evidence of a material ambiguity,
+untestable requirement, contradiction, or unsafe implementation outcome. Do not
+promote a late preference or optional improvement into a blocker.
 
 Return exactly one convergence verdict:
 - READY: no admissible contract blocker remains; the exact issue body can be
@@ -227,40 +247,75 @@ Relay wording is evidence, not an automatic veto. After the third submission,
 the agent makes one explicit decision:
 
 - **No agent-verified admissible blocker remains** → close the ledger and
-  present the exact issue body at the Phase 3 user-approval checkpoint.
+  proceed to the Phase 3 checkpoint for the selected mode.
 - **A real blocker has a deterministic, contract-local correction** → make the
   minimum correction, verify that every acceptance criterion remains
-  implementable and testable, record it in the ledger, and present the exact
-  corrected body to the user without another unrestricted relay review.
+  implementable and testable, record it in the ledger, and proceed to the
+  selected Phase 3 checkpoint without another unrestricted relay review.
 - **A blocker requires a product, policy, UX, public-contract, or scope
-  decision** → return to the Phase 1 user checkpoint with the concrete choice
-  and competing rationales.
-- **Agent and relay still disagree about a repository fact or blocker severity**
-  → present the authoritative evidence, impact, and competing rationale to the
-  user rather than starting a fourth review.
+  decision** → in `default`, return to one consolidated Phase 1 user checkpoint;
+  in `auto`, record an authority blocker and end with `BLOCKED_HANDOFF` after
+  completing independent safe work.
+- **Agent and relay disagree about a repository fact or blocker severity** →
+  inspect authoritative evidence and make an agent-owned semantic decision.
+  Escalate only when the disagreement meets the workflow definition of absolute
+  disagreement: use one consolidated user checkpoint in `default`, or
+  `BLOCKED_HANDOFF` in `auto`.
 - **Several fundamental blockers show that the issue is not close to
-  agent-ready** → stop incremental patching and return to Phase 1 for a
-  structural re-draft.
+  agent-ready** → stop incremental patching. In `default`, return to Phase 1 for
+  a structural re-draft with the user's agreement. In `auto`, do not reset the
+  review budget automatically; return a consolidated `BLOCKED_HANDOFF`.
 
 Never start a fourth unrestricted Phase 2 review. The maximum-round rule is a
-convergence and escalation boundary, not an automatic pass, and it never
-replaces the Phase 3 user-approval requirement.
+convergence and escalation boundary, not an automatic pass.
 
-## Phase 3 — User approval and remote publication
+The three-review budget belongs to the current issue-contract revision cycle. A
+relay finding, deterministic correction, or selection of `auto` never resets
+it. Only a user-requested or user-authorized material contract change may start
+a new cycle; record the reason, carry the prior finding ledger forward, and
+restart the count explicitly. Editorial changes that do not alter contract
+semantics do not start a new review cycle.
 
-Present the exact reviewed issue body to the user.
+## Phase 3 — Mode-aware publication checkpoint
 
-- **Approved** → create the issue or update the placeholder using a body file, preserving repository metadata outside the authorized scope.
-- **Requests changes** → revise the local draft and return to Phase 2 review.
-- **Aborted** → stop and leave the refinement draft and decision record available to the user.
+### `default`
+
+Present the exact reviewed or deterministically corrected issue body, its review
+status, and any remaining risks to the user.
+
+- **Approved** → create the issue or update the placeholder using a body file,
+  preserving repository metadata outside the authorized scope.
+- **Requests editorial changes** → apply them, verify that contract semantics did
+  not change, and present the exact body again without resetting the review
+  budget.
+- **Requests a material contract change** → record a new user-authorized
+  revision cycle and return to the appropriate Phase 1 or Phase 2 step.
+- **Aborted** → stop and leave the refinement draft, finding ledger, and decision
+  record available to the user.
+
+### `auto`
+
+Do not create a routine exact-body approval checkpoint. Create or update the
+issue using a body file and continue when all of these are true:
+
+- No `user-decision`, authority blocker, or absolute disagreement remains.
+- No agent-verified admissible contract blocker remains.
+- The final body stays within the user's stated product intent and authorized
+  scope.
+- Every deterministic post-review correction and remaining risk is recorded.
+
+If any condition fails, do not publish a materially changed issue body. Complete
+independent safe work and end with one consolidated `BLOCKED_HANDOFF`.
 
 After creating or updating the issue:
 
 1. Read the remote issue back.
 2. Verify the rendered body, links, checklists, issue type, milestone, and other fields that were intentionally changed.
-3. Correct publishing or formatting mistakes without changing the approved contract.
+3. Correct publishing or formatting mistakes without changing the approved or pre-authorized contract.
 
-Do not publish or materially update an issue body before user approval.
+Do not publish or materially update an issue body without either exact approval
+in `default` or the explicit pre-authorization and successful gates required by
+`auto`.
 
 ## Phase 4 — Continue through the shared implementation workflow
 
@@ -269,9 +324,10 @@ The remote issue is now the authoritative agent-ready contract.
 Continue at Phase 1 of [`agent-ready-issue-to-pr.md`](./agent-ready-issue-to-pr.md), with these invariants:
 
 - Reuse the same task-specific relay session.
+- Preserve the selected execution mode.
 - Pass the final remote issue URL, not an obsolete local draft.
 - Do not repeat decision-point discovery or issue refinement.
-- Preserve the user's approved scope and acceptance criteria.
+- Preserve the user's approved or pre-authorized scope and acceptance criteria.
 - Continue autonomously unless the downstream workflow identifies a genuine missing product decision or another explicit stop condition.
 
 ---
@@ -279,10 +335,12 @@ Continue at Phase 1 of [`agent-ready-issue-to-pr.md`](./agent-ready-issue-to-pr.
 ## Global rules
 
 - **Never let agent-relay convergence substitute for user product authority.**
-- **Never publish an issue contract before the user approves its exact body.**
+- **Publish an issue contract only after exact-body approval in `default`, or after every pre-authorized publication gate passes in `auto`.**
 - **Never silently expand scope while resolving review feedback.**
-- **Phase 2 permits at most three full issue-body review submissions; after the final contract-convergence review, present the exact body, make a deterministic verified correction, or escalate—never restart unrestricted review.**
+- **Phase 2 permits at most three full issue-body review submissions; after the final contract-convergence review, proceed to the selected mode's checkpoint, make a deterministic verified correction, or escalate—never restart unrestricted review.**
+- **`auto` changes checkpoint behavior, not finding admissibility, review budgets, or quality gates; never ask relay separately whether auto execution may continue.**
+- **Batch unresolved user-owned decisions into one checkpoint in `default` or one `BLOCKED_HANDOFF` in `auto`.**
 - **Use the same user-supplied, task-specific relay session across refinement, implementation-plan review, and PR review.**
-- **If relay pauses or hits a captcha:** stop, tell the user, and do not retry automatically.
+- **If relay pauses or hits a captcha:** do not retry automatically; complete independent safe work, then use one consolidated checkpoint in `default` or `BLOCKED_HANDOFF` in `auto`.
 - **If the issue is already agent-ready:** route directly to the shared workflow instead of performing ceremonial refinement.
 - **Downstream draft PR, CI, review-thread, ready-for-review, and merge rules are owned by `agent-ready-issue-to-pr.md`.**
