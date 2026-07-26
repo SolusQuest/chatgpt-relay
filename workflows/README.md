@@ -1,6 +1,6 @@
 # Workflows
 
-Multi-step orchestration templates that use gpt-relay as one of the moving parts. A workflow may compose another workflow for shared downstream phases; the entry workflow states exactly where the handoff occurs. Relay mechanics remain in `agent-instructions.md` and `skills/gpt-relay-review/SKILL.md`.
+Multi-step orchestration templates that use gpt-relay as one of the moving parts. A workflow may compose another workflow for shared downstream phases; the entry workflow states exactly where the handoff occurs. Relay mechanics remain in `agent-instructions.md`, and execution uses the root `gpt-relay` CLI or its HTTP API.
 
 ## How to use
 

@@ -23,8 +23,8 @@ cgcon-v3/
 ├── bin/gpt-relay.ts     CLI (start/health/tasks/show/cancel/sessions/resume/review)
 ├── client/          agent-client TS 库
 ├── extension/       Chrome MV3 扩展
-├── skills/          Codex/Claude 用的 skill（HTTP-based, portable）
 ├── scripts/         杂项脚本
+├── workflows/       可组合的 agent 多阶段执行流程
 └── test/            单元 + 集成 + e2e 测试
 ```
 
@@ -148,7 +148,6 @@ rm ~/.gpt-relay/gpt-relay.db*         # 全清
 ## 相关文档
 
 - `agent-instructions.md` — 给 agent 直接看的 API 说明
-- `skills/gpt-relay-review/SKILL.md` — Codex/Claude skill 定义
 - `workflows/` — 多步 orchestration 模板（例如 issue → PR 全链路）
 - `extension/README.md` — 扩展加载 + 恢复机制细节
 

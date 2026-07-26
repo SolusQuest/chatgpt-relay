@@ -1,5 +1,5 @@
-// test/skill.test.ts
-// 验证 skills/gpt-relay-review/scripts 关键脚本。使用异步 spawn 避免与同进程 server 死锁。
+// test/cli.test.ts
+// 验证发布的 gpt-relay CLI shim。使用异步 spawn 避免与同进程 server 死锁。
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -14,7 +14,7 @@ import { loadConfig } from "../server/config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
-const SCRIPTS = path.join(REPO_ROOT, "skills", "gpt-relay-review", "scripts");
+const CLI = path.join(REPO_ROOT, "bin", "gpt-relay.mjs");
 
 let server: http.Server | null = null;
 let stop: (() => void) | null = null;
@@ -23,13 +23,12 @@ let dataDir = "";
 
 interface SpawnResult { stdout: string; stderr: string; code: number }
 
-function runNode(
-  script: string,
+function runCli(
   args: string[],
   extraEnv: Record<string, string> = {},
 ): Promise<SpawnResult> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [path.join(SCRIPTS, script), ...args], {
+    const child = spawn(process.execPath, [CLI, ...args], {
       env: { ...process.env, GPT_RELAY_URL: baseUrl, ...extraEnv },
     });
     let stdout = "";
@@ -39,7 +38,7 @@ function runNode(
     child.stdin.end();
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
-      reject(new Error(`timeout: ${script}`));
+      reject(new Error(`timeout: gpt-relay ${args.join(" ")}`));
     }, 10_000);
     child.on("exit", (code) => {
       clearTimeout(timer);
@@ -68,35 +67,35 @@ after(async () => {
   try { fs.rmSync(dataDir, { recursive: true, force: true }); } catch { /* */ }
 });
 
-test("health.mjs reports ok", async () => {
-  const r = await runNode("health.mjs", []);
+test("gpt-relay health reports ok", async () => {
+  const r = await runCli(["health"]);
   assert.equal(r.code, 0, `stderr: ${r.stderr}`);
   assert.match(r.stdout, /ok/);
 });
 
-test("health.mjs exits 1 when relay unreachable", async () => {
-  const r = await runNode("health.mjs", [], { GPT_RELAY_URL: "http://127.0.0.1:1" });
+test("gpt-relay health exits 1 when relay unreachable", async () => {
+  const r = await runCli(["health"], { GPT_RELAY_URL: "http://127.0.0.1:1" });
   assert.equal(r.code, 1);
 });
 
-test("sessions.mjs returns JSON array", async () => {
-  const r = await runNode("sessions.mjs", []);
+test("gpt-relay sessions reports no active sessions", async () => {
+  const r = await runCli(["sessions"]);
   assert.equal(r.code, 0, `stderr: ${r.stderr}`);
-  const arr = JSON.parse(r.stdout);
-  assert.ok(Array.isArray(arr));
+  assert.match(r.stdout, /no active sessions/);
 });
 
-test("list.mjs prints header", async () => {
-  const r = await runNode("list.mjs", ["--last", "5"]);
+test("gpt-relay tasks reports no tasks", async () => {
+  const r = await runCli(["tasks", "--last", "5"]);
   assert.equal(r.code, 0, `stderr: ${r.stderr}`);
-  assert.match(r.stdout, /taskId\tsession\tstatus/);
+  assert.match(r.stdout, /no tasks/);
 });
 
-test("review.mjs --no-wait submits and returns taskId immediately", async () => {
+test("gpt-relay review --no-wait submits and returns taskId immediately", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-relay-p-"));
   try {
-    const r = await runNode("review.mjs", [
-      "--session", "skill-nw",
+    const r = await runCli([
+      "review",
+      "--session", "cli-nw",
       "--text", "hi",
       "--no-wait",
     ], { GPT_RELAY_PENDING_DIR: tmp });
@@ -109,11 +108,12 @@ test("review.mjs --no-wait submits and returns taskId immediately", async () => 
   }
 });
 
-test("review.mjs separates client wait timeout from task timeout", async () => {
+test("gpt-relay review separates client wait timeout from task timeout", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-relay-p-"));
   try {
-    const waitOnly = await runNode("review.mjs", [
-      "--session", "skill-timeout-wait",
+    const waitOnly = await runCli([
+      "review",
+      "--session", "cli-timeout-wait",
       "--text", "wait only",
       "--no-wait",
       "--timeout", "1000",
@@ -124,8 +124,9 @@ test("review.mjs separates client wait timeout from task timeout", async () => {
       .then((r) => r.json()) as { timeoutMs: number };
     assert.ok(waitTask.timeoutMs > 1000);
 
-    const hardTask = await runNode("review.mjs", [
-      "--session", "skill-timeout-hard",
+    const hardTask = await runCli([
+      "review",
+      "--session", "cli-timeout-hard",
       "--text", "hard timeout",
       "--no-wait",
       "--task-timeout", "1000",
@@ -140,10 +141,10 @@ test("review.mjs separates client wait timeout from task timeout", async () => {
   }
 });
 
-test("resume.mjs reports no pending when dir empty", async () => {
+test("gpt-relay resume reports no pending when dir empty", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-relay-p-"));
   try {
-    const r = await runNode("resume.mjs", [], { GPT_RELAY_PENDING_DIR: tmp });
+    const r = await runCli(["resume"], { GPT_RELAY_PENDING_DIR: tmp });
     assert.equal(r.code, 0, `stderr: ${r.stderr}`);
     assert.match(r.stdout, /no pending/);
   } finally {
