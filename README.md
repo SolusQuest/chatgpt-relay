@@ -186,6 +186,8 @@ To reset local relay data, stop the relay and remove the database files from
 - [`api.md`](./api.md): HTTP API, lifecycle, timeout, and recovery semantics
 - [`workflows/`](./workflows/README.md): multi-stage orchestration templates
 - [`extension/README.md`](./extension/README.md): extension setup and recovery
+- [`CONTRIBUTING.md`](./CONTRIBUTING.md): development and contribution guide
+- [`SECURITY.md`](./SECURITY.md): vulnerability reporting and trust boundaries
 
 ## License
 
