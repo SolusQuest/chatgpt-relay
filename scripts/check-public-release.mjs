@@ -28,6 +28,7 @@ const commentPrefix = /^\s*(?:\/\/|\/\*|\*|--)/;
 const windowsLocalPath = /\b[A-Za-z]:\\(?:Users|code|dev|src)\\/i;
 const unixHomePath = /\/(?:home|Users)\/[A-Za-z0-9._-]+\//;
 const markdownUuid = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i;
+const formerPrivateProjectName = ["cgcon", "v3"].join("-");
 const secretPatterns = [
   /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/,
   /\bgh[pousr]_[A-Za-z0-9]{20,}\b/,
@@ -59,7 +60,7 @@ for (const file of tracked) {
   for (const [index, line] of lines.entries()) {
     const location = `${file}:${index + 1}`;
 
-    if (windowsLocalPath.test(line) || unixHomePath.test(line) || line.includes("cgcon-v3")) {
+    if (windowsLocalPath.test(line) || unixHomePath.test(line) || line.includes(formerPrivateProjectName)) {
       failures.push(`${location}: machine-specific path or former private project name`);
     }
 
