@@ -1,159 +1,193 @@
-# gpt-relay — ChatGPT Relay
+# gpt-relay
 
-本地中继服务 + 浏览器扩展，让 AI coding agent 通过网页版 ChatGPT 做 code review /
-决策 / 长文本审阅。零 API 费用，只吃 ChatGPT Plus 订阅额度。
+gpt-relay is a local relay service and browser extension that lets coding agents
+request reviews, second opinions, and long-form analysis through the user's own
+ChatGPT web session.
 
-## 特点
+It does not use the OpenAI API and therefore does not create OpenAI API usage
+charges. It does use the user's ChatGPT account and remains subject to that
+account's plan limits and the applicable OpenAI terms.
 
-- **浏览器扩展控制页面**：真实浏览器环境，不易触发 ChatGPT 的自动化检测
-- **多 session 并发**：同时开多个 chatgpt.com 标签页，多个 review 并行进行
-- **SQLite 持久化 + 状态机**：所有 task 落盘，进程崩溃、页面刷新、浏览器重启后
-  都能恢复；agent 中断后 `gpt-relay resume` 拿回结果
-- **晚到回复回收**：客户端等待、task hard timeout 独立；页面越过 hard timeout
-  后才完成的回复会单独保存为 `lateReply`，不会静默丢失或改写既有终态
-- **后台 tab 也能工作**：MV3 Service Worker + focus-independent 注入
-- **断网自愈**：`fetch` hook + `online`/`offline` 事件，自动 reload
-- **Agent 友好**：v1 REST API，长轮询、幂等、可批量、可回查
+## Features
 
-## 目录
+- **Browser-controlled execution**: a Chrome-compatible extension submits tasks
+  through the normal ChatGPT web interface.
+- **Concurrent sessions**: multiple ChatGPT tabs can process independent review
+  tasks in parallel.
+- **Durable SQLite queue**: tasks survive relay restarts, page refreshes, browser
+  restarts, and agent interruptions.
+- **Late-reply recovery**: client wait timeouts and task deadlines are separate.
+  Replies that arrive during the bounded recovery window are stored in
+  `lateReply` without rewriting the terminal task status.
+- **Background processing**: an MV3 service worker drives polling and recovery
+  without requiring the ChatGPT tab to stay focused.
+- **Network recovery**: the extension observes network failures and page
+  connectivity changes and can reload when necessary.
+- **Agent-friendly interfaces**: a CLI, TypeScript client, and versioned REST API
+  support long polling, idempotency, status inspection, and recovery.
 
+## Repository layout
+
+```text
+gpt-relay/
+├── server/               Express and node:sqlite relay service
+├── bin/gpt-relay.ts      CLI entry point
+├── client/               TypeScript agent client
+├── extension/            Chrome-compatible MV3 extension
+├── scripts/              Maintenance scripts
+├── workflows/            Composable agent workflows
+├── agent-instructions.md Relay review and discussion guide for agents
+├── api.md                HTTP API and task lifecycle reference
+└── test/                 Unit, integration, E2E, and extension tests
 ```
-cgcon-v3/
-├── server/          Express + node:sqlite 中继服务
-├── bin/gpt-relay.ts     CLI (start/health/tasks/show/cancel/sessions/resume/review)
-├── client/          agent-client TS 库
-├── extension/       Chrome MV3 扩展
-├── scripts/         杂项脚本
-├── workflows/       可组合的 agent 多阶段执行流程
-├── agent-instructions.md  agent review / discussion 操作规范
-├── api.md           HTTP API 与 task lifecycle 参考
-└── test/            单元 + 集成 + e2e 测试
-```
 
-## 快速开始
+## Requirements
 
-### 前置
+- Node.js 22 or later
+- Chrome, Edge, Brave, or another Chromium browser with MV3 support
 
-- Node.js 22+（内置 `node:sqlite` 无需编译）
-- Chrome / Edge / Brave（MV3 兼容）
+## Quick start
 
-### 1. 装依赖
+### 1. Install dependencies
 
 ```bash
-cd D:\code\cgcon-v3
+git clone <repository-url>
+cd gpt-relay
 npm install
 ```
 
-### 2. 起 relay
+### 2. Start the relay
 
 ```bash
 npm start
-# 或全局：npm i -g . 后
+```
+
+After a global installation, you can instead run:
+
+```bash
+npm install -g .
 gpt-relay start
 ```
 
-默认监听 `127.0.0.1:8765`。数据在 `~/.gpt-relay/`。
+The relay listens on `127.0.0.1:8765` by default. Its data is stored under
+`~/.gpt-relay/`.
 
-### 3. 装扩展
+### 3. Load the extension
 
-`chrome://extensions/` → 开发者模式 → 加载已解压 → 选 `extension/`。
+1. Open `chrome://extensions/`.
+2. Enable **Developer mode**.
+3. Select **Load unpacked** and choose the repository's `extension/` directory.
+4. Open or refresh `https://chatgpt.com/`.
+5. Confirm that a green `Relay: <session-id>` banner appears.
 
-打开 chatgpt.com，页面顶部应出现绿色 `Relay: xxxxxxxx…` banner。
+### 4. Submit a review
 
-### 4. 发第一个 review
+With the CLI:
 
 ```bash
-# 用 CLI
-"这段代码看起来..." | gpt-relay review --session <session-id> --stdin
+printf '%s' 'Review this code...' |
+  gpt-relay review --session <session-id> --stdin
+```
 
-# 或直接调 API
+With the REST API:
+
+```bash
 curl -X POST http://127.0.0.1:8765/v1/tasks \
-    -H "Content-Type: application/json" \
-    -d '{"session":"<sid>","text":"..."}'
+  -H "Content-Type: application/json" \
+  -d '{"session":"<session-id>","text":"Review this code..."}'
 ```
 
-`<session-id>` 从 `gpt-relay sessions` 或扩展 popup 里看。
+Find the session ID with `gpt-relay sessions` or in the extension popup.
 
-## 常用命令
+## Common commands
 
 ```bash
-gpt-relay start                                 # 起 relay
-gpt-relay health                                # 检查是否可达
-gpt-relay sessions                              # 列出活跃 chatgpt tab
-gpt-relay tasks --last 20                       # 最近任务
-gpt-relay show <taskId>                         # 查看完整 prompt/reply
-gpt-relay cancel <taskId>                       # 取消
-gpt-relay resume                                # 恢复上次中断的 taskId
-gpt-relay review --session <id> --stdin         # 提交 review
+gpt-relay start
+gpt-relay health
+gpt-relay sessions
+gpt-relay tasks --last 20
+gpt-relay show <task-id>
+gpt-relay cancel <task-id>
+gpt-relay resume
+gpt-relay review --session <session-id> --stdin
 ```
 
-## API 摘要
+## API summary
 
-| Method | Path                                | 用途                            |
-|--------|-------------------------------------|---------------------------------|
-| POST   | /v1/tasks                           | 提交任务                        |
-| GET    | /v1/tasks/:id?wait=30000            | 查询 / 长轮询到终态             |
-| GET    | /v1/tasks?session=&status=&limit=   | 列表                            |
-| DELETE | /v1/tasks/:id                       | 取消                            |
-| GET    | /v1/sessions                        | 列 session                      |
-| POST   | /v1/sessions/:id/pause              | 手动 pause                      |
-| POST   | /v1/sessions/:id/resume             | 恢复                            |
-| GET    | /health                             | 健康检查                        |
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/v1/tasks` | Submit a task |
+| `GET` | `/v1/tasks/:id?wait=30000` | Read or long-poll a task |
+| `GET` | `/v1/tasks?session=&status=&limit=` | List tasks |
+| `DELETE` | `/v1/tasks/:id` | Cancel a task |
+| `GET` | `/v1/sessions` | List active sessions |
+| `POST` | `/v1/sessions/:id/pause` | Pause a session |
+| `POST` | `/v1/sessions/:id/resume` | Resume a session |
+| `GET` | `/health` | Check relay health |
 
-完整 public API、task lifecycle 和扩展端专用 `/internal/*` 见 `api.md`。
+See [`api.md`](./api.md) for the complete public API, task lifecycle, and
+extension-only `/internal/*` endpoints.
 
-## 环境变量
+## Environment variables
 
-| 变量                        | 默认                          | 用途                    |
-|-----------------------------|-------------------------------|-------------------------|
-| `GPT_RELAY_PORT`                | `8765`                        | 监听端口                |
-| `GPT_RELAY_HOST`                | `127.0.0.1`                   | 监听地址                |
-| `GPT_RELAY_DATA_DIR`            | `~/.gpt-relay`                    | 数据目录                |
-| `GPT_RELAY_DB_FILE`             | `~/.gpt-relay/gpt-relay.db`           | SQLite 文件             |
-| `GPT_RELAY_DEFAULT_TIMEOUT_MS`  | `1800000`                     | 单 task 默认超时（30 分钟） |
-| `GPT_RELAY_MAX_TASK_TIMEOUT_MS` | `3600000`                     | 单 task 最大超时（60 分钟，超出时 capped） |
-| `GPT_RELAY_ACTIVE_TASK_GRACE_MS` | `60000`                    | hard deadline 后进行中 task 的 grace（60 秒） |
-| `GPT_RELAY_LATE_REPLY_GRACE_MS` | `1800000`                   | hard deadline 后继续占用页面并回收晚到回复（30 分钟） |
-| `GPT_RELAY_MAX_TASK_BYTES`      | `524288`                      | prompt 上限             |
-| `GPT_RELAY_MAX_QUEUED_PER_SESSION` | `50`                       | 单 session 队列上限     |
+| Variable | Default | Purpose |
+|---|---|---|
+| `GPT_RELAY_PORT` | `8765` | Relay port |
+| `GPT_RELAY_HOST` | `127.0.0.1` | Bind address |
+| `GPT_RELAY_DATA_DIR` | `~/.gpt-relay` | Data directory |
+| `GPT_RELAY_DB_FILE` | `~/.gpt-relay/gpt-relay.db` | SQLite database |
+| `GPT_RELAY_DEFAULT_TIMEOUT_MS` | `1800000` | Default task timeout |
+| `GPT_RELAY_MAX_TASK_TIMEOUT_MS` | `3600000` | Maximum task timeout |
+| `GPT_RELAY_ACTIVE_TASK_GRACE_MS` | `60000` | Grace after the hard deadline |
+| `GPT_RELAY_LATE_REPLY_GRACE_MS` | `1800000` | Late-reply recovery window |
+| `GPT_RELAY_MAX_TASK_BYTES` | `524288` | Maximum prompt size |
+| `GPT_RELAY_MAX_QUEUED_PER_SESSION` | `50` | Per-session queue limit |
 
-## 测试
+## Validation
 
 ```bash
-npm test                # 单元 + migration + HTTP/CLI 集成 + e2e + 扩展测试
-npm run typecheck       # tsc --noEmit
+npm run typecheck
+npm test
+npm pack --dry-run
 ```
 
-## 数据隐私
+## Data and privacy
 
-所有 prompt/reply 只存本地 `~/.gpt-relay/gpt-relay.db`。清理：
+Prompts and replies are stored locally in
+`~/.gpt-relay/gpt-relay.db`. Pending CLI records are stored under
+`~/.gpt-relay/pending/`.
 
-```bash
-gpt-relay tasks --last 100        # 先看看
-rm ~/.gpt-relay/gpt-relay.db*         # 全清
-```
+Task content is submitted to the user's ChatGPT web session. Do not submit
+credentials, secrets, or other content that the user has not authorized for
+sharing with ChatGPT.
 
-除了 relay ↔ 你自己的 ChatGPT tab 的通信，无任何数据外泄。
+The server binds to loopback by default. Exposing it on another interface
+changes the trust boundary and should be done only with appropriate network
+controls.
 
-## 故障排查
+To reset local relay data, stop the relay and remove the database files from
+`~/.gpt-relay/`.
 
-| 症状                              | 排查                                                    |
-|-----------------------------------|---------------------------------------------------------|
-| `gpt-relay health` 失败               | 确认 `npm start` 或 `gpt-relay start` 在跑                   |
-| 扩展 banner 不出现                | 刷新 chatgpt.com；`chrome://extensions/` 点扩展 Reload  |
-| Popup 显示 unreachable            | 修改 popup 里的 Relay URL；防火墙                       |
-| session paused                    | 看 popup 里 pauseReason；解决验证码/限速后自动恢复      |
-| 文本注入失败                      | ChatGPT 前端改版，需要更新 `content-script.js` 选择器   |
-| 手动点击 Stop                   | 扩展会结合 user/assistant message ID、生成状态和稳定快照判断；不会仅凭一次点击重复提交 |
-| review 超时                       | 客户端默认等待 10 分钟；`gpt-relay resume` 事后拿结果，task 默认最多 30 分钟 |
+## Troubleshooting
 
-## 相关文档
+| Symptom | Suggested action |
+|---|---|
+| `gpt-relay health` fails | Confirm that `npm start` or `gpt-relay start` is running |
+| Relay banner is missing | Reload the extension, then refresh `chatgpt.com` |
+| Popup reports `unreachable` | Check the relay URL and local firewall |
+| Session is paused | Resolve the reported captcha or rate limit, then resume |
+| Prompt submission fails | ChatGPT UI changes may require selector updates |
+| A review wait times out | Keep the task ID and use `gpt-relay resume` or `show` |
 
-- `agent-instructions.md` — 给 workflow agent 直接看的 review / discussion 操作规范
-- `api.md` — HTTP API、task lifecycle、timeout 和 extension-internal endpoint
-- `workflows/` — 多步 orchestration 模板（例如 issue → PR 全链路）
-- `extension/README.md` — 扩展加载 + 恢复机制细节
+## Documentation
+
+- [`agent-instructions.md`](./agent-instructions.md): operational rules for
+  agent review and discussion
+- [`api.md`](./api.md): HTTP API, lifecycle, timeout, and recovery semantics
+- [`workflows/`](./workflows/README.md): multi-stage orchestration templates
+- [`extension/README.md`](./extension/README.md): extension setup and recovery
 
 ## License
 
-MIT (todo 一份 LICENSE 文件)。使用者自行遵守 OpenAI ToS。
+The project license will be declared in a root `LICENSE` file before the first
+public release.

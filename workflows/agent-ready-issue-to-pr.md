@@ -87,11 +87,13 @@ Follow the discussion-mode barriers from `agent-instructions.md`:
 Prompt skeleton:
 
 ```text
-请基于下面这个 agent-ready issue 独立分析实现层面的候选 approach、repo boundary、
-兼容性或迁移风险、失败路径，以及 test blind spots。
+Independently analyze implementation approaches, repository boundaries,
+compatibility or migration risks, failure paths, and test blind spots for the
+agent-ready issue below.
 
-不要假设或迎合 agent 已有方案，也不要重新设计已冻结的产品 scope。你的输出是给最终
-implementation/test plan 提供独立盲点检查，不是最终权威 plan。
+Do not assume or accommodate an existing agent approach, and do not redesign
+the frozen product scope. Your output is an independent blind-spot check for the
+final implementation/test plan, not the authoritative plan.
 
 Issue: https://github.com/<org>/<repo>/issues/<n>
 ```
@@ -118,20 +120,24 @@ Keep the plan proportional to the change. It should expose a wrong implementatio
 Send relay the authoritative issue URL and the complete, agent-owned plan. This review is required in both creation modes, including after parallel discovery. Ask relay to review the implementation approach against the frozen issue and current repository without reopening settled product scope.
 
 ```text
-请作为严格的 implementation/test-plan reviewer，审查下面这个 agent-ready issue 的计划。
+Act as a strict implementation and test-plan reviewer for the agent-ready issue
+below.
 
-Issue 的 scope 和 AC 已冻结；不要重新设计产品需求。重点检查：
-- 是否完整覆盖每条 AC
-- 是否符合当前 repo 的代码边界和既有 contract
-- 是否遗漏兼容性、迁移、失败路径、安全性、测试或验证
-- 实现与测试顺序是否会造成不必要的返工
+The issue scope and acceptance criteria are frozen; do not redesign the product
+requirements. Focus on:
+- complete coverage of every acceptance criterion;
+- alignment with repository boundaries and existing contracts;
+- missing compatibility, migration, failure-path, security, test, or validation
+  work;
+- implementation or test ordering that could create unnecessary rework.
 
-按严重程度列出问题。如果没有阻塞实现的问题，请明确说明可以开始实现。
+List findings by severity. If no issue blocks implementation, state explicitly
+that implementation can begin.
 
 Issue: https://github.com/<org>/<repo>/issues/<n>
 
 --- implementation/test plan ---
-<完整计划>
+<complete plan>
 ```
 
 Evaluate every response rather than accepting it mechanically:
@@ -189,12 +195,15 @@ Start CI inspection and relay review from the same remote draft PR.
 Send the PR URL to the pinned relay session:
 
 ```text
-请作为严格的代码 reviewer review 下面这个 draft PR。它实现了本会话刚刚 review 过
-implementation/test plan 的 agent-ready issue。
+Act as a strict code reviewer for the draft PR below. It implements the
+agent-ready issue whose implementation/test plan was reviewed earlier in this
+session.
 
-请检查实现是否覆盖 issue AC、是否无意偏离计划、测试是否足够，以及是否存在正确性、
-兼容性、安全性、性能或可维护性问题。优先列出必须修改的问题；如果没有阻塞问题，
-请明确说明 safe to request human review，并列出剩余风险。
+Check whether the implementation covers the issue acceptance criteria,
+unintentionally diverges from the plan, has adequate tests, and avoids
+correctness, compatibility, security, performance, or maintainability defects.
+List required changes first. If there are no blocking issues, state explicitly
+that it is safe to request human review and list the remaining risks.
 
 PR: <url>
 ```

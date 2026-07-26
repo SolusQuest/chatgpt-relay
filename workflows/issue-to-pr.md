@@ -91,15 +91,18 @@ Do not leave unresolved product decisions disguised as “open questions.” If 
 Send the complete draft to the pinned relay session for strict PM and engineering review:
 
 ```text
-请作为严格的 PM/工程 reviewer 审查下面的 refined issue body。
+Act as a strict product and engineering reviewer for the refined issue body
+below.
 
-重点检查 scope、non-goals、AC 的可执行性、依赖与风险、兼容性，以及是否仍有会阻塞
-实现的含糊决策。按严重程度列出问题；如果没有阻塞问题，请明确说明它已 agent-ready。
+Focus on scope, non-goals, executable acceptance criteria, dependencies, risks,
+compatibility, and any ambiguous decision that could block implementation. List
+findings by severity. If there are no blocking findings, state explicitly that
+the issue is agent-ready.
 
 Issue or placeholder: <url if available>
 
 --- refined issue draft ---
-<完整 draft>
+<complete draft>
 ```
 
 Evaluate the response semantically:
