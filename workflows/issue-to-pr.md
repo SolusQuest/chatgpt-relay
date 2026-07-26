@@ -1,288 +1,152 @@
-# Workflow: Issue placeholder → refined issue → implementation → PR
+# Workflow: Rough issue → agent-ready issue → implementation → PR
 
 **References**:
+
 - Relay API + usage patterns: [`agent-instructions.md`](../agent-instructions.md)
+- Shared implementation and PR workflow: [`agent-ready-issue-to-pr.md`](./agent-ready-issue-to-pr.md)
 
 ---
 
 ## What this workflow is
 
-End-to-end flow for turning a rough / placeholder GitHub issue into a
-production-quality PR, using the local relay as an independent reviewer /
-brainstorming counterpart at two key decision points.
+This workflow turns a placeholder or under-specified GitHub issue into an agent-ready issue, then continues through the shared implementation workflow.
 
-Deliberately slow — the goal is getting scope and coverage **right the first
-time**, not shipping fast.
+Its responsibility is refinement: discover the material decisions, turn them into an explicit issue contract, obtain user approval, and publish the approved issue. It does not maintain a second copy of implementation, CI, PR-review, or handoff rules; after refinement it delegates those phases to [`agent-ready-issue-to-pr.md`](./agent-ready-issue-to-pr.md).
+
+Use this slower path when getting scope and acceptance criteria wrong would be more expensive than discussing them first.
 
 ## When to use / not to use
 
 **Use** when:
-- There's a placeholder issue, rough draft, or "here's a problem I noticed"
-  note that isn't yet ready to implement.
-- The problem is non-trivial: real scope questions, non-obvious edge cases,
-  or design choices that would be expensive to redo.
-- User has authorized both agent and relay to work on the codebase / issue.
 
-**Do not use** for:
-- Bug hotfixes with obvious scope and fix.
-- Small, urgent changes the user wants done immediately.
-- Anything the user explicitly asked to do quickly / without ceremony.
+- The issue is a placeholder, rough draft, or problem report that is not yet safe to implement.
+- Scope, non-goals, acceptance criteria, compatibility, or product behavior contains material ambiguity.
+- The user has authorized issue refinement, implementation, and relay review.
 
-If mid-workflow you realize the issue is actually small, **stop and ask the
-user** whether to switch to lightweight mode.
+**Do not use** when:
+
+- The issue already has settled scope, testable acceptance criteria, and no unresolved product decisions. Start with [`agent-ready-issue-to-pr.md`](./agent-ready-issue-to-pr.md).
+- The change is a trivial typo, one-line configuration edit, or obvious urgent hotfix.
+- The work is exploratory and its deliverable is learning rather than an implementation contract.
+- The user explicitly asked to skip refinement or relay.
+
+If routing is unclear, inspect the full issue and repository context first. Route by the actual readiness of the issue, not by labels alone.
 
 ## Preconditions
 
-- gpt-relay reachable and at least one non-paused ChatGPT session available
-  (see agent-instructions.md § "使用前 sanity check").
-- User has authorized this workflow.
-- **Pin the session at Phase 1 and reuse it across every relay call.**
-  Continuity is the whole point: relay accumulates context across phases, so
-  Phase 5's test brainstorm already knows what Phase 1 decided and what
-  Phase 2 refined. Standard session-context assumptions apply — see
-  SKILL.md.
+- The full issue is available through a GitHub URL or as complete text.
+- Repository instructions and relevant product, architecture, or contract documents are available to the agent.
+- gpt-relay is reachable.
+- The user has supplied a non-paused, task-specific ChatGPT session. Do not select an idle or previous-task session on the user's behalf.
+- **Pin the supplied session before Phase 1 and reuse it throughout this workflow and the downstream agent-ready workflow.**
 
 ---
 
-## Phase 1 — Decision-point brainstorming (discussion mode)
+## Phase 1 — Independent decision-point discovery
 
-Goal: figure out **all** the decisions that must be made explicit before the
-issue can be called "refined". Use double-blind discussion mode to avoid
-sycophancy.
+Goal: identify the material decisions that must be explicit before the issue can become an implementation contract.
 
-**Round 0 & 1 — agent + relay in parallel** (recommended). Two hard barriers
-guarantee independence, and within those barriers **run both concurrently** to
-save the ~20–90s relay round-trip:
+Use the discussion-mode barriers from `agent-instructions.md`:
 
-1. **Submit relay first (non-blocking)** with only the placeholder issue text
-   (full, not summary) unless a remote issue/placeholder URL already exists. **No hint** of
-   anything you (agent) already thought.
-2. **After submit, immediately start agent's own thinking in scratchpad**:
-   list the decision points you'd want resolved — scope boundaries, in/out,
-   acceptance criteria, edge cases, dependencies, risks, naming, non-goals,
-   migration/back-compat questions. **Persist to a visible draft** before
-   polling relay back.
-3. Poll relay for its independent list.
+1. Submit the full issue or accessible issue URL to relay before writing any agent opinion. Ask relay for an independent list of blocking decision points.
+2. After submission, independently inspect the repository and write the agent's own decision-point list to a visible draft before reading relay's reply.
+3. Compare the two lists and classify overlap, agent-only points, relay-only points, and substantive conflicts.
+4. Discuss only material gaps or conflicts. Do not spend additional rounds reconciling style or wording.
 
-The barriers: (a) submit relay **before** writing any agent opinions; (b)
-agent's list must be written down **before** reading relay's reply. Violate
-either and it degrades to review mode.
+Review these categories where relevant:
 
-Prompt skeleton:
-```text
-下面是一个 placeholder issue，我们想 refine 到可以直接实现。请独立列出你觉得
-动手前必须明确的 decision points（scope 边界、AC、edge cases、依赖、风险、
-naming、non-goals、migration 问题等），按类别分组，每点简述为什么重要。
+- Problem and intended outcome.
+- In-scope and out-of-scope behavior.
+- Testable acceptance criteria.
+- Public contracts, compatibility, migration, and rollout.
+- Failure modes, security, privacy, performance, and operational constraints.
+- Dependencies, sequencing, naming, and explicit non-goals.
 
---- issue ---
-https://github.com/<org>/<repo>/issues/<n>
+Terminate when:
 
-```
+- No unresolved decision blocks drafting a complete issue contract.
+- A further round adds no substantive point.
+- Remaining differences are wording or optional follow-up suggestions.
 
-或者（无远端链接时）贴出 placeholder 全文：
+Use at most three discussion rounds after the independent outputs. If a substantive disagreement remains, present both rationales to the user for a decision.
 
-```text
---- issue ---
-<placeholder 全文>
-```
+Any product, policy, UX, public-contract, or scope trade-off belongs to the user. Relay and the agent may clarify the trade-off but must not silently decide it.
 
-**Round 2 — agent synthesizes**. Compare the two lists:
-- Overlap: both raised → high confidence, keep
-- Agent-only: judge — real gap in relay's view, or just style?
-- Relay-only: judge — did agent miss it, or is it noise?
-- Conflicts (same point, opposite view): mark for discussion round
+## Phase 2 — Draft and review the agent-ready issue
 
-**Round 3+ — discussion (only if significant diffs/conflicts)**. Send relay:
-```text
-我独立列出的 decision points 是 <A>；你列的是 <B>。请指出：
-- 我遗漏的关键点
-- 你没考虑到的约束
-- 冲突点 <X> 的 rationale trade-off
-```
-Iterate. Hard cap: 3 rounds beyond Round 1.
+Create the issue body as a visible local draft using the target repository's issue template and conventions.
 
-**Termination**:
-- Convergence: point sets overlap ~80%, remaining diffs stylistic → done
-- Two consecutive rounds add no new arguments → done
-- Substantive stalemate → **stop, present both views to user for tiebreak**
-- Hard cap reached → same as stalemate
+The draft should contain:
 
-**Checkpoint before Phase 2**: if any point that emerged is genuinely a
-**user decision** (product direction, scope tradeoff, "do we support X?"),
-stop and ask user. Don't auto-resolve.
+1. Problem and motivation.
+2. Scope, exclusions, and non-goals.
+3. Concrete, testable acceptance criteria.
+4. Dependencies and sequencing constraints.
+5. Compatibility, migration, security, or operational requirements where applicable.
+6. Risks and explicitly deferred follow-ups.
+7. Resolved decisions needed to prevent implementation ambiguity.
 
----
+Do not leave unresolved product decisions disguised as “open questions.” If a user decision is still required, return to Phase 1's user checkpoint.
 
-## Phase 2 — Refined issue draft (relay review loop)
-
-Agent drafts a complete refined issue body incorporating the Phase 1
-synthesis. Include:
-- **Problem statement** (what and why)
-- **Scope**: in / out / explicitly not-goals
-- **Acceptance criteria** (concrete, testable)
-- **Dependencies / risks**
-- **Open questions** (if any left)
-
-Send to relay for review (standard review mode). Prompt skeleton:
-```text
-请作为严格的 PM/工程 reviewer 审查下面的 refined issue body。重点检查：
-scope 是否清楚、AC 是否可执行、依赖 / 风险是否遗漏、是否有含糊措辞。
-按严重程度列问题；没有阻塞问题就明确说可以推进。
-
----
-<refined issue 全文>
-```
-
-Iterate until relay reports "no blocking issues" (read the reply
-semantically, don't keyword-match). Style-preference feedback in the last
-round is fine to ignore.
-
-## Phase 3 — User checkpoint before implementation
-
-Present the refined issue draft to the user.
-
-- **Approved** → `gh issue create` (or `gh issue edit <n>` if placeholder
-  already exists on GitHub). Proceed to Phase 4.
-- **Requests changes** → back to Phase 2 with user's feedback.
-- **Aborted** → stop; still record the Phase 1 synthesis somewhere the user
-  can find it.
-
----
-
-## Phase 4 — Implementation
-
-Standard agent implementation, driven by the issue's AC:
-- Small, semantic commits
-- Compile / typecheck / lint before each commit
-- If during implementation you discover a decision point Phase 1 missed,
-  **stop and go back to Phase 1 for that specific point** — do not silently
-  guess
-
-Push to a feature branch. Don't open a PR yet.
-
----
-
-## Phase 5 — Test coverage brainstorming (discussion mode)
-
-Same shape as Phase 1, but for test cases.
-
-**Round 0 & 1 — agent + relay in parallel** (same shape as Phase 1):
-
-1. **Submit relay first (non-blocking)** with the pushed code URL and a
-   reference to the issue (which relay already reviewed in Phase 2 within
-   this session). Prompt below.
-2. **After submit, immediately** list test cases in scratchpad based on your
-   reading of the code + issue AC: happy path, edge cases, boundaries,
-   failure modes, concurrency / state if applicable. **Persist before
-   polling relay back.**
-3. Poll relay for its independent case list.
-
-Relay prompt skeleton:
+Send the complete draft to the pinned relay session for strict PM and engineering review:
 
 ```text
-Phase 4 的实现已经 push 到 <branch URL>。基于我们在这个会话里 refine 过的
-issue AC，请独立列出你会覆盖的 test cases，每个 case 简述测什么、为什么重要。
-按类别分组：happy / edge / boundary / failure / 其他。
+请作为严格的 PM/工程 reviewer 审查下面的 refined issue body。
+
+重点检查 scope、non-goals、AC 的可执行性、依赖与风险、兼容性，以及是否仍有会阻塞
+实现的含糊决策。按严重程度列出问题；如果没有阻塞问题，请明确说明它已 agent-ready。
+
+Issue or placeholder: <url if available>
+
+--- refined issue draft ---
+<完整 draft>
 ```
 
-**Round 2 / 3+ / termination**: same as Phase 1. Convergence here typically
-means "both agree on the critical cases; residual diffs are 'nice to have'
-vs 'not worth it'."
+Evaluate the response semantically:
 
----
+- Real contract gap → revise the draft and request another review.
+- Missing user decision → present the concrete choice to the user.
+- Scope expansion or optional follow-up → record it as excluded or deferred.
+- Style-only preference → adopt only when it improves the repository's issue contract.
 
-## Phase 6 — Write tests + open PR
+Terminate when relay finds no blocking issue and the agent independently confirms that every acceptance criterion is implementable and testable.
 
-Agent implements the test set from Phase 5 synthesis. Confirm:
-- Tests fail against a naive / no-op implementation (or run TDD-style)
-- Full test suite still passes
-- Coverage of every AC bullet from the refined issue
+## Phase 3 — User approval and remote publication
 
-Commit + push to the same feature branch. Open a **draft** PR:
-```bash
-gh pr create --draft --title "..." --body "..."
-```
+Present the exact reviewed issue body to the user.
 
-PR body: reference the issue, summarize what was implemented, and map each
-AC bullet to the code / tests that satisfy it. (Relay already knows the
-issue and the test strategy from earlier phases, so you don't need to
-restate them for Phase 7.)
+- **Approved** → create the issue or update the placeholder using a body file, preserving repository metadata outside the authorized scope.
+- **Requests changes** → revise the local draft and return to Phase 2 review.
+- **Aborted** → stop and leave the refinement draft and decision record available to the user.
 
----
+After creating or updating the issue:
 
-## Phase 7 — Relay reviews PR
+1. Read the remote issue back.
+2. Verify the rendered body, links, checklists, issue type, milestone, and other fields that were intentionally changed.
+3. Correct publishing or formatting mistakes without changing the approved contract.
 
-Send the PR URL to relay (see agent-instructions.md § PR review). Do not
-inline the diff. Prompt skeleton:
-```text
-请作为严格的代码 reviewer review 下面这个 PR，实现了我们之前 refine 过的
-issue。优先列必须修改的问题；如果没有阻塞问题，请明确说可以合并，并列出
-剩余的风险 / 后续任务。
+Do not publish or materially update an issue body before user approval.
 
-PR: <url>
-```
+## Phase 4 — Continue through the shared implementation workflow
 
-Iterate:
-- Real issue → agent fixes → commit + push same branch → same URL for
-  re-review
-- Style / preference feedback in last round → note in handoff, don't
-  necessarily change
-- Convergence: relay explicitly says "no blocking issues" or "safe to
-  request human review"
+The remote issue is now the authoritative agent-ready contract.
 
-Before handoff, gate on GitHub inline comments:
+Continue at Phase 1 of [`agent-ready-issue-to-pr.md`](./agent-ready-issue-to-pr.md), with these invariants:
 
-1. Query unresolved/OPEN inline comments.
-2. For each open comment:
-   - If it's a real issue: fix it, `commit + push`, then re-run Phase 7
-     review.
-   - If you decide not to fix: still post an inline reply explaining why.
-3. If open comments remain, continue until each one is responded to inline.
-4. Only when there are **no open inline comments** execute `gh pr ready`.
-
-示例命令（按需改写）：
-```bash
-OWNER_REPO=<owner/repo>
-PR_NUMBER=<n>
-OPEN_COMMENTS=$(gh api repos/$OWNER_REPO/pulls/$PR_NUMBER/comments --paginate --jq '[.[] | select(.state == "OPEN")]')
-echo "$OPEN_COMMENTS" | jq -r '.[] | "id=\(.id) file=\(.path) line=\(.line) state=\(.state)"'
-```
-
-对每条 comment id：修复后或不修复都要回一条 inline reply，例如：
-```bash
-gh api repos/$OWNER_REPO/pulls/comments/<comment-id>/replies -X POST -f body="已修复：<说明 commit 或不修复原因>"
-```
-
-Do **not** merge or mark ready-for-review autonomously.
-
----
-
-## Phase 8 — Hand off to user
-
-Present to the user:
-1. **PR link** (still draft)
-2. **What was refined vs the placeholder** — one paragraph
-3. **AC coverage** — checklist mapping each AC bullet → tests / code
-4. **Decisions and disagreements** — where relay and agent initially
-   disagreed (in Phase 1 or Phase 5), how it was resolved, and any
-   remaining risks / open questions relay flagged
-5. **Check inline comments before `gh pr ready`**: if open comments exist,
-   回复每条（修复后 / 不修复都要回），修复则 `commit + push` 后继续 re-review；
-   只有无 open comments 后再 `gh pr ready`。
-6. **Explicitly ask**: after ready-for-review, merge criteria / remaining reviewer handoff points.
-User confirms → done. User performs review and merge as they see fit.
+- Reuse the same task-specific relay session.
+- Pass the final remote issue URL, not an obsolete local draft.
+- Do not repeat decision-point discovery or issue refinement.
+- Preserve the user's approved scope and acceptance criteria.
+- Continue autonomously unless the downstream workflow identifies a genuine missing product decision or another explicit stop condition.
 
 ---
 
 ## Global rules
 
-- **Never merge or close the issue autonomously.**
-  Every phase either continues or hands to user.
-- **Same session across all phases.** Non-negotiable — the workflow relies
-  on relay's accumulating context.
-- **If relay pauses / captcha at any phase**: stop, tell user, do not retry.
-- **If the issue turns out to be trivial** (small bug fix, one-liner):
-  abort and ask user if lightweight mode is preferred.
-- **Discussion mode only at Phase 1 and Phase 5** (before an artifact
-  exists, where independence matters). Phase 2 and Phase 7 are review mode
-  because agent already produced the concrete artifact.
+- **Never let agent-relay convergence substitute for user product authority.**
+- **Never publish an issue contract before the user approves its exact body.**
+- **Never silently expand scope while resolving review feedback.**
+- **Use the same user-supplied, task-specific relay session across refinement, implementation-plan review, and PR review.**
+- **If relay pauses or hits a captcha:** stop, tell the user, and do not retry automatically.
+- **If the issue is already agent-ready:** route directly to the shared workflow instead of performing ceremonial refinement.
+- **Downstream draft PR, CI, review-thread, ready-for-review, and merge rules are owned by `agent-ready-issue-to-pr.md`.**
