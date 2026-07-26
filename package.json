@@ -11,6 +11,14 @@
     "sqlite",
     "browser-extension"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SolusQuest/chatgpt-relay.git"
+  },
+  "homepage": "https://github.com/SolusQuest/chatgpt-relay#readme",
+  "bugs": {
+    "url": "https://github.com/SolusQuest/chatgpt-relay/issues"
+  },
   "main": "server/index.ts",
   "bin": {
     "gpt-relay": "./bin/gpt-relay.mjs"

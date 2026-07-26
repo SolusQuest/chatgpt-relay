@@ -51,7 +51,7 @@ gpt-relay/
 ### 1. Install dependencies
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/SolusQuest/chatgpt-relay.git
 cd gpt-relay
 npm install
 ```

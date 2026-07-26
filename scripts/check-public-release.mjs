@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
+const publicRepositoryUrl = "git+https://github.com/SolusQuest/chatgpt-relay.git";
 const requiredFiles = [
   ".gitattributes",
   ".github/workflows/ci.yml",
@@ -93,6 +94,15 @@ if (packageJson.engines?.node !== ">=22.0.0") {
 }
 if (!packageJson.description || cjkPattern.test(packageJson.description)) {
   failures.push("package.json: description must be a non-empty English string");
+}
+if (packageJson.repository?.url !== publicRepositoryUrl) {
+  failures.push("package.json: repository URL must match the public GitHub repository");
+}
+if (packageJson.homepage !== "https://github.com/SolusQuest/chatgpt-relay#readme") {
+  failures.push("package.json: homepage must point to the public GitHub repository");
+}
+if (packageJson.bugs?.url !== "https://github.com/SolusQuest/chatgpt-relay/issues") {
+  failures.push("package.json: bugs URL must point to the public GitHub issue tracker");
 }
 
 if (failures.length > 0) {
