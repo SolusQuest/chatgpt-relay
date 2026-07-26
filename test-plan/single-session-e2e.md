@@ -174,7 +174,7 @@
  
  **预期结果**：
  - 任务状态最终为 `expired`
- - error 为 "任务已过期，未发送到页面"
+ - `error` is `task_expired_before_dispatch`
  
  ---
  

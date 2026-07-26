@@ -207,7 +207,7 @@ test("capture stores timeout reply as late without rewriting failed status", asy
   await get("/internal/next_task?session=late-capture");
 
   // Force the same timeout terminal state the maintenance loop produces.
-  await post(`/internal/tasks/${id}/complete`, { error: "任务处理超时" });
+  await post(`/internal/tasks/${id}/complete`, { error: "task_processing_timeout" });
   const captured = await post(`/internal/tasks/${id}/capture`, {
     text: "eventual browser reply",
   });

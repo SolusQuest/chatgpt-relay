@@ -478,7 +478,7 @@ export class TaskStore {
       .prepare(
         `UPDATE tasks
            SET status = 'expired', completed_at = ?,
-               error = '任务已过期，未发送到页面'
+               error = 'task_expired_before_dispatch'
            WHERE status = 'queued' AND expires_at <= ?`,
       )
       .run(now, now);
@@ -488,7 +488,7 @@ export class TaskStore {
       .prepare(
         `UPDATE tasks
            SET status = 'failed', completed_at = ?,
-               error = '任务处理超时'
+               error = 'task_processing_timeout'
            WHERE status = 'in_progress' AND expires_at + ? <= ?`,
       )
       .run(now, grace, now);
@@ -511,7 +511,7 @@ export class TaskStore {
         .prepare(
           `UPDATE tasks
              SET status = 'failed', completed_at = ?,
-                 error = 'session 心跳丢失，任务被释放'
+                 error = 'session_heartbeat_lost'
              WHERE session = ? AND status = 'in_progress'`,
         )
         .run(now, s.id);
@@ -647,8 +647,7 @@ function normalizeTimeout(input: number | undefined, fallback: number, max: numb
 }
 
 export function isLateReplyEligible(error: string | null): boolean {
-  return error === "任务处理超时" ||
-    error === "pending reply hard timeout" ||
-    error === "session 心跳丢失，任务被释放" ||
+  return error === "task_processing_timeout" ||
+    error === "session_heartbeat_lost" ||
     error === "aborted";
 }

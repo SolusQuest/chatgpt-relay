@@ -61,6 +61,21 @@ terminal status back to `done`.
 `text` is returned only by a single-task query or when a list request includes
 `include_text=1`.
 
+### Server-generated task errors
+
+The relay uses stable machine-readable codes for maintenance failures:
+
+| Code | Meaning |
+|---|---|
+| `task_expired_before_dispatch` | A queued task crossed its deadline before the extension claimed it |
+| `task_processing_timeout` | An in-progress task crossed its deadline and active-task grace period |
+| `session_heartbeat_lost` | The relay released an in-progress task after its browser session became stale |
+| `aborted` | The extension task wait was aborted |
+
+Extension-originated failures can include a descriptive `error` string. Clients
+must use `status` to identify terminal tasks and should display unknown error
+values rather than rejecting them.
+
 ## Public API
 
 ### `POST /v1/tasks`

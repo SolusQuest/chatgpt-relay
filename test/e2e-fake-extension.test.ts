@@ -228,7 +228,7 @@ test("resume keeps timeout failure pending until a late reply is captured", asyn
   await fetch(`${baseUrl}/internal/tasks/${submitted.taskId}/complete`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ error: "任务处理超时" }),
+    body: JSON.stringify({ error: "task_processing_timeout" }),
   });
 
   const beforeLate = await resumePending(baseUrl);

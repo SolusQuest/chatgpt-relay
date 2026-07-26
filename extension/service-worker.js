@@ -864,7 +864,7 @@ async function reconcileInflight() {
       const keepForLate = t?.status === "failed" &&
         !t.lateReply &&
         t.lateReplyDeadlineAt > Date.now() &&
-        ["任务处理超时", "pending reply hard timeout", "session 心跳丢失，任务被释放", "aborted"].includes(t.error);
+        ["task_processing_timeout", "session_heartbeat_lost", "aborted"].includes(t.error);
       if (keepForLate) {
         const pmap = await listPendingReplies();
         if (!pmap[entry.taskId]) {

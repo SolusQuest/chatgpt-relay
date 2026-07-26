@@ -261,7 +261,9 @@ test("expireDueTasks marks past-expiry queued as expired", () => {
   assert.equal(store.getTask(t.id)?.status, "queued");
   const n2 = store.expireDueTasks(100 + 1000 + 1);
   assert.equal(n2, 1);
-  assert.equal(store.getTask(t.id)?.status, "expired");
+  const expired = store.getTask(t.id);
+  assert.equal(expired?.status, "expired");
+  assert.equal(expired?.error, "task_expired_before_dispatch");
 });
 
 test("expireDueTasks fails in_progress past expiry+grace", () => {
@@ -272,7 +274,21 @@ test("expireDueTasks fails in_progress past expiry+grace", () => {
   assert.equal(stillOk, 0);
   const failed = store.expireDueTasks(100 + 1000 + 500 + 1);
   assert.equal(failed, 1);
-  assert.equal(store.getTask(t.id)?.status, "failed");
+  const result = store.getTask(t.id);
+  assert.equal(result?.status, "failed");
+  assert.equal(result?.error, "task_processing_timeout");
+});
+
+test("releaseHeartbeatLostTasks uses a stable error code", () => {
+  const store = makeStore({ heartbeatStaleMs: 500 });
+  const t = store.createTask({ session: "s1", text: "a", now: 100 });
+  store.claimNextTask("s1", 200);
+  store.touchSession("s1", 200);
+
+  assert.equal(store.releaseHeartbeatLostTasks(700), 1);
+  const result = store.getTask(t.id);
+  assert.equal(result?.status, "failed");
+  assert.equal(result?.error, "session_heartbeat_lost");
 });
 
 test("requeueTask returns task to queued", () => {

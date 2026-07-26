@@ -260,9 +260,8 @@ function shouldKeepPendingForLateReply(task: TaskView): boolean {
     task.lateReply === null &&
     task.lateReplyDeadlineAt > Date.now() &&
     (
-      task.error === "任务处理超时" ||
-      task.error === "pending reply hard timeout" ||
-      task.error === "session 心跳丢失，任务被释放" ||
+      task.error === "task_processing_timeout" ||
+      task.error === "session_heartbeat_lost" ||
       task.error === "aborted"
     );
 }
