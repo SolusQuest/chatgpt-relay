@@ -158,12 +158,9 @@ Phase 2 allows at most **three full plan-review submissions**:
 2. A first correction review.
 3. A final convergence review.
 
-Do not reset this budget when a later response introduces another finding. The
-budget limits unrestricted re-review; it does not make a real blocker
-non-blocking or force implementation to begin.
+Do not reset this budget when a later response introduces another finding. The budget limits unrestricted re-review; it does not make a real blocker non-blocking or force implementation to begin.
 
-After the initial response, maintain a visible finding ledger. Give every
-finding a stable ID and record:
+After the initial response, maintain a visible finding ledger. Give every finding a stable ID and record:
 
 - classification and blocking rationale;
 - cited acceptance criterion, repository contract, or authoritative source;
@@ -177,31 +174,17 @@ Use a compact ledger such as:
 |---|---|---|---|---|
 | `P1` | `<initial blocker or later-round class>` | `<status>` | `<sections>` | `<agent action and verified source>` |
 
-For the second and third submissions, include the latest complete plan, the
-ledger, and a concise revision summary. Relay must reconcile prior finding IDs
-instead of silently renaming or reopening them.
+For the second and third submissions, include the latest complete plan, the ledger, and a concise revision summary. Relay must reconcile prior finding IDs instead of silently renaming or reopening them.
 
 Any blocker first raised after the initial review must be classified as one of:
 
 - `revision-regression` — directly introduced by the latest plan revision;
-- `new-evidence` — supported by newly verified repository evidence that was not
-  reasonably available in the earlier round;
-- `critical-late-finding` — discoverable earlier, but supported by concrete
-  evidence that the plan would violate an acceptance criterion or repository
-  contract, omit a required failure path, or create a severe implementation
-  risk;
-- `late-nonblocking` — a late implementation preference, optional hardening
-  idea, or follow-up that is not required before implementation;
+- `new-evidence` — supported by newly verified repository evidence that was not reasonably available in the earlier round;
+- `critical-late-finding` — discoverable earlier, but supported by concrete evidence that the plan would violate an acceptance criterion or repository contract, omit a required failure path, or create a severe implementation risk;
+- `late-nonblocking` — a late implementation preference, optional hardening idea, or follow-up that is not required before implementation;
 - `out-of-scope` — requires changing frozen issue scope or acceptance criteria.
 
-An unresolved prior blocker, `revision-regression`, `new-evidence`, or
-`critical-late-finding` can block Phase 2. A `critical-late-finding` has a high
-burden of proof: it must cite the exact acceptance criterion, code path,
-repository contract, or authoritative source; explain the concrete failure;
-and show why implementation must address it now. Timing alone neither admits
-nor waives a real blocker. Treat `late-nonblocking` and `out-of-scope` findings
-as deferred work, remaining risk, or a product ambiguity requiring the user,
-not as silent plan expansion.
+An unresolved prior blocker, `revision-regression`, `new-evidence`, or `critical-late-finding` can block Phase 2. A `critical-late-finding` has a high burden of proof: it must cite the exact acceptance criterion, code path, repository contract, or authoritative source; explain the concrete failure; and show why implementation must address it now. Timing alone neither admits nor waives a real blocker. Treat `late-nonblocking` and `out-of-scope` findings as deferred work, remaining risk, or a product ambiguity requiring the user, not as silent plan expansion.
 
 Evaluate every response rather than accepting it mechanically:
 
@@ -212,8 +195,7 @@ Evaluate every response rather than accepting it mechanically:
 
 ### Third submission — final convergence review
 
-The third submission is not another unrestricted review. Send the complete plan,
-ledger, and latest revision summary with this prompt:
+The third submission is not another unrestricted review. Send the complete plan, ledger, and latest revision summary with this prompt:
 
 ```text
 This is the final convergence review for the implementation/test plan.
@@ -268,39 +250,17 @@ Issue: https://github.com/<org>/<repo>/issues/<n>
 
 ### Decision after the review budget is exhausted
 
-Relay wording is evidence, not an automatic veto. After the third submission,
-the agent makes one explicit decision:
+Relay wording is evidence, not an automatic veto. After the third submission, the agent makes one explicit decision:
 
-- **No agent-verified admissible blocker remains** → close the ledger and begin
-  implementation, even if relay still lists non-blocking preferences.
-- **A real blocker has a deterministic, implementation-local correction** →
-  make the minimum plan correction, verify it against the cited source and
-  affected acceptance criteria, record it in the ledger, and begin
-  implementation without another unrestricted plan review. Ensure later tests
-  and PR review cover the corrected area.
-- **A blocker changes product scope, a public contract, compatibility or
-  migration policy, security/privacy posture, or another material trade-off** →
-  in `default`, present one consolidated checkpoint with the concrete decision
-  and both rationales; in `auto`, record an authority blocker and end with
-  `BLOCKED_HANDOFF` after completing independent safe work.
-- **Agent and relay disagree about a repository fact or severity** → inspect
-  authoritative evidence and make an agent-owned semantic decision. Escalate
-  only when the disagreement meets the workflow definition of absolute
-  disagreement: use one consolidated checkpoint in `default`, or
-  `BLOCKED_HANDOFF` in `auto`.
-- **Several fundamental blockers show that the plan or issue is not actually
-  ready** → in `default`, stop implementation and present one consolidated
-  return-to-planning recommendation; in `auto`, do not reset the review budget
-  or silently refine the frozen issue, and end with `BLOCKED_HANDOFF`.
+- **No agent-verified admissible blocker remains** → close the ledger and begin implementation, even if relay still lists non-blocking preferences.
+- **A real blocker has a deterministic, implementation-local correction** → make the minimum plan correction, verify it against the cited source and affected acceptance criteria, record it in the ledger, and begin implementation without another unrestricted plan review. Ensure later tests and PR review cover the corrected area.
+- **A blocker changes product scope, a public contract, compatibility or migration policy, security/privacy posture, or another material trade-off** → in `default`, present one consolidated checkpoint with the concrete decision and both rationales; in `auto`, record an authority blocker and end with `BLOCKED_HANDOFF` after completing independent safe work.
+- **Agent and relay disagree about a repository fact or severity** → inspect authoritative evidence and make an agent-owned semantic decision. Escalate only when the disagreement meets the workflow definition of absolute disagreement: use one consolidated checkpoint in `default`, or `BLOCKED_HANDOFF` in `auto`.
+- **Several fundamental blockers show that the plan or issue is not actually ready** → in `default`, stop implementation and present one consolidated return-to-planning recommendation; in `auto`, do not reset the review budget or silently refine the frozen issue, and end with `BLOCKED_HANDOFF`.
 
-Never start a fourth unrestricted Phase 2 review. The maximum-round rule is a
-convergence and escalation boundary, not an automatic pass.
+Never start a fourth unrestricted Phase 2 review. The maximum-round rule is a convergence and escalation boundary, not an automatic pass.
 
-The three-review budget belongs to the current plan revision cycle. Relay
-feedback, deterministic corrections, implementation commits, and selection of
-`auto` do not reset it. A new full plan-review cycle requires an explicit
-user-authorized material change to the issue or engineering risk boundary; carry
-the prior finding ledger forward and record the reason.
+The three-review budget belongs to the current plan revision cycle. Relay feedback, deterministic corrections, implementation commits, and selection of `auto` do not reset it. A new full plan-review cycle requires an explicit user-authorized material change to the issue or engineering risk boundary; carry the prior finding ledger forward and record the reason.
 
 There is no routine user approval checkpoint after plan review in either mode. Once this gate passes, proceed directly to implementation.
 
@@ -319,18 +279,11 @@ Do not require artificial “naive/no-op implementation” evidence when it woul
 
 Plans may evolve when the code reveals better implementation-local details. Update the visible plan and continue when the change preserves issue scope and acceptance-criteria coverage.
 
-If implementation reveals a material architecture, public-contract, migration,
-security, or test-strategy change:
+If implementation reveals a material architecture, public-contract, migration, security, or test-strategy change:
 
-- Use a remaining Phase 2 submission only when the original review budget has
-  not been exhausted.
-- After the budget is exhausted, continue only when the change has a
-  deterministic in-scope correction that the agent can verify against
-  authoritative evidence and later cover in tests and PR review.
-- If a fresh broad plan review or missing product decision is genuinely
-  required, do not reset the budget automatically. Use one consolidated
-  checkpoint in `default`, or finish independent safe work and return
-  `BLOCKED_HANDOFF` in `auto`.
+- Use a remaining Phase 2 submission only when the original review budget has not been exhausted.
+- After the budget is exhausted, continue only when the change has a deterministic in-scope correction that the agent can verify against authoritative evidence and later cover in tests and PR review.
+- If a fresh broad plan review or missing product decision is genuinely required, do not reset the budget automatically. Use one consolidated checkpoint in `default`, or finish independent safe work and return `BLOCKED_HANDOFF` in `auto`.
 
 ## Phase 4 — Push and open a remote draft PR
 
@@ -457,9 +410,7 @@ Reserve the third full review until the candidate head is evidence-stable:
 - Perform a complete GitHub review-thread sweep, handle every actionable finding, and push any resulting fixes.
 - If those fixes change the head, rerun the affected validation and required checks before spending the final full review.
 
-If an external CI or review-system blocker prevents an evidence-stable candidate
-head, do not spend the third round merely to exhaust the budget; preserve the
-remaining review state and return `BLOCKED_HANDOFF`.
+If an external CI or review-system blocker prevents an evidence-stable candidate head, do not spend the third round merely to exhaust the budget; preserve the remaining review state and return `BLOCKED_HANDOFF`.
 
 The third full review is not another unrestricted restart. Send the PR URL, current and previous heads, complete ledger, latest fix summary, and relevant head-to-head diff with this prompt:
 
@@ -506,16 +457,9 @@ Current pushed head: <sha>
 
 Only a third-round `CORRECT_AND_CLOSE` verdict permits **one targeted closure check**. This is not a fourth full review.
 
-Apply the minimum corrections for the named finding IDs, run the affected local
-validation, commit and push them, wait for required CI on the fix head, and
-perform another GitHub review-thread sweep. Send the targeted closure request
-only after that head is evidence-stable:
+Apply the minimum corrections for the named finding IDs, run the affected local validation, commit and push them, wait for required CI on the fix head, and perform another GitHub review-thread sweep. Send the targeted closure request only after that head is evidence-stable:
 
-If the closure-head sweep requires an unrelated substantive implementation
-change, the targeted closure is no longer an admissible substitute for broad
-review. Handle the concrete defect when it is in scope, but keep the PR in
-`BLOCKED_HANDOFF` unless the user explicitly authorizes a new review budget.
-Changes directly required by the named closure findings remain eligible.
+If the closure-head sweep requires an unrelated substantive implementation change, the targeted closure is no longer an admissible substitute for broad review. Handle the concrete defect when it is in scope, but keep the PR in `BLOCKED_HANDOFF` unless the user explicitly authorizes a new review budget. Changes directly required by the named closure findings remain eligible.
 
 ```text
 This is a targeted closure check, not a full PR review.
@@ -553,24 +497,14 @@ After the targeted closure check:
 - If a concrete severe defect is discovered after the review budget, fix and test it when the required correction is in scope, but do not restart the full relay loop automatically. The resulting head lacks a clean relay verdict and must remain a blocked draft handoff unless the user explicitly authorizes a new review budget.
 - Never interpret exhausted review rounds as approval.
 
-Do not submit a separate relay task asking whether `auto` execution may
-continue. After each relay response, the agent records and applies the semantic
-continuation decision defined in `workflows/README.md`.
+Do not submit a separate relay task asking whether `auto` execution may continue. After each relay response, the agent records and applies the semantic continuation decision defined in `workflows/README.md`.
 
-In `auto`, a real accepted blocker is fixed without a user checkpoint; an
-unsupported preference is recorded and does not block; and an authority blocker,
-absolute disagreement, or inability to obtain a clean exact-head verdict ends
-in one consolidated `BLOCKED_HANDOFF` rather than an automatic review-budget
-extension.
+In `auto`, a real accepted blocker is fixed without a user checkpoint; an unsupported preference is recorded and does not block; and an authority blocker, absolute disagreement, or inability to obtain a clean exact-head verdict ends in one consolidated `BLOCKED_HANDOFF` rather than an automatic review-budget extension.
 
-Before classifying the final head, synchronize the remote PR body with the
-actual implementation:
+Before classifying the final head, synchronize the remote PR body with the actual implementation:
 
-1. Re-read required-check status and paginate review threads once more; handle
-   any newly actionable result under the remaining review budget.
-2. Update the implementation summary, acceptance-criteria mapping, validation
-   evidence, material plan deviations, and remaining risks after all substantive
-   review fixes.
+1. Re-read required-check status and paginate review threads once more; handle any newly actionable result under the remaining review budget.
+2. Update the implementation summary, acceptance-criteria mapping, validation evidence, material plan deviations, and remaining risks after all substantive review fixes.
 3. Read the remote PR back and verify its rendered body and metadata.
 4. Confirm that the remote diff and body both describe the exact current head.
 

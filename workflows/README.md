@@ -30,12 +30,7 @@ Relay session: <task-specific session id>
 
 Execution mode controls human checkpoints, not review rigor. `default` and `auto` use the same validation gates, relay review budgets, finding admissibility rules, and exact-head requirements. `auto` never adds full review rounds or a separate relay request asking whether execution may continue. Continuation is an agent-owned semantic decision based on the workflow, authoritative evidence, and the user's authorization boundary.
 
-A review submission consumes a workflow round only when relay returns a
-substantive review of the requested artifact. URL-access failure, pause, captcha,
-transport failure, clearly truncated output, or an off-topic response is an
-execution failure rather than an additional review round; follow
-`agent-instructions.md` recovery rules and never use this distinction to retry a
-forbidden paused or rate-limited session.
+A review submission consumes a workflow round only when relay returns a substantive review of the requested artifact. URL-access failure, pause, captcha, transport failure, clearly truncated output, or an off-topic response is an execution failure rather than an additional review round; follow `agent-instructions.md` recovery rules and never use this distinction to retry a forbidden paused or rate-limited session.
 
 Within a workflow that explicitly permits the action, `auto` authorizes refining and publishing an issue without a routine exact-body approval, creating branches and commits, pushing the implementation branch, opening and updating a draft PR, fixing CI and review findings, and answering or resolving review threads according to repository policy. It does **not** authorize marking a PR ready, merging, closing an issue, releasing, deploying, changing unrelated metadata, using new credentials or paid resources, or expanding the user's stated product scope.
 
@@ -46,8 +41,7 @@ Two conditions may still prevent uninterrupted completion:
 
 A repeated finding, unsupported late concern, severity-label difference, style preference, repository claim contradicted by authoritative evidence, or deterministic in-scope correction is not an absolute disagreement.
 
-After each substantive relay gate in `auto`, record the continuation decision
-without sending it back to relay for meta-review:
+After each substantive relay gate in `auto`, record the continuation decision without sending it back to relay for meta-review:
 
 ```text
 Decision: CONTINUE | BLOCKED_HANDOFF
