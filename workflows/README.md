@@ -34,7 +34,7 @@ Repeated or unsupported findings, severity wording, style preferences, repositor
 | File | Purpose |
 |---|---|
 | [`issue-to-pr.md`](./issue-to-pr.md) | Rough issue → decision discovery → reviewed issue contract → mode-aware publication → shared implementation workflow |
-| [`agent-ready-issue-to-pr.md`](./agent-ready-issue-to-pr.md) | Frozen agent-ready issue → reviewed plan → implementation → remote draft PR → CI, relay, thread gates → handoff |
+| [`agent-ready-issue-to-pr.md`](./agent-ready-issue-to-pr.md) | Frozen agent-ready issue → reviewed plan → implementation → remote draft PR → integrated CI/GitHub/relay convergence → handoff and post-handoff feedback re-entry |
 | [`review-convergence.md`](./review-convergence.md) | Shared bounded-review budget, finding ledger, later-finding, and continuation protocol |
 
 ## Authoring rule

@@ -12,6 +12,8 @@ A bounded artifact review allows at most three full submissions:
 
 A submission consumes a round only when relay returns a substantive review of the requested artifact. URL-access failure, pause, captcha, transport failure, clearly truncated output, or an off-topic response is an execution failure; follow [`agent-instructions.md`](../agent-instructions.md) recovery rules and never use this distinction to retry a paused or rate-limited session automatically.
 
+An active workflow may define a convergence round as that relay submission plus synchronized non-relay gates for the same artifact revision, such as CI and GitHub feedback. Those gates do not create separate relay budgets. The workflow owns their completion barrier and cutoff; findings from every declared source share one ledger and one continuation decision.
+
 Ask the initial review for the complete set of currently identifiable blockers. The second submission includes the current artifact, finding ledger, revision summary, and the relevant artifact versions or diff. Relay must reconcile prior finding IDs rather than silently rename or reopen them. The third submission uses the workflow's final-convergence prompt and is not another unrestricted restart.
 
 Do not reset the budget because relay introduces a later finding, the artifact changes, a deterministic correction is made, or the workflow uses `auto`. A new full review cycle requires the explicit condition stated by the active workflow or direct user authorization; carry the prior ledger forward and record why the cycle changed.

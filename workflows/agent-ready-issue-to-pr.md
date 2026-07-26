@@ -141,14 +141,22 @@ Commit and push the implementation branch, then open a **draft** PR using the re
 
 Read the remote PR back, verify rendered body and metadata, record the pushed head SHA, and confirm the remote diff matches intended local scope. Relay reviews that remote PR and exact head, never an unpushed local substitute.
 
-## Phase 5 — CI, relay PR review, and threads
+## Phase 5 — Integrated CI, GitHub, and relay convergence
 
-Start required-CI inspection and the initial PR review from the same remote draft.
+Use at most three integrated PR convergence rounds. Each round evaluates one exact pushed head through the same three channels:
+
+1. Required CI.
+2. All visible GitHub review feedback, including review summaries, conversation comments, inline comments, and review threads.
+3. One substantive relay review submission.
+
+Complete relevant local validation before pushing the round head. Start CI inspection and relay review while observing expected GitHub review on that same remote head in parallel when practical, then wait at a round barrier before deciding: required checks are terminal, required or explicitly requested automated reviews are terminal or have a documented infrastructure failure, optional reviews have reached a recorded bounded cutoff, GitHub feedback has been paginated through that cutoff, and relay has returned or failed under `agent-instructions.md`. Human review has no terminal state; the cutoff defines what the round observed.
+
+Aggregate all three channels into one ledger before fixing the next head. Do not create separate CI, GitHub, and relay review budgets or serially patch one channel while ignoring already available findings from the others.
 
 ### Initial PR review
 
 ```text
-Act as a strict code reviewer for this draft PR and its frozen agent-ready
+Act as a strict code reviewer for this PR and its frozen agent-ready
 issue.
 
 Return the complete set of currently identifiable blockers. Check acceptance
@@ -166,29 +174,31 @@ Issue: <url>
 Current pushed head: <sha>
 ```
 
-Apply the shared three-round protocol. The PR ledger records classification/severity, contract impact, status, reviewed/fix heads, disposition, and evidence. A PR `critical-late-finding` may block only with exact code location/path, triggering input/state/call sequence, expected versus actual failure, acceptance or contract impact, and why this PR must fix it.
+Apply the shared three-round protocol to the relay submission in each integrated round. The unified PR ledger records source, classification/severity, contract impact, status, observed/reviewed/fix heads, disposition, and evidence. A PR `critical-late-finding` from any channel may block only with exact code location/path, triggering input/state/call sequence, expected versus actual failure, acceptance or contract impact, and why this PR must fix it.
 
-Fix verified blockers, validate, commit, and push; verify disputed repository facts locally; record non-blocking work or scope expansion without adopting it mechanically. A readiness verdict applies only to its exact pushed head.
+After the round barrier, verify disputed repository facts locally and reconcile duplicate or conflicting reports by evidence. If no admissible blocker remains, proceed to the final readiness gate. If blockers remain before the third round, fix the combined verified set, validate, commit, and push the next head. Record non-blocking work or scope expansion without adopting it mechanically. A readiness verdict applies only to its exact pushed head.
 
 The second full review includes the PR URL, previous and current heads, complete ledger, fix summary, and head-to-head diff. It verifies prior findings, revision regressions, and new evidence without renaming or reopening findings silently.
 
-### CI and GitHub review threads
+### Integrated round barrier
 
-In parallel:
+For every round:
 
-- Wait for required CI to reach a terminal state; distinguish PR-caused failures from external/pre-existing failures; fix PR-caused failures and rerun affected validation and relay review within the remaining budget when implementation changed materially.
+- Wait for required CI to reach a terminal state and distinguish PR-caused failures from external or pre-existing failures.
 - Treat CI-only coverage as unverified until its remote check succeeds.
+- Read all paginated PR conversation comments, submitted reviews, and inline review comments; do not assume unresolved threads are the complete feedback set.
 - Query all paginated `PullRequestReviewThread` nodes through GitHub GraphQL and use `isResolved`; REST comments do not expose thread resolution.
-- For each unresolved thread, fix actionable findings or reply inline with the concrete reason for rejecting/deferring them. Reply and resolution are separate actions; resolve only when policy permits and the finding is actually handled.
+- For each feedback item, fix actionable findings or reply with the concrete reason for rejecting, deferring, or treating it as duplicate/stale. Reply and resolution are separate actions; resolve only when policy permits and the finding is actually handled.
+- Record the round head, expected-review status, feedback cutoff, and latest observed comment/thread identifiers so later arrivals are distinguishable.
 
-The gate is no **unaddressed actionable thread**, not mechanically zero unresolved threads. Answered reviewer-owned unresolved threads appear in handoff. Material thread fixes use only remaining full-review budget; after exhaustion, use targeted closure only when eligible or keep the draft blocked.
+The gate is no **unaddressed actionable feedback**, not mechanically zero unresolved threads. Answered reviewer-owned unresolved threads appear in handoff. Feedback that arrives before the next round barrier joins that round. A blocker first visible after the third barrier leaves the PR blocked unless targeted closure already covers that exact finding; it never opens an unrestricted fourth round.
 
 ### Third full review — final PR convergence
 
-Spend the third round only on an evidence-stable candidate head after complete relevant local validation, successful required CI, a full actionable-thread sweep, and any resulting fixes/checks.
+Spend the third round only on a candidate head that passed complete relevant local validation. Evaluate required CI, GitHub feedback, and relay against that head through the same integrated barrier; do not declare readiness from relay alone.
 
 ```text
-This is the final convergence review for the draft PR. Do not restart broad
+This is the final convergence review for the PR. Do not restart broad
 review, reopen resolved findings without evidence, or add optional scope.
 
 Review only unresolved ledger findings, blocker-level regressions from the
@@ -221,9 +231,11 @@ Current pushed head: <sha>
 
 If external CI or review infrastructure prevents an evidence-stable candidate, preserve the remaining round and return `BLOCKED_HANDOFF` instead of spending it ceremonially.
 
+After the third barrier, any admissible blocker from CI, GitHub feedback, relay, or agent verification yields `BLOCKED_HANDOFF`, except for the exact targeted-closure case below. Exhausted rounds never authorize another general fix-and-review cycle.
+
 ### Targeted closure
 
-Only third-round `CORRECT_AND_CLOSE` permits one targeted closure check; it is not a fourth full review. Apply only the named minimum corrections, run affected local validation, push, wait for required CI, and sweep threads. An unrelated substantive change invalidates targeted closure as a broad-review substitute and leaves the PR blocked unless the user authorizes new budget.
+Only third-round `CORRECT_AND_CLOSE` permits one targeted closure check, and only when every remaining blocker in the unified ledger is part of the same named deterministic correction set. It is not a fourth full review. Apply only the named minimum corrections, run affected local validation, push, then evaluate required CI, GitHub feedback, and the relay targeted check on that exact closure head. An unrelated substantive change invalidates targeted closure as a broad-review substitute and leaves the PR blocked unless the user authorizes new budget.
 
 ```text
 This is a targeted closure check, not a full PR review.
@@ -248,7 +260,7 @@ Named finding IDs: <ids>
 <diff>
 ```
 
-Normalize `CLOSED` to `READY_FOR_HUMAN_REVIEW` for that exact head. A remaining or fix-caused blocker yields `BLOCKED_HANDOFF`; non-blocking suggestions become risk/follow-up. If a severe in-scope defect appears after budget exhaustion, fix and test it, but the new head lacks a clean verdict and remains blocked unless the user authorizes new review budget.
+Normalize `CLOSED` to `READY_FOR_HUMAN_REVIEW` for that exact head only when required CI is green and the closure-head GitHub feedback sweep has no unaddressed actionable finding. A remaining, fix-caused, or newly reported blocker yields `BLOCKED_HANDOFF`; do not repair and push again automatically. Non-blocking suggestions become risk/follow-up. If a severe in-scope defect appears after budget exhaustion, fix and test it only when safety requires immediate correction, but the new head lacks a clean verdict and remains blocked unless the user authorizes new review budget.
 
 Do not ask relay whether `auto` may continue. Apply and record the shared agent-owned continuation decision. In `auto`, accepted blockers are fixed without routine checkpoints; unsupported preferences do not block; authority blockers, absolute disagreements, or inability to obtain a required clean exact-head verdict produce one consolidated `BLOCKED_HANDOFF`.
 
@@ -262,7 +274,7 @@ Before classification:
 
 `READY_FOR_HUMAN_REVIEW` requires green required checks, no agent-verified blocker on the exact relay-approved head, every actionable thread fixed or deliberately answered, complete acceptance coverage, and a remote PR body that describes that head.
 
-Otherwise return `BLOCKED_HANDOFF` with exact evidence and keep the PR draft. Never treat exhausted rounds as approval, mark ready, merge, or close the issue autonomously.
+Otherwise return `BLOCKED_HANDOFF` with exact evidence and keep the PR unmerged. Preserve its current draft/ready state unless the user explicitly changes it; never treat exhausted rounds as approval, mark ready, merge, or close the issue autonomously.
 
 ## Phase 6 — Handoff
 
@@ -271,9 +283,17 @@ Report:
 1. Execution mode and `READY_FOR_HUMAN_REVIEW` or `BLOCKED_HANDOFF`.
 2. Draft PR URL, current head, and relay-reviewed head if different.
 3. Implementation summary and acceptance-to-code/test mapping.
-4. Local validation, CI, and actionable-thread status.
+4. Local validation, CI, and actionable-feedback status.
 5. Material plan deviations.
-6. Relay verdict, full-round count, and targeted closure result.
+6. Relay verdict, integrated PR-round count, feedback cutoffs, and targeted closure result.
 7. Agent continuation decision, risks, deferred work, blockers, and answered-but-unresolved reviewer-owned threads.
 
 The user owns final human review, `gh pr ready`, and merge.
+
+## Post-handoff PR feedback re-entry
+
+After a `READY_FOR_HUMAN_REVIEW` handoff, whether the PR remains draft or the user has marked it ready, the user may request follow-up on additional human or automated GitHub feedback for the same PR. Preserve the PR's execution mode, current draft/ready state, and task-specific relay session; read every feedback item added since the last recorded cutoff and update the existing ledger. Handle the complete visible batch: fix actionable findings, answer rejected/deferred/duplicate/stale feedback, validate changes, push when PR content changed, wait for required CI, and paginate feedback again.
+
+Any post-handoff feedback batch that changes the PR head must re-enter Phase 5 and complete a fresh integrated convergence cycle of at most three rounds before another `READY_FOR_HUMAN_REVIEW` handoff. This is an explicit workflow-defined new-cycle condition under `review-convergence.md`: carry forward the prior ledger, previous relay-approved head, feedback dispositions, and reason for reopening; do not reset the ledger or the budget within the new cycle. Relay reviews the full current PR and exact pushed head, not only the comment-fix diff.
+
+If handling the batch does not change PR content or head, the previous exact-head relay verdict remains applicable; rescan GitHub feedback and report the dispositions unless the user explicitly requests a new relay cycle. Feedback visible before a round cutoff joins the active cycle. Feedback arriving after the completed handoff starts a later batch only when the user resumes the workflow; do not monitor indefinitely or silently extend a finished cycle.
