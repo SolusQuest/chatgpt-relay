@@ -1,5 +1,5 @@
 // server/index.ts
-// gpt-relay 主入口。Express + node:sqlite；启动 HTTP relay 服务。
+// gpt-relay entry point: start the Express and node:sqlite HTTP relay.
 import { loadConfig } from "./config.js";
 import { createApp } from "./app.js";
 

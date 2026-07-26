@@ -1,5 +1,5 @@
 // test/cli.test.ts
-// 验证发布的 gpt-relay CLI shim。使用异步 spawn 避免与同进程 server 死锁。
+// Verify the published gpt-relay CLI shim. Async spawn avoids deadlocking the in-process server.
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";

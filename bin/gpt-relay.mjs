@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Shim: 让 npm 全局安装后 wrapper 能正确启动 TypeScript CLI。
+// Shim that lets the global npm wrapper start the TypeScript CLI correctly.
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import path from "node:path";

@@ -1,5 +1,5 @@
 // server/routes/internal.ts
-// 扩展端接口: 认领下一个任务 / 提交回复 / 心跳 / session 状态上报。
+// Extension API for claiming tasks, submitting replies, heartbeat, and session status.
 import { Router } from "express";
 import type { Request, Response } from "express";
 import type { TaskStore } from "../task-store.js";
@@ -11,7 +11,7 @@ import { asPositiveInt, isValidSessionId } from "../util.js";
 export function createInternalRouter(store: TaskStore): Router {
   const router = Router();
 
-  // 认领下一个任务（长轮询，可选 wait 参数）
+  // Claim the next task, with optional long polling via the wait query.
   router.get("/next_task", async (req: Request, res: Response) => {
     const session = req.query.session;
     if (!isValidSessionId(session)) {
@@ -48,8 +48,8 @@ export function createInternalRouter(store: TaskStore): Router {
     });
   });
 
-  // 捕获 DOM 回复。active task 正常完成；timeout 后的晚到回复单独落 lateReply，
-  // 不改写既有 terminal status。
+  // Capture a DOM reply. Active tasks complete normally; timeout replies are
+  // stored separately without rewriting the terminal status.
   router.post("/tasks/:id/capture", (req: Request, res: Response) => {
     const id = String(req.params.id ?? "");
     const body = (req.body ?? {}) as { text?: unknown };
@@ -94,7 +94,7 @@ export function createInternalRouter(store: TaskStore): Router {
     }
   });
 
-  // 完成任务
+  // Complete a task.
   router.post("/tasks/:id/complete", (req: Request, res: Response) => {
     const id = String(req.params.id ?? "");
     const body = (req.body ?? {}) as { text?: unknown; error?: unknown };
@@ -112,7 +112,7 @@ export function createInternalRouter(store: TaskStore): Router {
     }
   });
 
-  // 用户在 ChatGPT 页面点击 Stop：立即释放 task，避免刷新后重复提交。
+  // Cancel when the page user selects Stop so refresh cannot resubmit the task.
   router.post("/tasks/:id/user-stop", (req: Request, res: Response) => {
     const id = String(req.params.id ?? "");
     const body = (req.body ?? {}) as { reason?: unknown };
@@ -130,8 +130,9 @@ export function createInternalRouter(store: TaskStore): Router {
     }
   });
 
-  // 从 DOM 回捞的回复：扩展重启/刷新后发现某 taskId 已生成完，走这里报回。
-  // 语义：active task 正常完成；timeout 后的晚到回复单独保存；其他 terminal 忽略。
+  // Report a DOM reply discovered after extension or page restart. Active tasks
+  // complete normally, timeout replies are stored separately, and other
+  // terminal tasks are ignored.
   router.post("/tasks/:id/recover", (req: Request, res: Response) => {
     const id = String(req.params.id ?? "");
     const body = (req.body ?? {}) as { text?: unknown };
@@ -154,7 +155,7 @@ export function createInternalRouter(store: TaskStore): Router {
     }
   });
 
-  // 页面仍被上一轮生成占用时，把刚 claim 的任务无损退回 queued。
+  // Return a newly claimed task to the queue if the page is still busy.
   router.post("/tasks/:id/defer", (req: Request, res: Response) => {
     const id = String(req.params.id ?? "");
     try {
@@ -168,7 +169,7 @@ export function createInternalRouter(store: TaskStore): Router {
     }
   });
 
-  // 请求把任务打回 queued（页面刷新后回捞失败等场景）
+  // Requeue after failed recovery or a similar page lifecycle interruption.
   router.post("/tasks/:id/requeue", (req: Request, res: Response) => {
     const id = String(req.params.id ?? "");
     try {
@@ -182,7 +183,7 @@ export function createInternalRouter(store: TaskStore): Router {
     }
   });
 
-  // Session 心跳
+  // Session heartbeat.
   router.post("/heartbeat", (req: Request, res: Response) => {
     const body = (req.body ?? {}) as { session?: unknown };
     if (!isValidSessionId(body.session)) {
@@ -192,7 +193,7 @@ export function createInternalRouter(store: TaskStore): Router {
     res.json({ status: "ok" });
   });
 
-  // Session 状态上报（安全暂停/恢复）
+  // Report session pause, resume, and safety state.
   router.post("/sessions/:id/status", (req: Request, res: Response) => {
     const id = String(req.params.id ?? "");
     if (!isValidSessionId(id)) return res.status(400).json({ error: "invalid session" });

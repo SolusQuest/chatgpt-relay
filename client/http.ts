@@ -1,5 +1,5 @@
 // client/http.ts
-// 通用 HTTP helper：AbortController 超时 + JSON。
+// Shared HTTP helper with AbortController timeouts and JSON handling.
 export interface HttpOptions {
   baseUrl: string;
   timeoutMs?: number;

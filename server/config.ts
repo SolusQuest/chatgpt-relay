@@ -1,5 +1,5 @@
 // server/config.ts
-// 运行时配置。所有可调项集中在这里；env > default。
+// Runtime configuration. Keep tunable values centralized; environment overrides defaults.
 import os from "node:os";
 import path from "node:path";
 
@@ -32,7 +32,7 @@ function envStr(name: string, fallback: string): string {
   return raw != null && raw !== "" ? raw : fallback;
 }
 
-// 默认数据目录 ~/.gpt-relay
+// Default data directory: ~/.gpt-relay
 const DEFAULT_DATA_DIR = path.join(os.homedir(), ".gpt-relay");
 
 export function loadConfig(): Config {

@@ -1,5 +1,5 @@
 // test/smoke.test.ts
-// Smoke test: 启动 relay（测试端口 18766），验证 /health。
+// Smoke test: start the relay on test port 18766 and verify /health.
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, ChildProcess } from 'node:child_process';
@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
-const PORT = 18766; // 测试专用端口，避免撞开发中的 relay
+const PORT = 18766; // Dedicated test port that avoids the development relay.
 const BASE = `http://localhost:${PORT}`;
 
 let child: ChildProcess | null = null;

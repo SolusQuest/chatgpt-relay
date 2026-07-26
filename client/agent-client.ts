@@ -1,5 +1,5 @@
 // client/agent-client.ts
-// agent-client：基于 /v1 API + pending 目录跨进程持久化。
+// Agent client built on the /v1 API with cross-process pending-record persistence.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -184,7 +184,7 @@ export async function review(
       elapsedMs: Date.now() - started,
     };
   } catch (err) {
-    // 保留 pending，让下次 resume 恢复
+    // Keep the pending record so a later resume can recover the task.
     throw err;
   }
 }
@@ -234,7 +234,7 @@ export async function healthCheck(baseUrl = DEFAULT_BASE): Promise<boolean> {
   }
 }
 
-/** 扫描 pending 目录，返回每个 taskId 的最新状态；terminal 项自动清理 pending 文件。 */
+/** Return the latest status for every pending task and remove terminal records. */
 export async function resumePending(
   baseUrl = DEFAULT_BASE,
 ): Promise<{ record: PendingRecord; task: TaskView | null }[]> {
@@ -242,7 +242,7 @@ export async function resumePending(
   for (const rec of listPending()) {
     const t = await getTask(rec.taskId, baseUrl);
     if (!t) {
-      // 服务端已丢失（例如换机器）：清理本地文件
+      // The server no longer has the task, for example after moving machines.
       clearPending(rec.taskId);
       out.push({ record: rec, task: null });
       continue;

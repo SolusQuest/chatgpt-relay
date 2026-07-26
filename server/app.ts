@@ -1,5 +1,5 @@
 // server/app.ts
-// 组装 Express app + 维护循环。
+// Assemble the Express application and maintenance loop.
 import express from "express";
 import type { Config } from "./config.js";
 import { openDatabase } from "./db.js";
@@ -25,15 +25,15 @@ export function createApp(config: Config): AppHandle {
   app.use("/v1", createV1TasksRouter(store));
   app.use("/v1", createV1SessionsRouter(store));
 
-  // 扩展端内部 API
+  // Extension-internal API.
   app.use("/internal", createInternalRouter(store));
 
-  // 健康检查（也用作 popup 的 relay 可达性探测）
+  // Health endpoint, also used by the popup to probe relay reachability.
   app.get("/health", (_req, res) => {
     res.json({ status: "ok", sessions: store.listSessions().length });
   });
 
-  // 413 兜底
+  // Fallback for oversized request bodies.
   app.use(
     (
       err: unknown,

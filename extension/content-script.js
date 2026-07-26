@@ -1,21 +1,21 @@
 // extension/content-script.js
-// 注入到 chatgpt.com 页面：DOM 注入 + 提交 + safety 探测 + banner + inflight 恢复 + 断网检测。
+// Runs in chatgpt.com for DOM submission, safety detection, status, recovery, and connectivity.
 //
-// 架构：这一层只做同步 DOM 操作 + 单次 poll-reply 快照。判定"是否有新回复"用
-// data-message-id（不用 count；ChatGPT 会虚拟滚动 unmount 老消息）。文本读取
-// 用 textContent（不用 innerText，后者依赖 layout）。
+// This layer performs synchronous DOM operations and one poll-reply snapshot.
+// New replies are detected by data-message-id because virtual scrolling can
+// unmount old messages. textContent is used because innerText depends on layout.
 //
-// 长跑的"等回复"逻辑不在这里，改由 service-worker.js 的 pending-reply 状态机
-// 每次 alarm 周期主动通过 sendMessage(poll-reply) 采样。原因是 Chrome 会冻结
-// 后台/未渲染 tab 里的 MutationObserver 和 setInterval，无法用长跑 observer。
-// 即便前台运行，主动采样架构也让"页面 F5 刷新"和"SW 重启"的 recovery 简单。
+// Long-running reply waits live in the service worker pending-reply state
+// machine. Chrome can freeze MutationObserver and setInterval in background or
+// unrendered tabs, so the worker requests active snapshots instead. This also
+// simplifies recovery after page and service-worker restarts.
 
 (() => {
   "use strict";
   if (window.__gptRelayContentLoaded) return;
   window.__gptRelayContentLoaded = true;
 
-  // ── 选择器 & safety pattern ─────────────────────────────
+  // Selectors and safety patterns.
   const SELECTORS = {
     input: [
       "#prompt-textarea",
@@ -50,7 +50,7 @@
     { reason: "页面提示账号或访问受限", pattern: /access denied|account.*disabled|account.*deactivated|访问被拒绝|账号.*停用|账户.*停用/i },
   ];
 
-  // ChatGPT 显示"连接中断"提示的关键词。命中时不是 pause，而是 reload。
+  // ChatGPT connectivity warnings trigger a reload instead of a safety pause.
   const RECOVERY_PATTERNS = [
     /connection (was |is )?(lost|interrupted)/i,
     /reconnecting/i,
@@ -65,8 +65,8 @@
   const INFLIGHT_KEY = "gpt_relay_inflight_v3";
   const FETCH_FAIL_THRESHOLD = 3;
   const RELOAD_COOLDOWN_MS = 60_000;
-  // document_idle 早于 ChatGPT React 会话水合完成。页面刷新后必须看到
-  // conversation DOM + composer 连续稳定一段时间，才能领取并发送新任务。
+  // document_idle can precede React hydration. After refresh, wait until the
+  // conversation DOM and composer remain stable before accepting new work.
   const PAGE_READY_STABLE_MS = 4000;
   const PAGE_READY_TIMEOUT_MS = 60_000;
   const SUBMISSION_ACCEPT_TIMEOUT_MS = 15_000;
@@ -151,7 +151,7 @@
   function getLastText(msgs) {
     if (!msgs.length) return "";
     const el = msgs[msgs.length - 1];
-    // 后台 tab 的 innerText 依赖 layout，Chrome 冻结后返回空串；textContent 不受影响。
+    // innerText depends on layout and may be empty in frozen tabs; textContent does not.
     const t = (el.textContent ?? el.innerText ?? "").replace(/\u00A0/g, " ").trim();
     return t;
   }
@@ -195,8 +195,8 @@
       conversationRoute &&
       baseline.userCount + baseline.assistantCount === 0
     ) {
-      // /c/<id> 必然是已有会话。消息为 0 表示 React 仍在加载 history，
-      // 此时点击 composer 可能随着后续水合被替换，造成 prompt 丢失。
+      // /c/<id> identifies an existing conversation. No messages means React is
+      // still hydrating history and may replace the composer after submission.
       reason = "conversation-hydrating";
     }
 
@@ -270,7 +270,7 @@
   if (document.body) attachBanner();
   else document.addEventListener("DOMContentLoaded", attachBanner);
 
-  // ── inflight 状态（页面刷新可读） ──
+  // In-flight state that survives page refresh.
   function readInflight() {
     try { return JSON.parse(sessionStorage.getItem(INFLIGHT_KEY) ?? "null"); }
     catch { return null; }
@@ -282,7 +282,7 @@
     sessionStorage.removeItem(INFLIGHT_KEY);
   }
 
-  // Stop 点击只记录用户意图；最终是否停止由后续 DOM 状态采样确认。
+  // A Stop click records intent; later DOM sampling confirms actual cancellation.
   document.addEventListener("click", (event) => {
     const target = event.target instanceof Element
       ? event.target.closest(SELECTORS.stopButton.join(","))
@@ -323,18 +323,17 @@
     return null;
   }, 10000, 200, "waitForSendReady"); }
 
-  // ── 后台友好的注入（不依赖 focus） ──
+  // Background-friendly prompt injection that does not require focus.
   //
-  // ChatGPT 的输入框是 Lexical/ProseMirror 受控组件：改 DOM 无用，必须走 Lexical
-  // 认识的事件流。策略（按可靠性排序）：
-  //   1) 主路径：ClipboardEvent('paste') + DataTransfer。Lexical 有 dedicated
-  //      paste handler，最"官方"的注入方式，且不需要 focus 生效。
-  //   2) 回退：execCommand('insertText')。需要 focus，前台 tab 有效。
-  //   3) 最后兜底：Range 替换 + beforeinput/input 序列。可能只改 DOM 不改 state，
-  //      但作为最后一根稻草仍试一下。
+  // The ChatGPT composer is controlled by Lexical/ProseMirror, so direct DOM
+  // mutation is insufficient. Injection paths in reliability order:
+  //   1) ClipboardEvent('paste') with DataTransfer, handled directly by Lexical
+  //      and effective without focus.
+  //   2) execCommand('insertText'), reliable in a focused foreground tab.
+  //   3) Range replacement with beforeinput/input as a final DOM-level fallback.
   //
-  // 注入后主动派发 'change'/'input' 事件通知 React；如果发现 send 按钮持续
-  // disabled，说明状态未同步，抛错让上层重试或明确失败。
+  // Dispatch change/input events after injection. If Send remains disabled,
+  // state did not synchronize and the caller should retry or fail explicitly.
   async function pasteIntoInput(text) {
     await waitForPageReady();
     const inp = await waitForInput();
@@ -347,7 +346,7 @@
     try { inp.focus({ preventScroll: true }); } catch { /* ignore */ }
     await pacedDelay(50, 150);
 
-    // 确保 selection 落在输入框内（Lexical paste handler 会检查这个）
+    // Keep the selection inside the composer for the Lexical paste handler.
     try {
       const sel = getSelection();
       if (sel) {
@@ -362,7 +361,7 @@
     let injectedOk = false;
     let method = "none";
 
-    // Path 1: ClipboardEvent paste（对 Lexical 最可靠，且不要求 focus）
+    // Path 1: ClipboardEvent paste, most reliable for Lexical without focus.
     try {
       const dt = new DataTransfer();
       dt.setData("text/plain", text);
@@ -381,7 +380,7 @@
       console.warn("[relay content] Path 1 (paste event) failed", e);
     }
 
-    // Path 2: execCommand insertText（前台 tab focused 时最可靠）
+    // Path 2: execCommand insertText, most reliable in a focused foreground tab.
     if (!injectedOk && document.activeElement === inp) {
       try {
         const ok = document.execCommand("insertText", false, text);
@@ -389,7 +388,7 @@
       } catch { /* ignore */ }
     }
 
-    // Path 3: Range 替换 + beforeinput / input（DOM-level 最后兜底）
+    // Path 3: Range replacement plus beforeinput/input as the final fallback.
     if (!injectedOk) {
       try {
         while (inp.firstChild) inp.removeChild(inp.firstChild);
@@ -414,9 +413,8 @@
     await pacedDelay(300, 600);
 
     const injected = inp.innerText.trim();
-    // 长文本可能被 ChatGPT 自动转为文本附件（编辑器留空、附件 chip 出现、
-    // 上传完成后 send 按钮 enabled）。因此不再以"编辑器有文字"为通过标准，
-    // 改以 send 按钮是否 enabled 作为最终判据；上传耗时较久，wait 拉长到 15s。
+    // ChatGPT may convert long text into an attachment, leaving the composer
+    // empty. Treat an enabled Send button as success and allow time for upload.
     const sendReady = await waitForCondition(() => {
       const b = findSendButton();
       if (!b) return null;
@@ -458,12 +456,12 @@
     }, SUBMISSION_ACCEPT_TIMEOUT_MS, 250, "waitForSubmissionAccepted");
   }
 
-  // ── 页面加载后尝试回捞上次的 inflight ──
+  // Recover the previous in-flight task after page load.
   async function tryRecoverInflight() {
     const rec = readInflight();
     if (!rec) return;
     if (rec.session !== getSessionId()) {
-      // conversation 换了，pending 无法映射
+      // The conversation changed, so the pending task cannot be mapped safely.
       clearInflight();
       return;
     }
@@ -506,7 +504,7 @@
         return;
       }
       if (isGenerating()) {
-        // 还在生成中：改由 SW 通过 poll-reply 主动采样，避免后台 tab observer 冻结。
+        // Generation continues; let the service worker actively sample the page.
         updateBanner(`回捞（生成中）: ${rec.taskId.slice(0, 8)}`, "#f39c12");
         chrome.runtime.sendMessage({
           type: "reattach-pending",
@@ -518,7 +516,7 @@
         return;
       }
       if (hasNewUser) {
-        // user message 已经发送，但 assistant 尚未出现：不要重发 prompt。
+        // The user message was sent but no assistant message exists yet; do not resubmit.
         chrome.runtime.sendMessage({
           type: rec.stopRequestedAt ? "user-stop-requested" : "reattach-pending",
           taskId: rec.taskId,
@@ -527,8 +525,8 @@
         return;
       }
       if (rec.phase === "send-attempted" || rec.phase === "send-clicked") {
-        // 点击边界附近刷新时无法证明请求未发送；保守交给 pending 状态机采样，
-        // 避免把同一 prompt 再发一次。
+        // A refresh near the click boundary makes submission uncertain. Sample
+        // conservatively rather than risk sending the prompt twice.
         chrome.runtime.sendMessage({
           type: "reattach-pending",
           taskId: rec.taskId,
@@ -545,7 +543,7 @@
     }
   }
 
-  // ── 网络检测（online/offline + fetch hook） ──
+  // Connectivity detection through online/offline events and a fetch hook.
   let consecutiveFetchFail = 0;
   let lastReloadAt = 0;
   const origFetch = window.fetch.bind(window);
@@ -574,7 +572,7 @@
     lastReloadAt = Date.now();
     console.warn("[relay content] reloading page:", reason);
     updateBanner(`重新加载: ${reason.slice(0, 30)}`, "#e67e22");
-    // 让扩展知道正在 reload，避免此时派发新任务
+    // Tell the extension about the reload so it does not dispatch new work.
     chrome.runtime.sendMessage({ type: "network-reload", reason }).catch(() => {});
     setTimeout(() => location.reload(), 1500);
   }
@@ -587,18 +585,18 @@
     updateBanner(`Relay: ${getSessionId().slice(0, 8)}… (recovered)`, "#10a37f");
     chrome.runtime.sendMessage({ type: "online" }).catch(() => {});
     await delay(3000);
-    // 若页面已有连接中断提示，reload
+    // Reload when the page already shows a connectivity warning.
     const hint = findRecoveryHint();
     if (hint) maybeReload(`recovery hint: ${hint.slice(0, 40)}`);
   });
 
-  // 周期扫描恢复提示（有些提示不伴随 fetch 失败）
+  // Periodically scan for recovery warnings that may not accompany fetch failures.
   setInterval(() => {
     const hint = findRecoveryHint();
     if (hint) maybeReload(`chatgpt recovery banner: ${hint.slice(0, 40)}`);
   }, 15_000);
 
-  // ── 消息处理 ──
+  // Message handling.
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     (async () => {
       try {
@@ -614,12 +612,11 @@
             const users = getUserMessages();
             const generating = isGenerating();
             const lastId = getLastAssistantId(msgs);
-            // 虚拟滚动会 unmount 老消息，所以 count 不可靠；用 data-message-id 判定"是否是新一条"。
-            // 若 lastId 为 null（页面还没插占位）视为无新回复。
+            // Virtual scrolling makes counts unreliable. Compare message IDs;
+            // a null lastId means the page has not inserted a placeholder.
             const hasNewAssistant = !!lastId && lastId !== baseline.lastAssistantId;
-            // user 消息也可能被虚拟滚动 unmount，同样不能靠 count。只用来在极端情况下
-            // 分辨"提交都没生效"（既没有新 assistant 也完全没有 user）。保守：只要页面
-            // 有任何 user 消息就认为提交生效了。
+            // User messages can also be unmounted. This count only distinguishes
+            // a completely ineffective submission in the most conservative way.
             const currentUserId = getLastUserId(users);
             const hasNewUser = baseline.lastUserId != null
               ? !!currentUserId && currentUserId !== baseline.lastUserId
@@ -663,7 +660,7 @@
           if (block) throw new Error(`safety: ${block.reason}`);
           updateBanner(`处理中: ${msg.taskId?.slice?.(0, 8) ?? ""}…`, "#e67e22");
 
-          // 记录 baseline + inflight，供刷新恢复用
+          // Save the baseline and in-flight state for refresh recovery.
           const baseline = msg.baseline ?? captureBaseline();
           const inflight = {
             taskId: msg.taskId,
@@ -690,8 +687,8 @@
             writeInflight(inflight);
             updateBanner(`等待回复: ${msg.taskId?.slice?.(0, 8) ?? ""}…`, "#3498db");
 
-            // run-task 只做提交：注入 → click send → 记 baseline 到 sessionStorage → 立即返回。
-            // 后续 poll 由 SW 的 pending-reply 状态机负责（见 service-worker.js）。
+            // run-task only submits, records the baseline, and returns. The
+            // service worker owns all subsequent reply polling.
             sendResponse({ status: "submitted", baseline, submissionState: "accepted" });
           } catch (e) {
             console.warn("[relay content] run-task failed", e);
@@ -711,14 +708,14 @@
         console.warn("[relay content] error handling", msg.type, e);
         updateBanner(`错误: ${e.message.slice(0, 40)}`, "#e74c3c");
         setTimeout(() => updateBanner(`Relay: ${getSessionId().slice(0, 8)}…`, "#10a37f"), 5000);
-        // 不 clear inflight：让下次刷新有机会回捞
+        // Keep in-flight state so a later refresh can attempt recovery.
         sendResponse({ error: e.message });
       }
     })();
     return true;
   });
 
-  // 主动上报 session id 给 SW（首次加载 + URL 变化）
+  // Report the session ID to the service worker on load and URL changes.
   let lastReportedSid = "";
   function reportSid() {
     const sid = getSessionId();
@@ -730,7 +727,7 @@
   reportSid();
   setInterval(reportSid, 3000);
 
-  // 页面加载后 1.5s 尝试 inflight 恢复
+  // Attempt in-flight recovery shortly after page load.
   setTimeout(() => { void tryRecoverInflight(); }, 1500);
 
   console.log("[relay content] loaded, session=", getSessionId());

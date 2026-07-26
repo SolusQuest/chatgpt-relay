@@ -18,10 +18,10 @@ test("passes through valid UTF-8 CJK unchanged", () => {
 });
 
 test("recovers latin-1 mojibake back to CJK", () => {
-  // 模拟：UTF-8 字节 "帮我" 被当 Latin-1 读，然后再 UTF-8 编码
+  // Simulate UTF-8 bytes being decoded as Latin-1 and then encoded as UTF-8.
   const original = "帮我 review";
   const utf8Bytes = Buffer.from(original, "utf8"); // e5 b8 ae e6 88 91
-  const mojibake = utf8Bytes.toString("latin1");    // "å¸®æˆ‘ review" 形态
+  const mojibake = utf8Bytes.toString("latin1");    // The typical "å¸®æˆ‘ review" shape.
   const r = tryFixEncoding(mojibake);
   assert.equal(r.fixed, true, `note: ${r.note}`);
   assert.equal(r.method, "latin1-remap");
@@ -42,7 +42,7 @@ test("warns on U+FFFD replacement chars", () => {
 });
 
 test("passes through mixed English with occasional ?", () => {
-  // 英文正常出现的问号不应触发警告
+  // Question marks that occur naturally in English should not trigger a warning.
   const r = tryFixEncoding("Should we merge this? Or wait?");
   assert.equal(r.fixed, false);
   assert.equal(r.method, "none");
@@ -56,7 +56,7 @@ test("decodeSmart identifies valid UTF-8", () => {
 });
 
 test("decodeSmart recovers GBK bytes", () => {
-  // "帮我" 在 GBK 里是 b0 ef ce d2
+  // The two-character fixture is b0 ef ce d2 in GBK.
   const buf = Buffer.from([0xb0, 0xef, 0xce, 0xd2, 0x20, 0x72, 0x65, 0x76, 0x69, 0x65, 0x77]);
   const r = decodeSmart(buf);
   assert.equal(r.fixed, true);

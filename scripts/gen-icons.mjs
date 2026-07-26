@@ -1,5 +1,5 @@
 // scripts/gen-icons.mjs
-// 生成扩展纯色占位图标（16/32/128 PNG）。手写 PNG chunk，无外部依赖。
+// Generate solid-color placeholder extension icons (16/32/128 PNG) without dependencies.
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
@@ -33,7 +33,7 @@ function chunk(type, data) {
 }
 
 function makeIcon(size) {
-  // 底色 #10a37f，中心画一个白色"C"字缺口环
+  // Draw a white broken ring resembling a "C" on a #10a37f background.
   const bg = [16, 163, 127, 255];
   const fg = [255, 255, 255, 255];
   const cx = size / 2, cy = size / 2;

@@ -1,5 +1,5 @@
 // server/long-poll.ts
-// 帮助函数：给定一个"读快照"和"是否满足退出条件"，用 TaskStore 的事件做长轮询。
+// Long-poll helper driven by TaskStore events, a snapshot reader, and an exit predicate.
 import type { TaskStore, Task } from "./task-store.js";
 
 export interface LongPollTaskOptions {

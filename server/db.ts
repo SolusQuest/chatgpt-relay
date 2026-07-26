@@ -1,5 +1,5 @@
 // server/db.ts
-// 单进程 SQLite 封装。node:sqlite 在 Node 22+ 内置，同步 API 天然适合本地小工具。
+// Single-process SQLite wrapper. The synchronous Node 22+ API suits this local tool.
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -38,11 +38,11 @@ CREATE INDEX IF NOT EXISTS idx_tasks_session_status ON tasks(session, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_expires        ON tasks(expires_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_submitted_at   ON tasks(submitted_at);
 
--- 幂等键（同 session 内 client_request_id 唯一）
+-- Idempotency key: client_request_id is unique within a session.
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_tasks_cri
   ON tasks(session, client_request_id) WHERE client_request_id IS NOT NULL;
 
--- 同 session 最多一个 in_progress（通过 partial unique 强制）
+-- Enforce at most one in-progress task per session with a partial unique index.
 CREATE UNIQUE INDEX IF NOT EXISTS uniq_tasks_active
   ON tasks(session) WHERE status = 'in_progress';
 

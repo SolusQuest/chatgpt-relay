@@ -1,5 +1,5 @@
 // test/v1-api.test.ts
-// v1 HTTP API 集成测试：真实 Express app + fetch。
+// v1 HTTP API integration tests with the real Express app and fetch.
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -264,10 +264,10 @@ test("POST /v1/tasks auto-fixes latin-1 mojibake", async () => {
   const r = await post("/v1/tasks", { session: "sEnc1", text: mojibake });
   assert.equal(r.status, 201);
   assert.ok(r.json.encodingFixed, `expected encodingFixed, got ${JSON.stringify(r.json)}`);
-  // 服务端应存的是修好的
+  // The server should persist the repaired text.
   const taskId = r.json.taskId;
   const t = await get(`/v1/tasks/${taskId}?include_text=1`);
-  // include_text 需要 include_text=1，但 GET /:id 默认包含 text
+  // Lists require include_text=1, while GET /:id includes text by default.
   assert.equal(t.json.text, original);
 });
 

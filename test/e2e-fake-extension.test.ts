@@ -1,5 +1,5 @@
 // test/e2e-fake-extension.test.ts
-// 端到端：起 server + fake 扩展 + agent-client review()，验证完整链路。
+// End-to-end coverage with a server, fake extension, and agent-client review().
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -17,7 +17,7 @@ let baseUrl = "";
 let dataDir = "";
 let pendingDir = "";
 
-/** Fake 扩展：轮询 /internal/next_task → 假装 ChatGPT 回复 → POST complete */
+/** Fake extension: poll /internal/next_task, simulate ChatGPT, then POST completion. */
 function startFakeExtension(sessionId: string, replier: (prompt: string) => string | Promise<string>) {
   let stopped = false;
   (async () => {
@@ -86,22 +86,22 @@ test("review round-trip via fake extension", async () => {
 test("resume returns already-done task from previous crash", async () => {
   const stopExt = startFakeExtension("e2e-2", (p) => `late: ${p}`);
   try {
-    // 用 wait:false 提交 → 拿到 taskId 并已写 pending
+    // Submit with wait:false to get a taskId and persist a pending record.
     const submitted = await review("resume me", {
       session: "e2e-2",
       baseUrl,
       wait: false,
     });
     assert.ok(!("reply" in submitted));
-    // 等 fake extension 完成
+    // Wait for the fake extension to complete the task.
     await new Promise((r) => setTimeout(r, 500));
-    // 现在 resume 应能看到 done
+    // Resume should now observe the completed task.
     const rows = await resumePending(baseUrl);
     const row = rows.find((r) => r.record.taskId === submitted.taskId);
     assert.ok(row);
     assert.equal(row!.task?.status, "done");
     assert.equal(row!.task?.reply, "late: resume me");
-    // pending 文件应被清理
+    // The pending record should be removed.
     assert.ok(!listPending().some((p) => p.taskId === submitted.taskId));
   } finally {
     stopExt();
@@ -120,7 +120,7 @@ test("pause via session_status stops new tasks", async () => {
   } catch (err) {
     assert.match((err as Error).message, /paused/i);
   }
-  // 清理 pending（review 提交阶段就失败了，不会有 pending 文件；防止 leak）
+  // Clean pending state defensively after a submission-stage failure.
   for (const p of listPending()) clearPending(p.taskId);
 });
 
@@ -154,14 +154,14 @@ test("two sessions run in parallel", async () => {
 test("fake extension keeps long-polling on empty queue and picks up task later", async () => {
   const stop = startFakeExtension("late-1", (p) => `late-echo: ${p}`);
   try {
-    // 让 extension 在空队列上跑一段，确认它不会退出
+    // Keep the extension polling an empty queue and confirm that it stays alive.
     await new Promise((r) => setTimeout(r, 300));
     const start = Date.now();
     const r = await review("late prompt", { session: "late-1", baseUrl });
     const elapsed = Date.now() - start;
     assert.equal(r.status, "done");
     assert.equal(r.reply, "late-echo: late prompt");
-    // 正常情况下应在 long-poll 周期内被领取，不应出现分钟级延迟
+    // It should be claimed within one long-poll cycle, not after a minute-scale delay.
     assert.ok(elapsed < 3000, `task took too long: ${elapsed}ms`);
   } finally {
     stop();
@@ -176,10 +176,10 @@ test("fake extension recovers after restart with queued task", async () => {
       baseUrl,
       wait: false,
     });
-    // 模拟 SW 崩溃/重启：停止 extension，任务大概率还在 queued
+    // Simulate a service-worker restart while the task is probably still queued.
     stop();
     await new Promise((r) => setTimeout(r, 400));
-    // 重新启动 extension，相当于 SW 被 alarm 唤醒后恢复
+    // Restarting the extension simulates an alarm waking the service worker.
     stop = startFakeExtension("restart-1", (p) => `restarted: ${p}`);
     let task = null;
     for (let i = 0; i < 50; i++) {
@@ -311,7 +311,7 @@ test("cancel in-progress task", async () => {
 });
 
 test("task expires when timeout is too short", async () => {
-  // 不启动 fake extension，任务会留在 queued，timeout 到后自动 expired
+  // Without the fake extension, the queued task should eventually expire.
   const submitted = await review("expire me", {
     session: "expire-test",
     baseUrl,
@@ -319,7 +319,7 @@ test("task expires when timeout is too short", async () => {
     taskTimeoutMs: 1000,
   });
   await new Promise((r) => setTimeout(r, 2500));
-  // 维护任务默认 1s 跑一次，给足时间窗口清理过期 queued 任务
+  // Give the maintenance loop enough time to remove the expired queued task.
   await new Promise((r) => setTimeout(r, 3000));
   const task = await getTask(submitted.taskId, baseUrl);
   assert.equal(task?.status, "expired");

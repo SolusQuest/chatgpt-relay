@@ -1,5 +1,5 @@
 // server/task-store.ts
-// Task 状态机 + session 状态。SQLite 落盘，进程重启后队列/状态保留。
+// Task and session state machines persisted in SQLite across relay restarts.
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import type { Db } from "./db.js";
@@ -51,7 +51,7 @@ export interface SessionRow {
   pausedAt: number | null;
 }
 
-// SQLite 行类型（snake_case）
+// SQLite row shape in snake_case.
 interface TaskRowRaw {
   id: string;
   session: string;
@@ -198,7 +198,7 @@ export class TaskStore {
       );
     }
 
-    // 幂等
+    // Idempotency.
     if (input.clientRequestId) {
       const existing = this.db
         .prepare(
@@ -208,7 +208,7 @@ export class TaskStore {
       if (existing) return rowToTask(existing);
     }
 
-    // 队列容量
+    // Queue capacity.
     const queued = this.db
       .prepare(`SELECT COUNT(*) AS c FROM tasks WHERE session = ? AND status = 'queued'`)
       .get(input.session) as { c: number };
@@ -291,9 +291,9 @@ export class TaskStore {
     return rows.map(rowToTask);
   }
 
-  // 原子取下一个 queued task 并置为 in_progress。同 session 已有 in_progress 时返回 null。
+  // Atomically claim the next queued task unless the session already has one in progress.
   claimNextTask(sessionId: string, now = Date.now()): Task | null {
-    // 使用事务保证原子性
+    // Use a transaction to preserve atomicity.
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const active = this.db
@@ -471,9 +471,9 @@ export class TaskStore {
     return task;
   }
 
-  // 维护：过期 queued / in_progress 任务
+  // Maintenance for expired queued and in-progress tasks.
   expireDueTasks(now = Date.now()): number {
-    // Queued 且已过期 → expired
+    // Expired queued tasks become expired.
     const q = this.db
       .prepare(
         `UPDATE tasks
@@ -482,7 +482,7 @@ export class TaskStore {
            WHERE status = 'queued' AND expires_at <= ?`,
       )
       .run(now, now);
-    // In-progress 且过期太久（超出 grace） → failed
+    // In-progress tasks that exceed the grace period become failed.
     const grace = this.config.activeTaskGraceMs;
     const p = this.db
       .prepare(
@@ -497,7 +497,7 @@ export class TaskStore {
     return total;
   }
 
-  // 心跳丢失 → 释放 in_progress task
+  // Release in-progress tasks after session heartbeat loss.
   releaseHeartbeatLostTasks(now = Date.now()): number {
     const stale = this.config.heartbeatStaleMs;
     const staleSessions = this.db
@@ -564,7 +564,7 @@ export class TaskStore {
              WHERE id = ?`,
         )
         .run(reason, now, now, now, id);
-      // 该 session 所有 queued / in_progress 任务全部失败
+      // Fail every queued and in-progress task in the session.
       this.db
         .prepare(
           `UPDATE tasks
@@ -609,7 +609,7 @@ export class TaskStore {
   }
 
   private emitBulkChange(): void {
-    // 简单起见，通知所有 listener 重新查询
+    // Notify every listener to query again.
     this.emitter.emit("bulk");
     for (const ev of this.emitter.eventNames()) {
       if (typeof ev === "string" && ev.startsWith("session:")) {

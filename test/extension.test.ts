@@ -1,5 +1,5 @@
 // test/extension.test.ts
-// 扩展静态验证：manifest.json 合法、关键 JS 文件语法无错、必需字段存在。
+// Static extension validation: manifest shape, JavaScript syntax, and required fields.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";

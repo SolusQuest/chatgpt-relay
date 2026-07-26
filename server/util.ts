@@ -1,5 +1,5 @@
 // server/util.ts
-// 小工具：sanitize session id / 输入校验。
+// Small helpers for session ID sanitization and input validation.
 export function isValidSessionId(v: unknown): v is string {
   return typeof v === "string" && v.length > 0 && v.length <= 128;
 }

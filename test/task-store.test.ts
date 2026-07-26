@@ -1,5 +1,5 @@
 // test/task-store.test.ts
-// Task 状态机单元测试。使用内存数据库，覆盖创建/claim/complete/cancel/expire/幂等/队列容量。
+// Task-state-machine tests using an in-memory database.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
@@ -28,7 +28,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
 
 function makeStore(overrides: Partial<Config> = {}): TaskStore {
   const db = new DatabaseSync(":memory:");
-  // 复用 db.ts 中的 schema：为了避免测试引导入 db.ts 时创建文件，这里手工执行 schema。
+  // Reproduce the db.ts schema here so importing it cannot create a test file.
   db.exec(`
     CREATE TABLE tasks (
       id TEXT PRIMARY KEY, session TEXT NOT NULL, client_request_id TEXT,
@@ -84,7 +84,7 @@ test("claimNextTask picks oldest queued and marks in_progress", () => {
   const claimed = store.claimNextTask("s1", 300);
   assert.equal(claimed?.id, a.id);
   assert.equal(claimed?.status, "in_progress");
-  // b 仍 queued
+  // Task b remains queued.
   assert.equal(store.getTask(b.id)?.status, "queued");
 });
 
@@ -213,7 +213,7 @@ test("idempotent clientRequestId returns same task", () => {
   const t1 = store.createTask({ session: "s1", text: "hi", clientRequestId: "cri-1" });
   const t2 = store.createTask({ session: "s1", text: "hi again", clientRequestId: "cri-1" });
   assert.equal(t1.id, t2.id);
-  assert.equal(t2.text, "hi"); // 保留首次内容
+  assert.equal(t2.text, "hi"); // Preserve the original content.
 });
 
 test("queue full throws", () => {
@@ -282,7 +282,7 @@ test("requeueTask returns task to queued", () => {
   const r = store.requeueTask(t.id);
   assert.equal(r.status, "queued");
   assert.equal(r.requeueCount, 1);
-  // 可以再次 claim
+  // The task can be claimed again.
   const c = store.claimNextTask("s1");
   assert.equal(c?.id, t.id);
 });

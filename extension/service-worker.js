@@ -1,6 +1,6 @@
 // extension/service-worker.js
-// MV3 Service Worker: 驱动轮询、HTTP、心跳、消息桥接、恢复。
-// SW 会被 Chrome 主动休眠，全部长期状态放 chrome.storage.local。
+// MV3 service worker for polling, HTTP, heartbeat, message bridging, and recovery.
+// Chrome may suspend it at any time, so durable state lives in chrome.storage.local.
 
 import {
   DEFAULT_BASE,
@@ -19,13 +19,13 @@ import {
   PAGE_STATE_SENDMSG_TIMEOUT_MS,
 } from "./lib/config.js";
 
-// 开发调试：把 DEBUG 改成 true 或在 popup 里设置 window.__gptRelayDebug = true
+// Development debugging: set DEBUG to true or window.__gptRelayDebug in the popup.
 const DEBUG = false;
 const dlog = (...args) => { if (DEBUG) console.log(...args); };
 
-// per-session 持续任务分发 loop
+// Continuous per-session task dispatch loops.
 const dispatchLoops = new Map(); // session -> { tabId, controller }
-// taskId -> 等待该任务完成的 deferred
+// taskId to deferred completion waiter.
 const pendingCompletion = new Map();
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -71,7 +71,7 @@ async function httpJson(method, url, body, timeoutMs = 30_000, signal) {
   }
 }
 
-// 唤醒被 Chrome 丢弃的 tab（后台内存回收会把 tab discard，content-script 随之消失）
+// Wake a tab discarded by Chrome background memory reclamation.
 async function reviveDiscardedTab(tab) {
   if (!tab.id) return false;
   if (!tab.discarded) return true;
@@ -98,10 +98,10 @@ async function listChatGPTTabs() {
 }
 
 async function getTabSession(tabId, opts = {}) {
-  // 缓存命中直接返回（后台 tab 里 sendMessage 会被节流甚至阻塞）
+  // Return cached state because sendMessage can be throttled in background tabs.
   const cached = tabSessionCache.get(tabId);
   if (cached && !opts.forceFresh) return cached;
-  // 冷路径：真的问 content-script
+  // Cold path: query the content script.
   try {
     const r = await Promise.race([
       chrome.tabs.sendMessage(tabId, { type: "get-session-id" }),
@@ -117,9 +117,8 @@ async function getTabSession(tabId, opts = {}) {
   }
 }
 
-// ── tab -> session 缓存 ──
-// SW 会休眠，重启时缓存丢失；但 content-script 每 3s 会 session-hello 重新报，
-// 所以下一轮 alarm 时就能重建。
+// Tab-to-session cache. Suspension clears memory, but content scripts report
+// session-hello periodically so the next alarm can rebuild the mapping.
 const tabSessionCache = new Map();
 
 async function rememberTabSession(tabId, session) {
@@ -163,14 +162,14 @@ async function getInflight(session) {
   return inflight[session] ?? null;
 }
 
-// ── offline 标记 ──
+// Offline marker.
 const offlineSessions = new Set();
 
-// 通知 content-script 清 sessionStorage 里的 inflight 并复位 banner。
-// task 完成 / 明确失败 / late-reply 窗口结束时走这里，避免 banner 卡住。
+// Tell the content script to clear sessionStorage in-flight state and reset its
+// banner after completion, definitive failure, or late-reply-window expiry.
 async function notifyTabCleared(tabId) {
   if (!tabId) return;
-  // clear-inflight handler 里会同步复位 banner 到 "Relay: <sess8>…"
+  // The clear-inflight handler also resets the banner to "Relay: <session>...".
   try {
     await sendTabMessage(
       tabId,
@@ -256,8 +255,8 @@ async function setClaimPendingReply(claim, session, tabId, baseline, ackState) {
 }
 
 // ── per-session dispatch loop ──
-// 每个 session 独立维护一个持续 long-poll：无任务时立即重新 long-poll，
-// 有任务时执行 run-task，等待任务完成后再继续 long-poll。
+// Each session maintains a continuous long poll. Empty polls restart
+// immediately; claimed work blocks the next poll until task completion.
 function stopDispatchLoop(session) {
   const loop = dispatchLoops.get(session);
   if (!loop) return;
@@ -269,8 +268,8 @@ function stopDispatchLoop(session) {
 async function startDispatchLoop(session, tabId) {
   const existing = dispatchLoops.get(session);
   if (existing) {
-    if (existing.tabId === tabId) return; // 已经在为这个 tab 跑
-    // tab 变了：停掉旧的，用新的重新跑
+    if (existing.tabId === tabId) return; // This tab already has a loop.
+    // The tab changed; stop the old loop and start one for the replacement.
     stopDispatchLoop(session);
   }
   const controller = new AbortController();
@@ -303,7 +302,7 @@ async function startDispatchLoop(session, tabId) {
         break;
       }
 
-      // safety / pause 检查：与旧 handleTab 行为保持一致
+      // Preserve the previous handleTab safety and pause checks.
       let safety = null;
       try {
         const r = await sendTabMessage(
@@ -325,8 +324,8 @@ async function startDispatchLoop(session, tabId) {
         paused: false,
       }).catch(() => {});
 
-      // 页面仍在加载/水合，或仍在生成上一轮（包括已在 server hard-timeout
-      // 的晚到回复）时，不 claim 新任务，避免 prompt 被 React 水合覆盖。
+      // Do not claim while the page hydrates or finishes prior generation,
+      // including a late reply, because React may overwrite a new prompt.
       try {
         const state = await getPageState(tabId);
         if (!state.ready || state.generating) {
@@ -366,7 +365,7 @@ async function startDispatchLoop(session, tabId) {
       }
 
       if (!claim?.task) {
-        // long-poll 超时，立即继续下一轮
+        // Restart immediately after an empty long poll.
         continue;
       }
 
@@ -450,7 +449,7 @@ async function startDispatchLoop(session, tabId) {
           throw new Error(runRes.error);
         }
         if (runRes?.status !== "submitted") {
-          // content-script 老版本兼容
+          // Compatibility with older content-script versions.
           if (typeof runRes?.reply === "string") {
             await httpJson("POST", `/internal/tasks/${taskId}/complete`, { text: runRes.reply });
             await clearInflight(session);
@@ -469,7 +468,7 @@ async function startDispatchLoop(session, tabId) {
           "acknowledged",
         );
 
-        // 等待当前任务完成（done/failed/recover/requeue 都会 deletePendingReply）
+        // Wait until completion, recovery, or requeue removes the pending reply.
         await waitForPendingReply(taskId, controller.signal);
         console.log("[relay sw] task completed", taskId.slice(0, 8), "completionAt", Date.now());
       } catch (e) {
@@ -522,19 +521,18 @@ async function waitForPendingReply(taskId, signal) {
 }
 
 // ── pending-reply state machine ──
-// SW 主动 poll 而非 content-script 长期 await。原因：
-//   1) Chrome 冻结后台 tab 的 MutationObserver / setInterval；
-//   2) 状态在 SW 一处，页面 F5 或扩展 reload 都能自愈；
-//   3) SW 每次 alarm tick 通过 chrome.tabs.sendMessage(poll-reply) 唤醒 content
-//      script 做单次同步 DOM 快照。
+// The service worker actively polls instead of keeping a content-script wait:
+//   1) Chrome freezes MutationObserver and setInterval in background tabs.
+//   2) Central worker state recovers from page or extension restarts.
+//   3) Each poll-reply message requests one synchronous DOM snapshot.
 //
-// 记录形如：
+// Pending record shape:
 //   {
 //     session, tabId, taskId, baseline,
 //     submittedAt, lastPollAt,
-//     notStartedCount,          // 连续 "not-started" 次数
-//     stableSampleCount,        // 连续文本相同次数（reply-ready 时用）
-//     lastSampleText,           // 上次采样到的文本
+//     notStartedCount,          // Consecutive "not-started" samples.
+//     stableSampleCount,        // Consecutive identical reply-ready samples.
+//     lastSampleText,           // Text from the previous sample.
 //   }
 async function listPendingReplies() {
   return await getStorage(STORAGE_KEYS.PENDING_REPLIES, {});
@@ -543,7 +541,7 @@ async function setPendingReply(taskId, rec) {
   const map = await listPendingReplies();
   map[taskId] = rec;
   await setStorage(STORAGE_KEYS.PENDING_REPLIES, map);
-  // 确保 completion deferred 存在，供 dispatch loop 等待
+  // Ensure a completion deferred exists for the dispatch loop.
   if (!pendingCompletion.has(taskId)) {
     const deferred = {};
     deferred.promise = new Promise((resolve, reject) => {
@@ -552,7 +550,7 @@ async function setPendingReply(taskId, rec) {
     });
     pendingCompletion.set(taskId, deferred);
   }
-  // 触发快速采样循环（非阻塞，若已在跑就是 no-op）
+  // Trigger the non-blocking fast sampler; this is a no-op if already running.
   void scheduleFastPending();
 }
 async function deletePendingReply(taskId) {
@@ -590,8 +588,9 @@ async function pollPendingReplies() {
 async function pollOnePending(taskId, rec) {
   const now = Date.now();
   dlog("[relay sw] pollOnePending", taskId.slice(0,8), "tab=", rec.tabId, "session=", rec.session?.slice?.(0,8), "notStarted=", rec.notStartedCount, "stable=", rec.stableSampleCount);
-  // server hard-timeout 后继续占用 session 并采样一段有界的 late-reply 窗口。
-  // 这样页面最终完成时仍能保存结论，同时不会把下一任务发进仍在生成的页面。
+  // Keep the session occupied during a bounded late-reply window after the
+  // server hard timeout. This preserves eventual output without dispatching
+  // another prompt into a page that is still generating.
   const hardDeadline = rec.completionDeadlineAt ??
     ((rec.expiresAt ?? rec.submittedAt + POLL_HARD_TIMEOUT_MS) + 60_000);
   const lateDeadline = rec.lateReplyDeadlineAt ??
@@ -609,7 +608,7 @@ async function pollOnePending(taskId, rec) {
     }
   }
 
-  // 定位 tab
+  // Locate the tab.
   let tabInfo = null;
   try { tabInfo = await chrome.tabs.get(rec.tabId); } catch { tabInfo = null; }
   if (!tabInfo) {
@@ -622,7 +621,7 @@ async function pollOnePending(taskId, rec) {
     if (!ok) return; // wait next tick
   }
 
-  // 调 content-script 单次快照
+  // Request one content-script snapshot.
   let snap;
   try {
     snap = await sendTabMessage(
@@ -633,7 +632,7 @@ async function pollOnePending(taskId, rec) {
     );
   } catch (e) {
     console.warn("[relay sw] poll-reply sendMessage failed", taskId, e.message);
-    // 一次失败不结算；下次 alarm 再试。
+    // One sampling failure is non-terminal; the next alarm retries.
     rec.lastPollAt = now;
     await setPendingReply(taskId, rec);
     return;
@@ -652,7 +651,7 @@ async function pollOnePending(taskId, rec) {
     await httpJson("POST", `/internal/sessions/${encodeURIComponent(rec.session)}/status`, {
       paused: true, reason: snap.reason ?? "safety",
     }).catch(() => {});
-    // task 判失败，让 agent 感知
+    // Fail the task so the agent can observe the problem.
     await failPending(taskId, rec, `safety: ${snap.reason ?? "unknown"}`);
     return;
   }
@@ -693,7 +692,7 @@ async function pollOnePending(taskId, rec) {
   }
 
   if (snap.status === "generating") {
-    // 进入生成中说明提交成功；重置 not-started 计数
+    // Generation confirms submission, so reset the not-started counter.
     rec.notStartedCount = 0;
     rec.wasGenerating = true;
     rec.stoppedNoReplyCount = 0;
@@ -708,7 +707,7 @@ async function pollOnePending(taskId, rec) {
   }
 
   if (snap.status === "posted-no-reply-yet") {
-    // 用户已发出去但还没生成
+    // The user message was submitted but generation has not started.
     rec.notStartedCount = 0;
     if (rec.stopRequestedAt || rec.wasGenerating) {
       rec.stoppedNoReplyCount = (rec.stoppedNoReplyCount ?? 0) + 1;
@@ -741,7 +740,7 @@ async function pollOnePending(taskId, rec) {
     return;
   }
 
-  // 未知 status：保守回写
+  // Persist unknown status conservatively.
   await setPendingReply(taskId, rec);
 }
 
@@ -793,11 +792,9 @@ async function requeuePending(taskId, rec) {
   await notifyTabCleared(rec.tabId);
 }
 
-// ── 快速采样调度 ──
-// chrome.alarms 最小周期 1 分钟；对已有 pending 任务这个粒度太粗（用户等 ~60s
-// 才能拿到已经生成完的 reply）。pending 非空时用 setTimeout 快速循环
-// (FAST_POLL_MS) 加速采样，pending 清空后自然退出，靠 alarm + heartbeat 兜底
-// 保证 SW 不被休眠。
+// Fast sampling scheduler. Chrome alarms have a one-minute minimum, which is
+// too coarse for active replies. While pending work exists, FAST_POLL_MS
+// setTimeout recursion samples quickly. Alarm and heartbeat provide recovery.
 const FAST_POLL_MS = 2000;
 let fastPollScheduled = false;
 async function scheduleFastPending() {
@@ -817,8 +814,7 @@ async function scheduleFastPending() {
   setTimeout(tick, FAST_POLL_MS);
 }
 
-// ── 轮询 ──
-// handleTab 已重构为 per-session 持续 long-poll 的入口。
+// Polling entry point for continuous per-session long polls.
 async function handleTab(tabId) {
   const session = await getTabSession(tabId);
   if (!session) {
@@ -840,7 +836,7 @@ async function heartbeatOnce() {
   }
 }
 
-// ── SW 唤醒时扫孤儿 inflight（page 已刷新但 SW 侧还残留） ──
+// Reconcile orphaned in-flight state whenever the service worker wakes.
 async function reconcileInflight() {
   const inflight = await getStorage(STORAGE_KEYS.INFLIGHT, {});
   if (Object.keys(inflight).length === 0) return;
@@ -851,15 +847,15 @@ async function reconcileInflight() {
     const sid = await getTabSession(t.id);
     if (sid) liveSessions.add(sid);
   }
-  // 1) 该 session 的 tab 消失了 → 清理 inflight
+  // 1) Remove in-flight state when the session tab is gone.
   for (const s of Object.keys(inflight)) {
     if (!liveSessions.has(s)) {
       console.log("[relay sw] reconcile: dropping inflight for missing session", s.slice(0, 8));
       await clearInflight(s);
     }
   }
-  // 2) terminal task 通常清理；可回收的 timeout failure 在 late-reply 窗口内保留，
-  // 继续阻塞该 session 的下一次 dispatch。
+  // 2) Usually remove terminal tasks. Keep recoverable timeout failures during
+  // the late-reply window so they continue blocking the next dispatch.
   const still = await getStorage(STORAGE_KEYS.INFLIGHT, {});
   for (const [session, entry] of Object.entries(still)) {
     if (!entry?.taskId) continue;
@@ -920,7 +916,7 @@ async function reconcileInflight() {
       }
       if (t && ["done", "failed", "cancelled", "expired"].includes(t.status) && !keepForLate) {
         console.log("[relay sw] reconcile: task", entry.taskId.slice(0, 8), "already", t.status, "→ clearing inflight");
-        // 找到对应 tabId（优先从 pendingReplies 拿，回退到反查 tab_session_map）
+        // Find tabId from pending replies, then fall back to the session map.
         let tabId = null;
         const pmap = await listPendingReplies();
         if (pmap[entry.taskId]?.tabId) tabId = pmap[entry.taskId].tabId;
@@ -934,7 +930,7 @@ async function reconcileInflight() {
        await notifyTabCleared(tabId);
       }
     } catch (e) {
-      // server 不可达就算了，下一轮再试
+      // Ignore relay unavailability and retry during the next cycle.
     }
   }
 }
@@ -954,7 +950,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === POLL_ALARM_NAME) {
     void reconcileInflight();
     void pollPendingReplies();
-    // alarm 仅作为 SW 被唤醒后的恢复机制：恢复每个 session 的 dispatch loop
+    // The alarm is a recovery mechanism that restarts every session dispatch loop.
     void restoreDispatchLoops();
   } else if (alarm.name === HEARTBEAT_ALARM_NAME) {
     void heartbeatOnce();
@@ -965,7 +961,7 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => { void forgetTabSession(tabId); });
 chrome.tabs.onUpdated.addListener((tabId, info) => {
-  // URL 变化时清缓存，让 content-script 重新报 session id
+  // Clear cached state after URL changes so the content script reports again.
   if (info.url) void forgetTabSession(tabId);
 });
 
@@ -977,7 +973,7 @@ void reconcileInflight();
 void pollPendingReplies();
 void restoreDispatchLoops();
 
-// ── 消息桥接 ──
+// Message bridge.
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const type = msg?.type;
 
@@ -1024,7 +1020,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (type === "network-reload") {
-    // Content script 即将 reload；把此 session 从 inflight 摘除避免误 recover
+    // The content script will reload; remove the session to prevent false recovery.
     if (sender.tab?.id) {
       (async () => {
         const sid = await getTabSession(sender.tab.id);
@@ -1077,7 +1073,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           replyProgressReported: existing?.replyProgressReported ?? false,
         });
         await markInflight(sid, msg.taskId);
-        // 立即触发一次采样
+        // Trigger one sample immediately.
         void pollPendingReplies();
         startDispatchLoop(sid, sender.tab.id).catch(() => {});
         sendResponse({ status: "ok" });
@@ -1115,7 +1111,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
       try {
         const r = await httpJson("POST", `/internal/tasks/${msg.taskId}/recover`, { text: msg.text });
-        // 找到该 session 并清 inflight
+        // Find the session and clear its in-flight state.
         if (sender.tab?.id) {
           const sid = await getTabSession(sender.tab.id);
           if (sid) await clearInflight(sid);

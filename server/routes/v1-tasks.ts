@@ -1,5 +1,5 @@
 // server/routes/v1-tasks.ts
-// 对外 API: 提交任务 / 查询 / 取消 / 列表。
+// Public API for task submission, lookup, cancellation, and listing.
 import { Router } from "express";
 import type { Request, Response } from "express";
 import type { TaskStore, Task, TaskStatus } from "../task-store.js";
@@ -71,7 +71,7 @@ export function toTaskView(store: TaskStore, t: Task, includeText = false): Task
 export function createV1TasksRouter(store: TaskStore): Router {
   const router = Router();
 
-  // 创建任务
+  // Create a task.
   router.post("/tasks", (req: Request, res: Response) => {
     const body = (req.body ?? {}) as {
       session?: unknown;
@@ -107,11 +107,11 @@ export function createV1TasksRouter(store: TaskStore): Router {
     }
   });
 
-  // 查询单个任务，支持 ?wait=毫秒 的长轮询直到进入终态
+  // Read one task and optionally long-poll until it becomes terminal.
   router.get("/tasks/:id", async (req: Request, res: Response) => {
     const id = String(req.params.id ?? "");
     const wait = asPositiveInt(req.query.wait) ?? 0;
-    const capped = Math.min(wait, 60_000); // 上限 60s
+    const capped = Math.min(wait, 60_000); // Cap at 60 seconds.
     const task = await longPollTask(store, {
       taskId: id,
       timeoutMs: capped,
@@ -121,7 +121,7 @@ export function createV1TasksRouter(store: TaskStore): Router {
     return res.json(toTaskView(store, task, true));
   });
 
-  // 取消
+  // Cancel a task.
   router.delete("/tasks/:id", (req: Request, res: Response) => {
     const id = String(req.params.id ?? "");
     try {
@@ -132,7 +132,7 @@ export function createV1TasksRouter(store: TaskStore): Router {
     }
   });
 
-  // 列表
+  // List tasks.
   router.get("/tasks", (req: Request, res: Response) => {
     const session =
       typeof req.query.session === "string" ? req.query.session : undefined;
