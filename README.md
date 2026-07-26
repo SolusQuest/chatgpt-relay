@@ -25,6 +25,8 @@ cgcon-v3/
 ├── extension/       Chrome MV3 扩展
 ├── scripts/         杂项脚本
 ├── workflows/       可组合的 agent 多阶段执行流程
+├── agent-instructions.md  agent review / discussion 操作规范
+├── api.md           HTTP API 与 task lifecycle 参考
 └── test/            单元 + 集成 + e2e 测试
 ```
 
@@ -98,7 +100,7 @@ gpt-relay review --session <id> --stdin         # 提交 review
 | POST   | /v1/sessions/:id/resume             | 恢复                            |
 | GET    | /health                             | 健康检查                        |
 
-扩展端专用 `/internal/*` 见 `agent-instructions.md`。
+完整 public API、task lifecycle 和扩展端专用 `/internal/*` 见 `api.md`。
 
 ## 环境变量
 
@@ -118,7 +120,7 @@ gpt-relay review --session <id> --stdin         # 提交 review
 ## 测试
 
 ```bash
-npm test                # 94 个测试（单元 + migration + HTTP 集成 + e2e + skill + 扩展静态）
+npm test                # 单元 + migration + HTTP/CLI 集成 + e2e + 扩展测试
 npm run typecheck       # tsc --noEmit
 ```
 
@@ -147,7 +149,8 @@ rm ~/.gpt-relay/gpt-relay.db*         # 全清
 
 ## 相关文档
 
-- `agent-instructions.md` — 给 agent 直接看的 API 说明
+- `agent-instructions.md` — 给 workflow agent 直接看的 review / discussion 操作规范
+- `api.md` — HTTP API、task lifecycle、timeout 和 extension-internal endpoint
 - `workflows/` — 多步 orchestration 模板（例如 issue → PR 全链路）
 - `extension/README.md` — 扩展加载 + 恢复机制细节
 

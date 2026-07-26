@@ -15,6 +15,7 @@
     "extension",
     "workflows",
     "agent-instructions.md",
+    "api.md",
     "README.md",
     "tsconfig.json"
   ],

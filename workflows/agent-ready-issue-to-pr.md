@@ -2,7 +2,7 @@
 
 **References**:
 
-- Relay API + usage patterns: [`agent-instructions.md`](../agent-instructions.md)
+- Relay agent usage patterns: [`agent-instructions.md`](../agent-instructions.md)
 - Rough-issue refinement workflow: [`issue-to-pr.md`](./issue-to-pr.md)
 
 ---

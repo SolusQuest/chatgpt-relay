@@ -2,7 +2,7 @@
 
 **References**:
 
-- Relay API + usage patterns: [`agent-instructions.md`](../agent-instructions.md)
+- Relay agent usage patterns: [`agent-instructions.md`](../agent-instructions.md)
 - Shared implementation and PR workflow: [`agent-ready-issue-to-pr.md`](./agent-ready-issue-to-pr.md)
 
 ---

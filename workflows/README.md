@@ -1,14 +1,14 @@
 # Workflows
 
-Multi-step orchestration templates that use gpt-relay as one of the moving parts. A workflow may compose another workflow for shared downstream phases; the entry workflow states exactly where the handoff occurs. Relay mechanics remain in `agent-instructions.md`, and execution uses the root `gpt-relay` CLI or its HTTP API.
+Multi-step orchestration templates that use gpt-relay as one of the moving parts. A workflow may compose another workflow for shared downstream phases; the entry workflow states exactly where the handoff occurs. Agent-facing relay mechanics remain in `agent-instructions.md`; protocol details remain in `api.md`.
 
 ## How to use
 
-- **Agent needs relay only**: send `agent-instructions.md`. The workflow files are unnecessary for one-shot review or discussion.
+- **Agent needs relay only**: send `agent-instructions.md`. The workflow files and `api.md` are unnecessary for ordinary one-shot review or discussion.
 - **Agent needs a specific multi-step process**: send the entry workflow. The agent must read `agent-instructions.md` for relay mechanics and follow any explicitly linked downstream workflow at the stated phase boundary.
 - **New agent, fresh session**: provide the entry workflow and repository access so its references can be resolved.
 
-Workflows are **not** required to use relay. When they do, they explain the purpose and expectations; the agent is responsible for the mechanics via `agent-instructions.md`.
+Workflows are **not** required to use relay. When they do, they explain the purpose and expectations; the agent follows `agent-instructions.md` and reads `api.md` only when protocol-level detail is needed.
 
 ## Available workflows
 
