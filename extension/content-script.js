@@ -42,12 +42,12 @@
   };
 
   const SAFETY_PATTERNS = [
-    { reason: "页面要求人机验证", pattern: /captcha|verify (that )?(you['\u2019]?re|you are) human|verify you are human|human verification|请验证|人机验证|验证码/i },
-    { reason: "页面提示异常活动", pattern: /unusual activity|suspicious activity|异常活动|可疑活动/i },
-    { reason: "页面提示请求过多", pattern: /too many requests|request limit|rate limit|频率限制|请求过多/i },
-    { reason: "页面提示使用限制", pattern: /message cap|usage limit|(you['\u2019]?ve|you have) reached (the )?(current )?(usage )?limit|reached.*limit|使用上限|消息上限|达到.*限制/i },
-    { reason: "页面提示稍后再试", pattern: /try again later|please try again later|稍后再试|请稍后/i },
-    { reason: "页面提示账号或访问受限", pattern: /access denied|account.*disabled|account.*deactivated|访问被拒绝|账号.*停用|账户.*停用/i },
+    { reason: "Human verification required", pattern: /captcha|verify (that )?(you['\u2019]?re|you are) human|verify you are human|human verification|请验证|人机验证|验证码/i },
+    { reason: "Unusual activity warning detected", pattern: /unusual activity|suspicious activity|异常活动|可疑活动/i },
+    { reason: "Too many requests warning detected", pattern: /too many requests|request limit|rate limit|频率限制|请求过多/i },
+    { reason: "Usage limit warning detected", pattern: /message cap|usage limit|(you['\u2019]?ve|you have) reached (the )?(current )?(usage )?limit|reached.*limit|使用上限|消息上限|达到.*限制/i },
+    { reason: "Try again later warning detected", pattern: /try again later|please try again later|稍后再试|请稍后/i },
+    { reason: "Account or access restriction detected", pattern: /access denied|account.*disabled|account.*deactivated|访问被拒绝|账号.*停用|账户.*停用/i },
   ];
 
   // ChatGPT connectivity warnings trigger a reload instead of a safety pause.
@@ -425,9 +425,9 @@
 
     if (!sendReady) {
       const suffix = injected.length === 0
-        ? "（编辑器为空，也未上传附件）"
-        : `（编辑器 DOM len=${injected.length}，Lexical state 未同步）`;
-      throw new Error(`文本注入方法 ${method} 未激活 send 按钮 ${suffix}`);
+        ? "(composer is empty and no attachment was uploaded)"
+        : `(composer DOM length=${injected.length}; Lexical state did not synchronize)`;
+      throw new Error(`Prompt injection method ${method} did not enable Send ${suffix}`);
     }
 
     const asAttachment = injected.length < Math.min(10, text.trim().length);
@@ -466,7 +466,7 @@
       return;
     }
     console.log("[relay content] found inflight from previous session", rec);
-    updateBanner(`回捞中: ${rec.taskId.slice(0, 8)}…`, "#f39c12");
+    updateBanner(`Recovering: ${rec.taskId.slice(0, 8)}…`, "#f39c12");
 
     try {
       await waitForCondition(() => document.body ? true : null, 10000, 200, "wait body");
@@ -491,7 +491,7 @@
             taskId: rec.taskId,
             text: last,
           });
-          if (r?.recovered) updateBanner(`已回捞: ${rec.taskId.slice(0, 8)}`, "#27ae60");
+          if (r?.recovered) updateBanner(`Recovered: ${rec.taskId.slice(0, 8)}`, "#27ae60");
           clearInflight();
           return;
         }
@@ -505,7 +505,7 @@
       }
       if (isGenerating()) {
         // Generation continues; let the service worker actively sample the page.
-        updateBanner(`回捞（生成中）: ${rec.taskId.slice(0, 8)}`, "#f39c12");
+        updateBanner(`Recovering (generating): ${rec.taskId.slice(0, 8)}`, "#f39c12");
         chrome.runtime.sendMessage({
           type: "reattach-pending",
           taskId: rec.taskId,
@@ -571,14 +571,14 @@
     if (Date.now() - lastReloadAt < RELOAD_COOLDOWN_MS) return;
     lastReloadAt = Date.now();
     console.warn("[relay content] reloading page:", reason);
-    updateBanner(`重新加载: ${reason.slice(0, 30)}`, "#e67e22");
+    updateBanner(`Reloading: ${reason.slice(0, 30)}`, "#e67e22");
     // Tell the extension about the reload so it does not dispatch new work.
     chrome.runtime.sendMessage({ type: "network-reload", reason }).catch(() => {});
     setTimeout(() => location.reload(), 1500);
   }
 
   window.addEventListener("offline", () => {
-    updateBanner("离线", "#95a5a6");
+    updateBanner("Offline", "#95a5a6");
     chrome.runtime.sendMessage({ type: "offline" }).catch(() => {});
   });
   window.addEventListener("online", async () => {
@@ -658,7 +658,7 @@
         } else if (msg.type === "run-task") {
           const block = findSafetyBlock();
           if (block) throw new Error(`safety: ${block.reason}`);
-          updateBanner(`处理中: ${msg.taskId?.slice?.(0, 8) ?? ""}…`, "#e67e22");
+          updateBanner(`Submitting: ${msg.taskId?.slice?.(0, 8) ?? ""}…`, "#e67e22");
 
           // Save the baseline and in-flight state for refresh recovery.
           const baseline = msg.baseline ?? captureBaseline();
@@ -685,14 +685,14 @@
             inflight.phase = "accepted";
             inflight.acceptedAt = Date.now();
             writeInflight(inflight);
-            updateBanner(`等待回复: ${msg.taskId?.slice?.(0, 8) ?? ""}…`, "#3498db");
+            updateBanner(`Waiting for reply: ${msg.taskId?.slice?.(0, 8) ?? ""}…`, "#3498db");
 
             // run-task only submits, records the baseline, and returns. The
             // service worker owns all subsequent reply polling.
             sendResponse({ status: "submitted", baseline, submissionState: "accepted" });
           } catch (e) {
             console.warn("[relay content] run-task failed", e);
-            updateBanner(`错误: ${e.message.slice(0, 40)}`, "#e74c3c");
+            updateBanner(`Error: ${e.message.slice(0, 40)}`, "#e74c3c");
             sendResponse({
               error: e.message,
               baseline,
@@ -706,7 +706,7 @@
         }
       } catch (e) {
         console.warn("[relay content] error handling", msg.type, e);
-        updateBanner(`错误: ${e.message.slice(0, 40)}`, "#e74c3c");
+        updateBanner(`Error: ${e.message.slice(0, 40)}`, "#e74c3c");
         setTimeout(() => updateBanner(`Relay: ${getSessionId().slice(0, 8)}…`, "#10a37f"), 5000);
         // Keep in-flight state so a later refresh can attempt recovery.
         sendResponse({ error: e.message });
