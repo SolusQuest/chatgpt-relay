@@ -1,7 +1,16 @@
 {
   "name": "gpt-relay",
   "version": "1.0.1",
-  "description": "ChatGPT 网页自动 Relay 工具（SQLite 队列 + MV3 扩展）",
+  "description": "Local SQLite relay and MV3 extension for agent reviews through ChatGPT web sessions",
+  "license": "MIT",
+  "keywords": [
+    "agent",
+    "chatgpt",
+    "code-review",
+    "relay",
+    "sqlite",
+    "browser-extension"
+  ],
   "main": "server/index.ts",
   "bin": {
     "gpt-relay": "./bin/gpt-relay.mjs"
@@ -36,6 +45,6 @@
     "typescript": "^5.4.0"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.0.0"
   }
 }

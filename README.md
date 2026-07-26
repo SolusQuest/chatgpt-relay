@@ -189,5 +189,4 @@ To reset local relay data, stop the relay and remove the database files from
 
 ## License
 
-The project license will be declared in a root `LICENSE` file before the first
-public release.
+Licensed under the [MIT License](./LICENSE).
