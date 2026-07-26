@@ -317,9 +317,9 @@ Relay must review the remote PR at the pushed head. Never substitute an unpushed
 
 ## Phase 5 — CI, relay PR review, and review-thread handling
 
-Start CI inspection and relay review from the same remote draft PR.
+Start CI inspection and relay review from the same remote draft PR. CI state and GitHub review threads are independent factual gates; they do not consume relay review rounds.
 
-Send the PR URL to the pinned relay session:
+Send the PR URL and exact pushed head to the pinned relay session:
 
 ```text
 Act as a strict code reviewer for the draft PR below. It implements the
@@ -329,18 +329,153 @@ session.
 Check whether the implementation covers the issue acceptance criteria,
 unintentionally diverges from the plan, has adequate tests, and avoids
 correctness, compatibility, security, performance, or maintainability defects.
-List required changes first. If there are no blocking issues, state explicitly
-that it is safe to request human review and list the remaining risks.
+
+Return the complete set of currently identifiable blocking findings rather than
+intentionally deferring known findings to later rounds. Give each finding a
+stable ID. For every blocker, provide:
+- severity and classification;
+- exact file, code path, input/state/call sequence, or failing check;
+- expected behavior and concrete actual or predicted failure;
+- affected acceptance criterion or repository contract;
+- why the current PR must fix it;
+- the minimum required correction.
+
+Separate blockers from non-blocking hardening, style or refactoring preferences,
+and follow-up work. If there are no blocking issues, return
+READY_FOR_HUMAN_REVIEW and list the remaining risks.
 
 PR: <url>
+Current pushed head: <sha>
 ```
 
-Handle the review loop:
+### Review budget and finding ledger
 
-- Real issue → fix it, validate, commit, push to the same branch, then request another review of the same PR.
-- Non-blocking preference → adopt it only when justified; otherwise record the reasoning for handoff.
+Phase 5 allows at most **three full relay PR reviews**:
+
+1. The initial comprehensive review.
+2. A correction and regression review.
+3. A final convergence review.
+
+Do not reset this budget when a new commit or later response introduces another finding. The budget limits unrestricted re-review; it never makes a real defect non-blocking or permits an automatic pass.
+
+Maintain a visible finding ledger after the initial response. Preserve stable finding IDs and record:
+
+- classification and severity;
+- blocking rationale and affected acceptance criterion or repository contract;
+- status: `open`, `resolved`, `rejected`, `deferred`, or `disputed`;
+- first reviewed head and, when applicable, fix head;
+- agent disposition and verification evidence.
+
+Use a compact ledger such as:
+
+| ID | Classification / severity | Status | Reviewed / fix head | Disposition and evidence |
+|---|---|---|---|---|
+| `R1` | `<class and severity>` | `<status>` | `<sha> / <sha>` | `<agent action and evidence>` |
+
+Any finding first raised after the initial review must be classified as one of:
+
+- `revision-regression` — directly introduced by a fix made during this review loop;
+- `new-evidence` — supported by a new CI failure, test result, code path, or repository fact not reasonably available earlier;
+- `critical-late-finding` — a concrete severe defect that was discoverable earlier but would make the current PR unsafe or violate an acceptance criterion or repository contract;
+- `late-nonblocking` — a late improvement, hardening idea, maintainability preference, or low-impact risk;
+- `out-of-scope` — valid work that is not required for the current issue to be correct.
+
+A `critical-late-finding` may block despite being late, but it requires a high burden of proof: exact code location or path, triggering input/state/call sequence, expected versus actual failure, acceptance-criterion or contract impact, and why this PR must fix it. A label alone is not evidence.
+
+Handle each response as follows:
+
+- Real blocker → verify it locally, fix it, validate, commit, and push to the same branch.
+- Non-blocking preference → adopt it only when justified; otherwise record it as remaining risk or follow-up.
 - Scope expansion → defer it explicitly unless the current issue cannot be correct without it.
-- After every substantive push, update the recorded head and ensure the final relay conclusion applies to that exact head.
+- Disputed repository fact → inspect the authoritative code, contract, test, or CI evidence before deciding.
+- After every substantive push, record the new head. A readiness verdict is valid only for the exact pushed head it reviewed.
+
+For the second full review, provide the PR URL, previous reviewed head, current pushed head, complete finding ledger, fix summary, and the diff between those heads. Ask relay to verify prior findings, inspect revision-caused regressions and new evidence, and complete its review without silently renaming or reopening resolved findings.
+
+### Third full review — final convergence
+
+The third full review is not another unrestricted restart. Send the PR URL, current and previous heads, complete ledger, latest fix summary, and relevant head-to-head diff with this prompt:
+
+```text
+This is the final convergence review for the draft PR.
+
+Do not restart a broad review, reopen resolved findings without concrete new
+evidence, or add optional scope. Review only:
+1. Unresolved findings already recorded in the ledger.
+2. Concrete blocker-level regressions introduced by the latest fixes.
+3. New CI, test, code-path, or repository evidence.
+4. Acceptance-criterion or repository-contract violations on the current head.
+
+Classify every finding first raised in this round as revision-regression,
+new-evidence, critical-late-finding, late-nonblocking, or out-of-scope. A
+critical-late-finding must include the exact code path or location, triggering
+input/state/call sequence, expected versus actual failure, affected acceptance
+criterion or contract, and why the current PR must fix it.
+
+Return exactly one convergence verdict:
+- READY_FOR_HUMAN_REVIEW: no blocking finding remains on the current pushed
+  head.
+- CORRECT_AND_CLOSE: only named blockers with deterministic, bounded fixes
+  remain; list their IDs and the minimum corrections for a targeted closure
+  check.
+- BLOCKED_HANDOFF: the PR still has a blocker that cannot safely converge within
+  the remaining bounded review process; explain the blocker and required next
+  decision or work.
+
+Do not request another full review round.
+
+PR: <url>
+Previous reviewed head: <sha>
+Current pushed head: <sha>
+
+--- finding ledger ---
+<complete ledger>
+
+--- latest fix summary and head-to-head diff ---
+<summary and diff>
+```
+
+### Optional targeted closure check
+
+Only a third-round `CORRECT_AND_CLOSE` verdict permits **one targeted closure check**. This is not a fourth full review.
+
+Apply and verify the minimum corrections for the named finding IDs, commit and push them, then send:
+
+```text
+This is a targeted closure check, not a full PR review.
+
+Review only:
+1. Whether the named finding IDs are resolved on the current pushed head.
+2. Whether their fix diff directly introduces a concrete blocker-level
+   regression.
+
+Do not reopen broad review, add style or refactoring advice, or introduce
+unrelated findings. A new blocker is admissible only with the exact code path,
+triggering input/state/call sequence, expected versus actual failure, and
+acceptance-criterion or repository-contract impact.
+
+Return exactly one verdict:
+- CLOSED: every named blocker is resolved and the fix diff introduces no
+  blocker-level regression.
+- BLOCKED_HANDOFF: a named blocker remains or the fix directly introduces a
+  proven blocker-level regression.
+
+PR: <url>
+Previous reviewed head: <sha>
+Current pushed head: <sha>
+Named finding IDs: <ids>
+
+--- targeted fix diff ---
+<diff>
+```
+
+After the targeted closure check:
+
+- `CLOSED` may be normalized to `READY_FOR_HUMAN_REVIEW` for the exact reviewed head.
+- If an original finding remains or its fix introduces a blocker, keep the PR draft and use `BLOCKED_HANDOFF`.
+- Record any new non-blocking suggestion as remaining risk or follow-up.
+- If a concrete severe defect is discovered after the review budget, fix and test it when the required correction is in scope, but do not restart the full relay loop automatically. The resulting head lacks a clean relay verdict and must remain a blocked draft handoff unless the user explicitly authorizes a new review budget.
+- Never interpret exhausted review rounds as approval.
 
 In parallel, inspect required checks:
 
@@ -356,16 +491,18 @@ Inspect GitHub review **threads**, not only the flat REST comment list:
 3. For each unresolved thread, determine whether it is actionable.
 4. Fix actionable findings, or reply inline with the concrete reason for deliberately deferring or rejecting them.
 5. Resolve a thread only when repository policy permits and the finding has actually been handled. A reply and a resolution are separate actions.
-6. Re-run relay review after fixes that materially change the implementation.
+6. Re-run relay review after fixes that materially change the implementation only within the remaining review budget. After the budget is exhausted, use the targeted closure check only when eligible; otherwise keep the PR draft and record a blocked handoff.
 
 The gate is **no unaddressed actionable thread**, not mechanically zero unresolved threads. Reviewer-owned unresolved threads that have been answered must be listed in the handoff.
 
-Terminate only when:
+A `READY_FOR_HUMAN_REVIEW` handoff requires all of:
 
-- Required checks are green, or an external blocker is clearly reported to the user instead of claiming readiness.
-- Relay reports no blocking issue on the exact current pushed head.
+- Required checks are green.
+- No agent-verified, evidence-backed blocking finding remains unaddressed on the exact current pushed head, and relay returned `READY_FOR_HUMAN_REVIEW` or `CLOSED` for that head.
 - Every actionable review thread has been fixed or deliberately answered.
 - The issue acceptance criteria remain fully covered.
+
+If the bounded review process ends with a verified blocker, an external CI blocker, an unaddressed actionable thread, or no clean relay verdict for the current head, terminate with `BLOCKED_HANDOFF`: keep the PR draft, report the exact blocker and evidence, and do not claim readiness. The user may explicitly authorize a new review budget after deciding how to proceed.
 
 Do **not** merge the PR or mark it ready-for-review autonomously.
 
@@ -373,13 +510,14 @@ Do **not** merge the PR or mark it ready-for-review autonomously.
 
 Present:
 
-1. The draft PR link and exact reviewed head SHA.
-2. A concise implementation summary.
-3. Acceptance-criteria coverage mapped to code and tests.
-4. Local validation and required-CI status.
-5. Material deviations from the reviewed plan.
-6. Relay's final conclusion.
-7. Remaining risks, deferred follow-ups, external blockers, and answered-but-unresolved reviewer-owned threads.
+1. Handoff status: `READY_FOR_HUMAN_REVIEW` or `BLOCKED_HANDOFF`.
+2. The draft PR link and exact current head SHA, plus the exact relay-reviewed head when different.
+3. A concise implementation summary.
+4. Acceptance-criteria coverage mapped to code and tests.
+5. Local validation and required-CI status.
+6. Material deviations from the reviewed plan.
+7. Relay's final verdict, review-round count, and targeted closure result if used.
+8. Remaining risks, deferred follow-ups, external blockers, open finding IDs, and answered-but-unresolved reviewer-owned threads.
 
 The user owns final human review, `gh pr ready`, and merge decisions.
 
@@ -392,6 +530,9 @@ The user owns final human review, `gh pr ready`, and merge decisions.
 - **Parallel discovery informs one agent-owned plan and never replaces the final Phase 2 plan review.**
 - **Plan review is mandatory for non-trivial work using this workflow, but routine user approval of the plan is not.**
 - **Phase 2 permits at most three full plan-review submissions; after the final convergence review, proceed, make a deterministic verified correction, or escalate—never restart unrestricted review.**
+- **Phase 5 permits at most three full relay PR reviews and, only after `CORRECT_AND_CLOSE`, one targeted closure check; never restart unrestricted review without explicit user authorization.**
+- **Review limits are convergence boundaries, not waivers: an evidence-backed PR blocker keeps the draft in `BLOCKED_HANDOFF`.**
+- **CI failures and actionable GitHub review threads remain independent gates and do not consume relay review rounds.**
 - **Implement tests with production behavior instead of bolting them on after the code is pushed.**
 - **Never merge, close the issue, or mark the PR ready-for-review autonomously.**
 - **Use the same user-supplied, task-specific relay session across plan and PR review.**
