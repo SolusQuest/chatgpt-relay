@@ -16,6 +16,7 @@ account's plan limits and the applicable OpenAI terms.
   tasks in parallel.
 - **Durable SQLite queue**: tasks survive relay restarts, page refreshes, browser
   restarts, and agent interruptions.
+- **At-most-once browser delivery**: the extension persists a send fence before selecting Send. Refresh and restart recovery observe uncertain work instead of automatically replaying a prompt.
 - **Late-reply recovery**: client wait timeouts and task deadlines are separate.
   Replies that arrive during the bounded recovery window are stored in
   `lateReply` without rewriting the terminal task status.

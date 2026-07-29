@@ -47,6 +47,7 @@ export interface TaskView {
   completedAt: number | null;
   lateCompletedAt: number | null;
   submitStartedAt: number | null;
+  sendAttemptedAt: number | null;
   submitAcknowledgedAt: number | null;
   generatingSeenAt: number | null;
   replyDetectedAt: number | null;
@@ -257,10 +258,16 @@ export async function resumePending(
 
 function shouldKeepPendingForLateReply(task: TaskView): boolean {
   return task.status === "failed" &&
+    (
+      task.sendAttemptedAt !== null ||
+      task.submitAcknowledgedAt !== null ||
+      task.generatingSeenAt !== null
+    ) &&
     task.lateReply === null &&
     task.lateReplyDeadlineAt > Date.now() &&
     (
       task.error === "task_processing_timeout" ||
+      task.error === "submission_outcome_unknown" ||
       task.error === "session_heartbeat_lost" ||
       task.error === "aborted"
     );

@@ -44,6 +44,7 @@ function createHarness() {
     input: element("input-1") as FakeElement | null,
     users: [] as FakeElement[],
     assistants: [] as FakeElement[],
+    pathname: "/c/6a61e3cc-3160-83ee-9aa7-f79a39d93b3e",
   };
   const storage = new Map<string, string>();
   let onMessage:
@@ -80,7 +81,9 @@ function createHarness() {
     },
   };
   const location = {
-    pathname: "/c/6a61e3cc-3160-83ee-9aa7-f79a39d93b3e",
+    get pathname() {
+      return state.pathname;
+    },
     reload() {},
   };
   const sessionStorage = {
@@ -143,6 +146,16 @@ function createHarness() {
         });
       });
     },
+    async pollReply(
+      baseline: Record<string, unknown>,
+      expectedSession?: string,
+    ) {
+      return new Promise<Record<string, unknown>>((resolve) => {
+        onMessage?.({ type: "poll-reply", baseline, expectedSession }, {}, (value) => {
+          resolve(value as Record<string, unknown>);
+        });
+      });
+    },
   };
 }
 
@@ -175,4 +188,36 @@ test("refreshed conversation is not ready until history and composer stabilize",
   page = await harness.pageState();
   assert.equal(page.ready, false);
   assert.equal(page.reason, "page-stabilizing");
+});
+
+test("reply polling reports page-unready while refreshed history is hydrating", async () => {
+  const harness = createHarness();
+  harness.state.readyState = "complete";
+
+  const snapshot = await harness.pollReply({
+    userCount: 1,
+    lastUserId: "user-1",
+    assistantCount: 1,
+    lastAssistantId: "assistant-1",
+  });
+  assert.equal(snapshot.status, "page-unready");
+  assert.equal(snapshot.reason, "conversation-hydrating");
+});
+
+test("reply polling rejects snapshots from a different conversation", async () => {
+  const harness = createHarness();
+  harness.state.readyState = "complete";
+  harness.state.pathname = "/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+  const snapshot = await harness.pollReply(
+    {
+      userCount: 1,
+      lastUserId: "user-1",
+      assistantCount: 1,
+      lastAssistantId: "assistant-1",
+    },
+    "11111111-2222-3333-4444-555555555555",
+  );
+  assert.equal(snapshot.status, "session-mismatch");
+  assert.equal(snapshot.currentSession, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
 });

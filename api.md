@@ -48,6 +48,7 @@ terminal status back to `done`.
   "completedAt": 1783847074944,
   "lateCompletedAt": null,
   "submitStartedAt": 1783846986255,
+  "sendAttemptedAt": 1783846987000,
   "submitAcknowledgedAt": 1783846987312,
   "generatingSeenAt": 1783846989344,
   "replyDetectedAt": 1783847074200,
@@ -69,6 +70,7 @@ The relay uses stable machine-readable codes for maintenance failures:
 |---|---|
 | `task_expired_before_dispatch` | A queued task crossed its deadline before the extension claimed it |
 | `task_processing_timeout` | An in-progress task crossed its deadline and active-task grace period |
+| `submission_outcome_unknown` | Send may have been attempted, but the extension could not confirm submission before the deadline |
 | `session_heartbeat_lost` | The relay released an in-progress task after its browser session became stale |
 | `aborted` | The extension task wait was aborted |
 
@@ -238,14 +240,15 @@ MV3 extension. Agents should use `/v1` or the root CLI.
 | `POST` | `/internal/tasks/:id/complete` | Complete or fail a task |
 | `POST` | `/internal/tasks/:id/user-stop` | Cancel after the page user selects Stop |
 | `POST` | `/internal/tasks/:id/recover` | Recover a DOM reply after page or extension restart |
-| `POST` | `/internal/tasks/:id/defer` | Return a newly claimed task to the queue when the page is busy |
-| `POST` | `/internal/tasks/:id/requeue` | Requeue after failed recovery and increment its counter |
+| `POST` | `/internal/tasks/:id/defer` | Return a newly claimed, pre-send task to the queue when the page is busy |
+| `POST` | `/internal/tasks/:id/requeue` | Requeue a proven pre-send task and increment its counter |
 | `POST` | `/internal/heartbeat` | Update the session heartbeat |
 | `POST` | `/internal/sessions/:id/status` | Report pause, resume, and reason |
 
 Progress phases:
 
 - `submit_started`
+- `send_attempted`
 - `submit_acknowledged`
 - `generating_seen`
 - `reply_detected`
@@ -263,15 +266,17 @@ queued
   `-- deadline before claim --------------> expired
 
 in_progress
-  |-- capture/complete success -----------> done
-  |-- complete error/maintenance timeout -> failed
-  |-- cancel/user-stop -------------------> cancelled
-  |-- defer/requeue ----------------------> queued
-  `-- late DOM result after timeout ------> lateReply on terminal task
+  |-- capture/complete success --------------------> done
+  |-- complete error/maintenance timeout ----------> failed
+  |-- cancel/user-stop ----------------------------> cancelled
+  |-- defer/requeue before send_attempted ----------> queued
+  `-- late DOM result after eligible failure ------> lateReply on terminal task
 ```
 
 Each session can have at most one `in_progress` task. Queued tasks are claimed
 in submission order.
+
+`send_attempted` is a durable at-most-once fence. After that phase is recorded, `defer` and `requeue` return `400 unsafe_retry_after_send_attempt`; clients must create an explicit new task if a human chooses to retry.
 
 ## Timeouts and late replies
 
@@ -292,9 +297,7 @@ Defaults:
 - active task grace: 60 seconds;
 - late-reply grace: 30 minutes.
 
-After a page-submitted task crosses its hard deadline, it remains `failed`, but
-the extension can store final page output in `lateReply` before
-`lateReplyDeadlineAt`.
+After a page-submitted task crosses its hard deadline, it remains `failed`, but the extension can store final page output in `lateReply` before `lateReplyDeadlineAt`. A task with `sendAttemptedAt` but without later acknowledgement evidence fails as `submission_outcome_unknown` instead of being automatically replayed.
 
 If one `GET /v1/tasks/:id?wait=60000` call returns a non-terminal state, continue
 polling. An HTTP long-poll timeout is not a task timeout.

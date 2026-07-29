@@ -75,9 +75,14 @@ test("config.js exports required constants", () => {
 
 test("content-script contains required message handlers", () => {
   const src = fs.readFileSync(path.join(EXT, "content-script.js"), "utf8");
-  for (const t of ["get-session-id", "get-inflight", "get-page-state", "check-safety", "update-banner", "run-task", "recover-task", "requeue-task", "offline", "online"]) {
+  for (const t of ["get-session-id", "get-inflight", "get-page-state", "check-safety", "update-banner", "run-task", "recover-inflight", "send-attempted", "offline", "online"]) {
     assert.match(src, new RegExp(`"${t}"`), `missing handler: ${t}`);
   }
+  assert.doesNotMatch(
+    src,
+    /type:\s*"requeue-task"/,
+    "refresh recovery must not make a task resendable",
+  );
 });
 
 test("generation detection ignores hidden stop buttons", () => {
@@ -104,4 +109,15 @@ test("run-task acknowledgement and late reply capture are bounded", () => {
   assert.match(src, /RUN_TASK_ACK_TIMEOUT_MS/);
   assert.match(src, /lateReplyDeadlineAt/);
   assert.match(src, /\/capture/);
+});
+
+test("durable send fence precedes Send and post-attempt polling cannot requeue", () => {
+  const content = fs.readFileSync(path.join(EXT, "content-script.js"), "utf8");
+  const worker = fs.readFileSync(path.join(EXT, "service-worker.js"), "utf8");
+  const fence = content.indexOf('type: "send-attempted"');
+  const click = content.indexOf("await clickSend()", fence);
+  assert.ok(fence >= 0, "missing content-script send fence");
+  assert.ok(click > fence, "Send must occur only after the durable fence");
+  assert.match(worker, /snap\.status === "not-started"[\s\S]*hasSendFence\(rec\)/);
+  assert.doesNotMatch(worker, /requeuePending/);
 });

@@ -28,7 +28,7 @@ uses a real browser, ChatGPT page, extension, and relay server.
 | SS-010 | Recover after reloading the extension | P0 | `fake extension recovers after restart` |
 | SS-011 | Recover after a network interruption | P1 | `offline/online` handler |
 | SS-012 | Pause a session after a safety block | P1 | `pause via session_status` |
-| SS-013 | Retry after task execution failure | P1 | `requeueTask over limit` |
+| SS-013 | Enforce the at-most-once send boundary | P0 | `extension-recovery-policy` and unsafe-requeue tests |
 | SS-014 | Reject empty text and accept very short text | P2 | Input validation |
 | SS-015 | Allow a five-minute task timeout | P2 | Timeout lifecycle |
 
@@ -175,20 +175,20 @@ Expected:
 
 ## SS-009: Recover after refreshing the ChatGPT page
 
-Purpose: verify in-flight recovery during generation.
+Purpose: verify at-most-once recovery at each in-flight boundary.
 
 Steps:
 
-1. Submit a slow prompt.
-2. Wait until the banner reports that it is waiting for a reply.
-3. Refresh the ChatGPT page.
-4. Wait for hydration and continued generation.
+1. Run the case four times, refreshing respectively before Send, immediately after Send, during generation, and after the reply first appears.
+2. After each refresh, wait for conversation history hydration and recovery.
+3. Inspect the ChatGPT conversation and relay task.
 
 Expected:
 
 - The relay banner reappears and enters recovery or waiting state.
-- The task finishes without client resubmission.
-- The prompt is not submitted twice.
+- Every post-attempt case contains exactly one copy of the user prompt.
+- A proven pre-send interruption may defer and execute once after the page stabilizes.
+- A post-attempt case finishes with the captured reply or the explicit `submission_outcome_unknown` error; it is never automatically replayed.
 
 ## SS-010: Recover after reloading the extension
 
@@ -242,22 +242,23 @@ Expected:
 
 Do not intentionally violate service policies to provoke this test.
 
-## SS-013: Retry after task execution failure
+## SS-013: Enforce the at-most-once send boundary
 
-Purpose: verify bounded requeue behavior after a transient content-script
-failure.
+Purpose: verify that only proven pre-send work can return to the queue.
 
 Steps:
 
-1. Submit a task.
-2. Refresh the page or interrupt the content script at the run-task boundary.
-3. Observe state transitions and wait for recovery.
+1. Interrupt one task before the send fence and confirm that `defer` can return it to `queued`.
+2. Submit another task and wait until `sendAttemptedAt` is present.
+3. Call the internal defer and requeue endpoints for the fenced task.
+4. Refresh the page and wait for recovery.
 
 Expected:
 
-- The task may return to `queued` for retry.
-- Requeue count does not exceed the configured limit.
-- The task eventually becomes `done` or definitively `failed`.
+- The pre-send task can be dispatched later.
+- Both retry operations on the fenced task return `400 unsafe_retry_after_send_attempt`.
+- The fenced task never returns to `queued` and never creates a duplicate prompt.
+- It eventually becomes `done`, `cancelled`, or explicitly `failed`.
 
 ## SS-014: Reject empty text and accept very short text
 

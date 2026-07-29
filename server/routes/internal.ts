@@ -76,6 +76,7 @@ export function createInternalRouter(store: TaskStore): Router {
     const body = (req.body ?? {}) as { phase?: unknown };
     const phases: TaskProgressPhase[] = [
       "submit_started",
+      "send_attempted",
       "submit_acknowledged",
       "generating_seen",
       "reply_detected",
@@ -169,7 +170,7 @@ export function createInternalRouter(store: TaskStore): Router {
     }
   });
 
-  // Requeue after failed recovery or a similar page lifecycle interruption.
+  // Requeue only when the extension can prove Send was never attempted.
   router.post("/tasks/:id/requeue", (req: Request, res: Response) => {
     const id = String(req.params.id ?? "");
     try {

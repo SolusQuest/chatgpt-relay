@@ -100,7 +100,7 @@ Steps:
 Expected:
 
 - Session B completes normally.
-- Session A may fail, defer, or requeue its task explicitly.
+- Session A may defer proven pre-send work or fail explicitly after the send fence; it never automatically replays a possibly submitted prompt.
 - Session A's dispatch loop recovers for later tasks.
 
 ## MS-005: Cancel one task among multiple sessions

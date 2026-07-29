@@ -24,7 +24,7 @@ export const STORAGE_KEYS = {
 // Pending-reply state-machine constants. The service worker requests one DOM
 // snapshot at a time through poll-reply; see pollOnePending.
 export const POLL_REPLY_STABLE_SAMPLES = 2;      // Identical samples required for completion.
-export const POLL_NOT_STARTED_MAX = 6;           // Consecutive not-started samples before failure.
+export const POLL_NOT_STARTED_MAX = 6;           // Pre-send-only not-started samples before failure.
 export const POLL_HARD_TIMEOUT_MS = 15 * 60_000; // Fallback for legacy pending records.
 export const POLL_LATE_REPLY_GRACE_MS = 30 * 60_000;
 export const POLL_REPLY_SENDMSG_TIMEOUT_MS = 6000;

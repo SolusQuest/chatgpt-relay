@@ -141,6 +141,18 @@ test("internal requeue moves in_progress back to queued", async () => {
   assert.equal(rq.json.status, "queued");
 });
 
+test("internal requeue rejects a task after Send may have been attempted", async () => {
+  const c = await post("/v1/tasks", { session: "sF-fenced", text: "do not retry" });
+  const id = c.json.taskId;
+  await get("/internal/next_task?session=sF-fenced");
+  await post(`/internal/tasks/${id}/progress`, { phase: "send_attempted" });
+  const rq = await post(`/internal/tasks/${id}/requeue`, {});
+  assert.equal(rq.status, 400);
+  assert.equal(rq.json.error, "unsafe_retry_after_send_attempt");
+  const task = await get(`/v1/tasks/${id}`);
+  assert.equal(task.json.status, "in_progress");
+});
+
 test("session pause fails in-flight tasks", async () => {
   const c = await post("/v1/tasks", { session: "sG", text: "will pause" });
   const id = c.json.taskId;
@@ -225,8 +237,10 @@ test("capture stores timeout reply as late without rewriting failed status", asy
 test("progress endpoint records page lifecycle timestamps", async () => {
   const c = await post("/v1/tasks", { session: "progress-api", text: "trace me" });
   const id = c.json.taskId;
+  await get("/internal/next_task?session=progress-api");
   for (const phase of [
     "submit_started",
+    "send_attempted",
     "submit_acknowledged",
     "generating_seen",
     "reply_detected",
@@ -236,6 +250,7 @@ test("progress endpoint records page lifecycle timestamps", async () => {
   }
   const task = await get(`/v1/tasks/${id}`);
   assert.equal(typeof task.json.submitStartedAt, "number");
+  assert.equal(typeof task.json.sendAttemptedAt, "number");
   assert.equal(typeof task.json.submitAcknowledgedAt, "number");
   assert.equal(typeof task.json.generatingSeenAt, "number");
   assert.equal(typeof task.json.replyDetectedAt, "number");

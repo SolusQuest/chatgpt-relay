@@ -35,7 +35,8 @@ function makeStore(overrides: Partial<Config> = {}): TaskStore {
       status TEXT NOT NULL, text TEXT NOT NULL, reply TEXT, late_reply TEXT, error TEXT,
       timeout_ms INTEGER NOT NULL, submitted_at INTEGER NOT NULL,
       dispatched_at INTEGER, completed_at INTEGER, late_completed_at INTEGER,
-      submit_started_at INTEGER, submit_acknowledged_at INTEGER,
+      submit_started_at INTEGER, send_attempted_at INTEGER,
+      submit_acknowledged_at INTEGER,
       generating_seen_at INTEGER, reply_detected_at INTEGER,
       expires_at INTEGER NOT NULL,
       requeue_count INTEGER NOT NULL DEFAULT 0
@@ -178,18 +179,57 @@ test("deferTask releases the session without incrementing requeue count", () => 
   assert.equal(deferred.requeueCount, 0);
 });
 
+test("defer and requeue reject a task after the durable send fence", () => {
+  const store = makeStore();
+  const deferredCandidate = store.createTask({ session: "s1", text: "q" });
+  store.claimNextTask("s1");
+  store.markTaskProgress(deferredCandidate.id, "send_attempted", 100);
+  assert.throws(
+    () => store.deferTask(deferredCandidate.id),
+    (error) =>
+      error instanceof TaskStoreError &&
+      error.code === "unsafe_retry_after_send_attempt",
+  );
+  assert.throws(
+    () => store.requeueTask(deferredCandidate.id),
+    (error) =>
+      error instanceof TaskStoreError &&
+      error.code === "unsafe_retry_after_send_attempt",
+  );
+});
+
 test("markTaskProgress records each page lifecycle phase once", () => {
   const store = makeStore();
   const t = store.createTask({ session: "s1", text: "q" });
+  store.claimNextTask("s1", 50);
   store.markTaskProgress(t.id, "submit_started", 100);
   store.markTaskProgress(t.id, "submit_started", 200);
+  store.markTaskProgress(t.id, "send_attempted", 250);
   store.markTaskProgress(t.id, "submit_acknowledged", 300);
   store.markTaskProgress(t.id, "generating_seen", 400);
   const progressed = store.markTaskProgress(t.id, "reply_detected", 500);
   assert.equal(progressed.submitStartedAt, 100);
+  assert.equal(progressed.sendAttemptedAt, 250);
   assert.equal(progressed.submitAcknowledgedAt, 300);
   assert.equal(progressed.generatingSeenAt, 400);
   assert.equal(progressed.replyDetectedAt, 500);
+});
+
+test("send-attempted task times out as submission outcome unknown and accepts a late reply", () => {
+  const store = makeStore({ activeTaskGraceMs: 500, lateReplyGraceMs: 5_000 });
+  const t = store.createTask({ session: "s1", text: "q", timeoutMs: 1000, now: 100 });
+  store.claimNextTask("s1", 200);
+  store.markTaskProgress(t.id, "send_attempted", 300);
+
+  store.expireDueTasks(1601);
+  const failed = store.getTask(t.id);
+  assert.equal(failed?.status, "failed");
+  assert.equal(failed?.error, "submission_outcome_unknown");
+
+  const captured = store.captureReply(t.id, "eventual answer", 2000);
+  assert.equal(captured.captured, true);
+  assert.equal(captured.late, true);
+  assert.equal(captured.task.lateReply, "eventual answer");
 });
 
 test("cancelTask cancels queued task", () => {

@@ -225,6 +225,11 @@ test("resume keeps timeout failure pending until a late reply is captured", asyn
   const claim = await fetch(`${baseUrl}/internal/next_task?session=late-pending`)
     .then((r) => r.json()) as { task: { taskId: string } };
   assert.equal(claim.task.taskId, submitted.taskId);
+  await fetch(`${baseUrl}/internal/tasks/${submitted.taskId}/progress`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ phase: "send_attempted" }),
+  });
   await fetch(`${baseUrl}/internal/tasks/${submitted.taskId}/complete`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

@@ -32,6 +32,7 @@ export interface TaskView {
   completedAt: number | null;
   lateCompletedAt: number | null;
   submitStartedAt: number | null;
+  sendAttemptedAt: number | null;
   submitAcknowledgedAt: number | null;
   generatingSeenAt: number | null;
   replyDetectedAt: number | null;
@@ -56,6 +57,7 @@ export function toTaskView(store: TaskStore, t: Task, includeText = false): Task
     completedAt: t.completedAt,
     lateCompletedAt: t.lateCompletedAt,
     submitStartedAt: t.submitStartedAt,
+    sendAttemptedAt: t.sendAttemptedAt,
     submitAcknowledgedAt: t.submitAcknowledgedAt,
     generatingSeenAt: t.generatingSeenAt,
     replyDetectedAt: t.replyDetectedAt,
@@ -165,6 +167,7 @@ function respondStoreError(res: Response, err: unknown): Response {
       task_too_large: 413,
       task_not_found: 404,
       invalid_transition: 409,
+      unsafe_retry_after_send_attempt: 409,
       duplicate_request: 409,
     };
     return res.status(codeMap[err.code]).json({ error: err.code, message: err.message });

@@ -65,17 +65,19 @@ test("recover flow: task in_progress -> page reload -> DOM sees new reply -> rec
   assert.equal(t.json.reply, "ChatGPT 说：这段代码看起来...");
 });
 
-test("recover flow: no new reply -> requeue -> reclaim later", async () => {
+test("recover flow: no new reply remains in progress instead of becoming resendable", async () => {
   const c = await post("/v1/tasks", { session: "recB", text: "second try" });
   const taskId = c.json.taskId;
   await get("/internal/next_task?session=recB");
-  // After refresh, no new DOM reply is present, so the task is requeued.
-  const rq = await post(`/internal/tasks/${taskId}/requeue`, {});
-  assert.equal(rq.json.status, "queued");
-  // The next claim receives the same taskId.
-  const c2 = await get("/internal/next_task?session=recB");
-  assert.equal(c2.json.task?.taskId, taskId);
-  assert.equal(c2.json.task?.requeueCount, 1);
+  await post(`/internal/tasks/${taskId}/progress`, { phase: "send_attempted" });
+
+  // An empty or still-hydrating DOM is not proof that ChatGPT missed the
+  // request. The task remains occupied and cannot be claimed a second time.
+  const current = await get(`/v1/tasks/${taskId}`);
+  assert.equal(current.json.status, "in_progress");
+  assert.equal(current.json.requeueCount, 0);
+  const secondClaim = await get("/internal/next_task?session=recB");
+  assert.equal(secondClaim.json.task, null);
 });
 
 test("recover flow: agent already saw failed status but recover still races -> idempotent noop", async () => {

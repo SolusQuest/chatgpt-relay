@@ -35,6 +35,7 @@ export interface Task {
   completedAt: number | null;
   lateCompletedAt: number | null;
   submitStartedAt: number | null;
+  sendAttemptedAt: number | null;
   submitAcknowledgedAt: number | null;
   generatingSeenAt: number | null;
   replyDetectedAt: number | null;
@@ -67,6 +68,7 @@ interface TaskRowRaw {
   completed_at: number | null;
   late_completed_at: number | null;
   submit_started_at: number | null;
+  send_attempted_at: number | null;
   submit_acknowledged_at: number | null;
   generating_seen_at: number | null;
   reply_detected_at: number | null;
@@ -98,6 +100,7 @@ function rowToTask(r: TaskRowRaw): Task {
     completedAt: r.completed_at,
     lateCompletedAt: r.late_completed_at,
     submitStartedAt: r.submit_started_at,
+    sendAttemptedAt: r.send_attempted_at,
     submitAcknowledgedAt: r.submit_acknowledged_at,
     generatingSeenAt: r.generating_seen_at,
     replyDetectedAt: r.reply_detected_at,
@@ -139,6 +142,7 @@ export interface CompleteTaskInput {
 
 export type TaskProgressPhase =
   | "submit_started"
+  | "send_attempted"
   | "submit_acknowledged"
   | "generating_seen"
   | "reply_detected";
@@ -158,6 +162,7 @@ export class TaskStoreError extends Error {
       | "task_too_large"
       | "task_not_found"
       | "invalid_transition"
+      | "unsafe_retry_after_send_attempt"
       | "duplicate_request",
   ) {
     super(message);
@@ -308,7 +313,9 @@ export class TaskStore {
       const next = this.db
         .prepare(
           `SELECT * FROM tasks
-             WHERE session = ? AND status = 'queued' AND expires_at > ?
+             WHERE session = ? AND status = 'queued'
+               AND send_attempted_at IS NULL
+               AND expires_at > ?
              ORDER BY submitted_at ASC LIMIT 1`,
         )
         .get(sessionId, now) as TaskRowRaw | undefined;
@@ -398,8 +405,15 @@ export class TaskStore {
   markTaskProgress(id: string, phase: TaskProgressPhase, now = Date.now()): Task {
     const existing = this.getTask(id);
     if (!existing) throw new TaskStoreError(`task ${id} not found`, "task_not_found");
+    if (phase === "send_attempted" && existing.status !== "in_progress") {
+      throw new TaskStoreError(
+        `task ${id} cannot record send_attempted from status ${existing.status}`,
+        "invalid_transition",
+      );
+    }
     const column: Record<TaskProgressPhase, string> = {
       submit_started: "submit_started_at",
+      send_attempted: "send_attempted_at",
       submit_acknowledged: "submit_acknowledged_at",
       generating_seen: "generating_seen_at",
       reply_detected: "reply_detected_at",
@@ -417,6 +431,12 @@ export class TaskStore {
       throw new TaskStoreError(
         `task ${id} cannot defer from status ${existing.status}`,
         "invalid_transition",
+      );
+    }
+    if (existing.sendAttemptedAt !== null) {
+      throw new TaskStoreError(
+        `task ${id} cannot defer after Send may have been attempted`,
+        "unsafe_retry_after_send_attempt",
       );
     }
     this.db
@@ -450,6 +470,12 @@ export class TaskStore {
       throw new TaskStoreError(
         `task ${id} cannot requeue from status ${existing.status}`,
         "invalid_transition",
+      );
+    }
+    if (existing.sendAttemptedAt !== null) {
+      throw new TaskStoreError(
+        `task ${id} cannot requeue after Send may have been attempted`,
+        "unsafe_retry_after_send_attempt",
       );
     }
     if (existing.requeueCount >= maxRequeues) {
@@ -488,7 +514,13 @@ export class TaskStore {
       .prepare(
         `UPDATE tasks
            SET status = 'failed', completed_at = ?,
-               error = 'task_processing_timeout'
+               error = CASE
+                 WHEN send_attempted_at IS NOT NULL
+                  AND submit_acknowledged_at IS NULL
+                  AND generating_seen_at IS NULL
+                   THEN 'submission_outcome_unknown'
+                 ELSE 'task_processing_timeout'
+               END
            WHERE status = 'in_progress' AND expires_at + ? <= ?`,
       )
       .run(now, grace, now);
@@ -648,6 +680,7 @@ function normalizeTimeout(input: number | undefined, fallback: number, max: numb
 
 export function isLateReplyEligible(error: string | null): boolean {
   return error === "task_processing_timeout" ||
+    error === "submission_outcome_unknown" ||
     error === "session_heartbeat_lost" ||
     error === "aborted";
 }

@@ -18,6 +18,11 @@ import {
   RUN_TASK_ACK_TIMEOUT_MS,
   PAGE_STATE_SENDMSG_TIMEOUT_MS,
 } from "./lib/config.js";
+import {
+  classifyRecoveryAction,
+  hasSendFence,
+  isRecoverableLateReply,
+} from "./lib/recovery-policy.js";
 
 // Development debugging: set DEBUG to true or window.__gptRelayDebug in the popup.
 const DEBUG = false;
@@ -223,7 +228,14 @@ async function getSessionPendingReply(session) {
   return Object.values(pending).find((rec) => rec?.session === session) ?? null;
 }
 
-async function setClaimPendingReply(claim, session, tabId, baseline, ackState) {
+async function setClaimPendingReply(
+  claim,
+  session,
+  tabId,
+  baseline,
+  deliveryPhase,
+  details = {},
+) {
   const taskId = claim.task.taskId;
   await setPendingReply(taskId, {
     session,
@@ -247,10 +259,75 @@ async function setClaimPendingReply(claim, session, tabId, baseline, ackState) {
     wasGenerating: false,
     stoppedNoReplyCount: 0,
     stopRequestedAt: null,
-    ackState,
+    deliveryPhase,
+    ackState: deliveryPhase,
     hardTimedOutAt: null,
     generatingProgressReported: false,
     replyProgressReported: false,
+    ...details,
+  });
+}
+
+function inferDeliveryPhase(task, record = {}) {
+  if (task?.submitAcknowledgedAt != null) return "accepted";
+  if (task?.sendAttemptedAt != null) {
+    const localPhase = record.deliveryPhase ?? record.phase ?? record.ackState;
+    return localPhase && localPhase !== "preparing" ? localPhase : "send-attempted";
+  }
+  return record.deliveryPhase ?? record.phase ?? record.ackState ?? "unknown";
+}
+
+async function attachPendingFromTask(task, session, tabId, record = {}) {
+  const existing = await getPendingReply(task.taskId);
+  const baseline = record.baseline ?? existing?.baseline ?? {
+    assistantCount: 0,
+    lastAssistantText: "",
+    lastAssistantId: null,
+    lastUserId: null,
+    userCount: 0,
+  };
+  const deliveryPhase = inferDeliveryPhase(task, {
+    ...existing,
+    ...record,
+  });
+  await setPendingReply(task.taskId, {
+    ...(existing ?? {}),
+    session,
+    tabId,
+    taskId: task.taskId,
+    expiresAt: existing?.expiresAt ?? task.expiresAt,
+    completionDeadlineAt: existing?.completionDeadlineAt ?? task.completionDeadlineAt,
+    lateReplyDeadlineAt: existing?.lateReplyDeadlineAt ?? task.lateReplyDeadlineAt,
+    baseline,
+    submittedAt: existing?.submittedAt ?? record.submittedAt ?? Date.now(),
+    lastPollAt: 0,
+    notStartedCount: 0,
+    stableSampleCount: 0,
+    lastSampleText: existing?.lastSampleText ?? "",
+    wasGenerating: existing?.wasGenerating ?? task.generatingSeenAt != null,
+    stoppedNoReplyCount: existing?.stoppedNoReplyCount ?? 0,
+    stopRequestedAt: existing?.stopRequestedAt ?? record.stopRequestedAt ?? null,
+    deliveryPhase,
+    ackState: deliveryPhase,
+    submittedUserMessageId:
+      record.submittedUserMessageId ?? existing?.submittedUserMessageId ?? null,
+    hardTimedOutAt:
+      existing?.hardTimedOutAt ??
+      (task.status === "failed" ? (task.completedAt ?? Date.now()) : null),
+    generatingProgressReported:
+      existing?.generatingProgressReported ?? task.generatingSeenAt != null,
+    replyProgressReported:
+      existing?.replyProgressReported ?? task.replyDetectedAt != null,
+  });
+  await markInflight(session, task.taskId, {
+    tabId,
+    baseline,
+    deliveryPhase,
+    submittedUserMessageId:
+      record.submittedUserMessageId ?? existing?.submittedUserMessageId ?? null,
+    expiresAt: task.expiresAt,
+    completionDeadlineAt: task.completionDeadlineAt,
+    lateReplyDeadlineAt: task.lateReplyDeadlineAt,
   });
 }
 
@@ -283,6 +360,35 @@ async function startDispatchLoop(session, tabId) {
         void scheduleFastPending();
         await waitForPendingReply(existingPending.taskId, controller.signal);
         continue;
+      }
+
+      const durableInflight = await getInflight(session);
+      if (durableInflight?.taskId) {
+        try {
+          const recovered = await recoverInflightForTab(
+            {
+              ...durableInflight,
+              taskId: durableInflight.taskId,
+            },
+            tabId,
+          );
+          if (recovered.action === "reattached") {
+            await waitForPendingReply(durableInflight.taskId, controller.signal);
+            continue;
+          }
+          if (recovered.action === "wait") {
+            await delay(DISPATCH_LOOP_RETRY_MS);
+            continue;
+          }
+        } catch (e) {
+          console.warn(
+            "[relay sw] durable inflight recovery failed",
+            durableInflight.taskId.slice(0, 8),
+            e.message,
+          );
+          await delay(DISPATCH_LOOP_RETRY_MS);
+          continue;
+        }
       }
 
       const tabInfo = await chrome.tabs.get(tabId).catch(() => null);
@@ -377,7 +483,10 @@ async function startDispatchLoop(session, tabId) {
         "dispatchAt", dispatchAt,
         "waitMs", dispatchAt - loopStart,
       );
-      await markInflight(session, taskId);
+      await markInflight(session, taskId, {
+        tabId,
+        deliveryPhase: "preparing",
+      });
 
       try {
         let pageState;
@@ -400,6 +509,7 @@ async function startDispatchLoop(session, tabId) {
         await markInflight(session, taskId, {
           tabId,
           baseline: pageState?.baseline,
+          deliveryPhase: "preparing",
           expiresAt: claim.task.expiresAt,
           completionDeadlineAt: claim.task.completionDeadlineAt,
           lateReplyDeadlineAt: claim.task.lateReplyDeadlineAt,
@@ -460,12 +570,20 @@ async function startDispatchLoop(session, tabId) {
         }
 
         await reportTaskProgress(taskId, "submit_acknowledged");
+        await markInflight(session, taskId, {
+          deliveryPhase: "accepted",
+          submittedUserMessageId: runRes.submittedUserMessageId ?? null,
+        });
         await setClaimPendingReply(
           claim,
           session,
           tabId,
           runRes.baseline ?? pageState?.baseline,
-          "acknowledged",
+          "accepted",
+          {
+            submittedUserMessageId: runRes.submittedUserMessageId ?? null,
+            wasGenerating: runRes.acceptanceKind === "generating",
+          },
         );
 
         // Wait until completion, recovery, or requeue removes the pending reply.
@@ -530,6 +648,8 @@ async function waitForPendingReply(taskId, signal) {
 //   {
 //     session, tabId, taskId, baseline,
 //     submittedAt, lastPollAt,
+//     deliveryPhase,           // preparing or a durable post-attempt fence.
+//     submittedUserMessageId,  // Exact ChatGPT user message when observable.
 //     notStartedCount,          // Consecutive "not-started" samples.
 //     stableSampleCount,        // Consecutive identical reply-ready samples.
 //     lastSampleText,           // Text from the previous sample.
@@ -612,8 +732,8 @@ async function pollOnePending(taskId, rec) {
   let tabInfo = null;
   try { tabInfo = await chrome.tabs.get(rec.tabId); } catch { tabInfo = null; }
   if (!tabInfo) {
-    console.warn("[relay sw] pending tab gone; requeueing", taskId, rec.tabId);
-    await requeuePending(taskId, rec);
+    console.warn("[relay sw] pending tab gone; refusing automatic resend", taskId, rec.tabId);
+    await failPending(taskId, rec, "submission_outcome_unknown");
     return;
   }
   if (tabInfo.discarded) {
@@ -626,7 +746,12 @@ async function pollOnePending(taskId, rec) {
   try {
     snap = await sendTabMessage(
       rec.tabId,
-      { type: "poll-reply", baseline: rec.baseline },
+      {
+        type: "poll-reply",
+        baseline: rec.baseline,
+        submittedUserMessageId: rec.submittedUserMessageId ?? null,
+        expectedSession: rec.session,
+      },
       POLL_REPLY_SENDMSG_TIMEOUT_MS,
       "poll-reply sendMessage",
     );
@@ -653,6 +778,24 @@ async function pollOnePending(taskId, rec) {
     }).catch(() => {});
     // Fail the task so the agent can observe the problem.
     await failPending(taskId, rec, `safety: ${snap.reason ?? "unknown"}`);
+    return;
+  }
+
+  if (snap.status === "page-unready") {
+    // Loading and hydration are absence of evidence, not evidence that Send
+    // failed. Do not advance any retry/failure counter.
+    rec.pageUnreadyReason = snap.reason ?? "unknown";
+    await setPendingReply(taskId, rec);
+    return;
+  }
+
+  if (snap.status === "session-mismatch") {
+    console.warn(
+      "[relay sw] pending conversation changed; refusing automatic resend",
+      taskId,
+      snap.currentSession,
+    );
+    await failPending(taskId, rec, "submission_outcome_unknown");
     return;
   }
 
@@ -698,6 +841,8 @@ async function pollOnePending(taskId, rec) {
     rec.stoppedNoReplyCount = 0;
     rec.stableSampleCount = 0;
     rec.lastSampleText = snap.lastText ?? rec.lastSampleText ?? "";
+    rec.submittedUserMessageId =
+      rec.submittedUserMessageId ?? snap.submittedUserMessageId ?? null;
     if (!rec.generatingProgressReported) {
       await reportTaskProgress(taskId, "generating_seen");
       rec.generatingProgressReported = true;
@@ -717,6 +862,8 @@ async function pollOnePending(taskId, rec) {
       }
     }
     rec.lastSampleText = snap.lastText ?? rec.lastSampleText ?? "";
+    rec.submittedUserMessageId =
+      rec.submittedUserMessageId ?? snap.submittedUserMessageId ?? null;
     await setPendingReply(taskId, rec);
     return;
   }
@@ -724,6 +871,14 @@ async function pollOnePending(taskId, rec) {
   if (snap.status === "not-started") {
     if (rec.stopRequestedAt) {
       await cancelPending(taskId, rec, "user stopped before request was sent");
+      return;
+    }
+    if (hasSendFence(rec)) {
+      // The task crossed (or may have crossed) the Send boundary. An empty DOM
+      // after refresh can never make it automatically resendable.
+      rec.notStartedCount = 0;
+      rec.deliveryUnconfirmedCount = (rec.deliveryUnconfirmedCount ?? 0) + 1;
+      await setPendingReply(taskId, rec);
       return;
     }
     rec.notStartedCount = (rec.notStartedCount ?? 0) + 1;
@@ -781,17 +936,6 @@ async function cancelPending(taskId, rec, reason) {
   });
 }
 
-async function requeuePending(taskId, rec) {
-  try {
-    await httpJson("POST", `/internal/tasks/${taskId}/requeue`, {});
-  } catch (e) {
-    console.warn("[relay sw] requeuePending POST failed", taskId, e.message);
-  }
-  await deletePendingReply(taskId);
-  await clearInflight(rec.session);
-  await notifyTabCleared(rec.tabId);
-}
-
 // Fast sampling scheduler. Chrome alarms have a one-minute minimum, which is
 // too coarse for active replies. While pending work exists, FAST_POLL_MS
 // setTimeout recursion samples quickly. Alarm and heartbeat provide recovery.
@@ -847,11 +991,12 @@ async function reconcileInflight() {
     const sid = await getTabSession(t.id);
     if (sid) liveSessions.add(sid);
   }
-  // 1) Remove in-flight state when the session tab is gone.
+  // 1) A missing session mapping can be a transient page-refresh condition.
+  // Keep the durable record until task-state reconciliation proves it is safe
+  // to clear; dropping it here would erase the at-most-once send fence.
   for (const s of Object.keys(inflight)) {
     if (!liveSessions.has(s)) {
-      console.log("[relay sw] reconcile: dropping inflight for missing session", s.slice(0, 8));
-      await clearInflight(s);
+      dlog("[relay sw] reconcile: session mapping temporarily missing", s.slice(0, 8));
     }
   }
   // 2) Usually remove terminal tasks. Keep recoverable timeout failures during
@@ -861,10 +1006,32 @@ async function reconcileInflight() {
     if (!entry?.taskId) continue;
     try {
       const t = await httpJson("GET", `/v1/tasks/${entry.taskId}`);
+      if (t?.status === "in_progress") {
+        const action = classifyRecoveryAction(t, entry);
+        let tabId = entry.tabId ?? null;
+        if (!tabId) {
+          for (const [tid, sid] of tabSessionCache.entries()) {
+            if (sid === session) { tabId = tid; break; }
+          }
+        }
+        if (action === "reattach" && tabId) {
+          await attachPendingFromTask(t, session, tabId, entry);
+        } else if (action === "defer") {
+          await httpJson("POST", `/internal/tasks/${entry.taskId}/defer`, {}).catch(() => {});
+          await clearRecoveredTask(entry.taskId, session, tabId);
+        }
+        continue;
+      }
       const keepForLate = t?.status === "failed" &&
+        hasSendFence(entry, t) &&
         !t.lateReply &&
         t.lateReplyDeadlineAt > Date.now() &&
-        ["task_processing_timeout", "session_heartbeat_lost", "aborted"].includes(t.error);
+        [
+          "task_processing_timeout",
+          "submission_outcome_unknown",
+          "session_heartbeat_lost",
+          "aborted",
+        ].includes(t.error);
       if (keepForLate) {
         const pmap = await listPendingReplies();
         if (!pmap[entry.taskId]) {
@@ -887,28 +1054,10 @@ async function reconcileInflight() {
             }
           }
           if (tabId && baseline) {
-            await setPendingReply(entry.taskId, {
-              session,
-              tabId,
-              taskId: entry.taskId,
-              expiresAt: entry.expiresAt ?? t.expiresAt,
-              completionDeadlineAt:
-                entry.completionDeadlineAt ?? t.completionDeadlineAt,
-              lateReplyDeadlineAt:
-                entry.lateReplyDeadlineAt ?? t.lateReplyDeadlineAt,
+            await attachPendingFromTask(t, session, tabId, {
+              ...entry,
               baseline,
-              submittedAt: entry.submittedAt ?? Date.now(),
-              lastPollAt: 0,
-              notStartedCount: 0,
-              stableSampleCount: 0,
-              lastSampleText: "",
-              wasGenerating: true,
-              stoppedNoReplyCount: 0,
-              stopRequestedAt: null,
-              ackState: "unknown",
-              hardTimedOutAt: t.completedAt ?? Date.now(),
-              generatingProgressReported: !!t.generatingSeenAt,
-              replyProgressReported: !!t.replyDetectedAt,
+              deliveryPhase: entry.deliveryPhase ?? "unknown",
             });
           }
         }
@@ -933,6 +1082,89 @@ async function reconcileInflight() {
       // Ignore relay unavailability and retry during the next cycle.
     }
   }
+}
+
+async function clearRecoveredTask(taskId, session, tabId) {
+  await deletePendingReply(taskId);
+  await clearInflight(session);
+  await notifyTabCleared(tabId);
+}
+
+async function recoverInflightForTab(msg, tabId) {
+  const task = await httpJson("GET", `/v1/tasks/${msg.taskId}`);
+  const session = task.session;
+  const record = {
+    baseline: msg.baseline,
+    deliveryPhase: msg.deliveryPhase ?? msg.phase,
+    submittedAt: msg.submittedAt,
+    submittedUserMessageId: msg.submittedUserMessageId,
+    stopRequestedAt: msg.stopRequestedAt,
+  };
+
+  if (msg.stopRequestedAt && (task.status === "queued" || task.status === "in_progress")) {
+    await httpJson("POST", `/internal/tasks/${task.taskId}/user-stop`, {
+      reason: "user stopped before reply",
+    });
+    await clearRecoveredTask(task.taskId, session, tabId);
+    return { action: "clear", status: "cancelled" };
+  }
+
+  let action = classifyRecoveryAction(task, record);
+  if (msg.conversationChanged) {
+    action = hasSendFence(record, task) ? "fail-uncertain" : "defer";
+  }
+
+  if (action === "clear") {
+    await clearRecoveredTask(task.taskId, session, tabId);
+    return { action: "clear", status: task.status };
+  }
+
+  if (action === "defer") {
+    if (task.status === "in_progress") {
+      await httpJson("POST", `/internal/tasks/${task.taskId}/defer`, {});
+    }
+    await clearRecoveredTask(task.taskId, session, tabId);
+    return { action: "deferred", status: "queued" };
+  }
+
+  if (action === "fail-uncertain") {
+    if (task.status === "queued" || task.status === "in_progress") {
+      await httpJson("POST", `/internal/tasks/${task.taskId}/complete`, {
+        error: "submission_outcome_unknown",
+      });
+    }
+    const failed = await httpJson("GET", `/v1/tasks/${task.taskId}`);
+    if (!msg.conversationChanged && isRecoverableLateReply(failed)) {
+      await attachPendingFromTask(failed, session, tabId, {
+        ...record,
+        deliveryPhase: "unknown",
+      });
+      return {
+        action: "reattached",
+        status: failed.status,
+        deliveryPhase: "unknown",
+      };
+    }
+    await clearRecoveredTask(task.taskId, session, tabId);
+    return {
+      action: "clear",
+      status: failed.status,
+      error: "submission_outcome_unknown",
+    };
+  }
+
+  if (action === "reattach") {
+    await attachPendingFromTask(task, session, tabId, record);
+    void pollPendingReplies();
+    startDispatchLoop(session, tabId).catch(() => {});
+    return {
+      action: "reattached",
+      status: task.status,
+      deliveryPhase: inferDeliveryPhase(task, record),
+    };
+  }
+
+  return { action: "wait", status: task.status };
 }
 
 async function ensureAlarms() {
@@ -1041,42 +1273,76 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
 
+  if (type === "send-attempted") {
+    (async () => {
+      try {
+        if (!sender.tab?.id) {
+          sendResponse({ error: "no tab for send fence" });
+          return;
+        }
+        const sid = await getTabSession(sender.tab.id);
+        if (!sid) {
+          sendResponse({ error: "no session for send fence" });
+          return;
+        }
+        const task = await httpJson("GET", `/v1/tasks/${msg.taskId}`);
+        if (task.session !== sid || task.status !== "in_progress") {
+          sendResponse({
+            error: `cannot fence task in ${task.status} for session ${sid}`,
+          });
+          return;
+        }
+
+        // Write the browser-side fence first, then persist the same boundary in
+        // SQLite. The content script must not click Send until this round trip
+        // succeeds.
+        await markInflight(sid, msg.taskId, {
+          tabId: sender.tab.id,
+          baseline: msg.baseline,
+          deliveryPhase: "send-attempted",
+        });
+        await httpJson("POST", `/internal/tasks/${msg.taskId}/progress`, {
+          phase: "send_attempted",
+        });
+        const fencedTask = await httpJson("GET", `/v1/tasks/${msg.taskId}`);
+        await attachPendingFromTask(fencedTask, sid, sender.tab.id, {
+          baseline: msg.baseline,
+          deliveryPhase: "send-attempted",
+        });
+        sendResponse({ status: "fenced", taskId: msg.taskId });
+      } catch (e) {
+        sendResponse({ error: e.message });
+      }
+    })();
+    return true;
+  }
+
+  if (type === "recover-inflight") {
+    (async () => {
+      try {
+        if (!sender.tab?.id) {
+          sendResponse({ error: "no tab for recovery" });
+          return;
+        }
+        const result = await recoverInflightForTab(msg, sender.tab.id);
+        sendResponse(result);
+      } catch (e) {
+        console.warn("[relay sw] recover-inflight failed", msg.taskId, e);
+        sendResponse({ error: e.message });
+      }
+    })();
+    return true;
+  }
+
   if (type === "reattach-pending") {
     (async () => {
       try {
         if (!sender.tab?.id) { sendResponse({ error: "no tab" }); return; }
-        const sid = await getTabSession(sender.tab.id);
-        if (!sid) { sendResponse({ error: "no session for tab" }); return; }
-        const existing = await getPendingReply(msg.taskId);
-        const task = await httpJson("GET", `/v1/tasks/${msg.taskId}`).catch(() => null);
-        await setPendingReply(msg.taskId, {
-          ...(existing ?? {}),
-          session: sid,
-          tabId: sender.tab.id,
-          taskId: msg.taskId,
-          expiresAt: existing?.expiresAt ?? task?.expiresAt,
-          completionDeadlineAt: existing?.completionDeadlineAt ??
-            (task ? task.expiresAt + 60_000 : undefined),
-          lateReplyDeadlineAt: existing?.lateReplyDeadlineAt ?? task?.lateReplyDeadlineAt,
-          baseline: msg.baseline ?? { assistantCount: 0, lastAssistantText: "", userCount: 0 },
-          submittedAt: existing?.submittedAt ?? Date.now(),
-          lastPollAt: 0,
-          notStartedCount: 0,
-          stableSampleCount: 0,
-          lastSampleText: "",
-          wasGenerating: existing?.wasGenerating ?? false,
-          stoppedNoReplyCount: existing?.stoppedNoReplyCount ?? 0,
-          stopRequestedAt: existing?.stopRequestedAt ?? null,
-          ackState: existing?.ackState ?? msg.submissionState ?? "unknown",
-          hardTimedOutAt: existing?.hardTimedOutAt ?? null,
-          generatingProgressReported: existing?.generatingProgressReported ?? false,
-          replyProgressReported: existing?.replyProgressReported ?? false,
-        });
-        await markInflight(sid, msg.taskId);
-        // Trigger one sample immediately.
-        void pollPendingReplies();
-        startDispatchLoop(sid, sender.tab.id).catch(() => {});
-        sendResponse({ status: "ok" });
+        const result = await recoverInflightForTab({
+          ...msg,
+          deliveryPhase: msg.submissionState ?? "unknown",
+        }, sender.tab.id);
+        sendResponse({ status: "ok", ...result });
       } catch (e) {
         sendResponse({ error: e.message });
       }
@@ -1120,23 +1386,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({ recovered: r?.recovered ?? false, status: r?.status });
       } catch (e) {
         console.warn("[relay sw] recover-task failed", e);
-        sendResponse({ error: e.message });
-      }
-    })();
-    return true;
-  }
-
-  if (type === "requeue-task") {
-    (async () => {
-      try {
-        await httpJson("POST", `/internal/tasks/${msg.taskId}/requeue`, {});
-        if (sender.tab?.id) {
-          const sid = await getTabSession(sender.tab.id);
-          if (sid) await clearInflight(sid);
-        }
-        await deletePendingReply(msg.taskId);
-        sendResponse({ status: "ok" });
-      } catch (e) {
         sendResponse({ error: e.message });
       }
     })();

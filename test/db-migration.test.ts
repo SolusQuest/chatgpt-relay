@@ -39,6 +39,7 @@ test("openDatabase migrates the pre-late-reply task schema in place", () => {
       "late_reply",
       "late_completed_at",
       "submit_started_at",
+      "send_attempted_at",
       "submit_acknowledged_at",
       "generating_seen_at",
       "reply_detected_at",

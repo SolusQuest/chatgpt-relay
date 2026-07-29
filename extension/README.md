@@ -73,6 +73,7 @@ Agent -> POST /v1/tasks -> Relay server (Express + SQLite)
   - waits for the document, conversation history, composer, and message baseline
     to stabilize before claiming work;
   - long-polls `/internal/next_task`;
+  - persists a send-attempt fence in browser storage and SQLite before allowing the content script to select Send;
   - sends `run-task` to the content script;
   - records the task in its persistent pending-reply state;
   - samples the page every two seconds and completes the task after the reply is
@@ -85,10 +86,12 @@ Agent -> POST /v1/tasks -> Relay server (Express + SQLite)
 | Scenario | Recovery owner | Behavior |
 |---|---|---|
 | Agent client exits | Relay server | Task remains in SQLite and can be retrieved later |
-| ChatGPT page reloads | Content script | Reuses session state, recovers a reply from the DOM, or reattaches generation tracking |
+| ChatGPT page reloads | Service worker | Reconciles server, browser, and page state; reattaches or captures output without replaying a post-attempt prompt |
 | Service worker sleeps | Service worker | Loads `pending_replies` at the next alarm and resumes sampling |
-| Extension or browser restarts | Service worker reconciliation | Checks server state and removes terminal orphan records |
+| Extension or browser restarts | Service worker reconciliation | Restores the durable send fence before claiming more work and removes terminal orphan records |
 | Network changes | Content script | Observes connectivity and repeated request failures and reloads when needed |
+
+The browser path provides at-most-once automatic delivery. Once `send_attempted` has been durably recorded, an empty or still-hydrating DOM is treated as unknown evidence and never makes the task resendable. If submission cannot be confirmed before the task deadline, the task fails with `submission_outcome_unknown`; a reply discovered during the late-reply window is still stored as `lateReply`.
 
 ## Sanity check
 
@@ -103,6 +106,4 @@ printf '%s' 'Review this function: function add(a,b){return a+b}' |
   gpt-relay review --session <session-id> --stdin --wait-timeout 60000
 ```
 
-To exercise recovery, submit a review and refresh the ChatGPT page while it is
-generating. The extension should recover or reattach to the reply, and the CLI
-should eventually receive the completed task.
+To exercise recovery, submit a review and refresh the ChatGPT page while it is generating. The extension should recover or reattach to the reply, the conversation should contain exactly one copy of the user prompt, and the CLI should eventually receive either the completed task or an explicit `submission_outcome_unknown` failure.

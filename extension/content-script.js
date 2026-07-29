@@ -451,7 +451,18 @@
       const hasNewUser = baseline.lastUserId != null
         ? !!lastUserId && lastUserId !== baseline.lastUserId
         : users.length > (baseline.userCount ?? 0);
-      if (hasNewUser || isGenerating()) return true;
+      if (hasNewUser) {
+        return {
+          kind: "user-message",
+          submittedUserMessageId: lastUserId,
+        };
+      }
+      if (isGenerating()) {
+        return {
+          kind: "generating",
+          submittedUserMessageId: null,
+        };
+      }
       return null;
     }, SUBMISSION_ACCEPT_TIMEOUT_MS, 250, "waitForSubmissionAccepted");
   }
@@ -460,84 +471,42 @@
   async function tryRecoverInflight() {
     const rec = readInflight();
     if (!rec) return;
-    if (rec.session !== getSessionId()) {
-      // The conversation changed, so the pending task cannot be mapped safely.
-      clearInflight();
-      return;
-    }
+    const currentSession = getSessionId();
+    const conversationChanged = rec.session !== currentSession;
     console.log("[relay content] found inflight from previous session", rec);
     updateBanner(`Recovering: ${rec.taskId.slice(0, 8)}…`, "#f39c12");
 
     try {
       await waitForCondition(() => document.body ? true : null, 10000, 200, "wait body");
-      await delay(1500);
-      const now = getAssistantMessages();
-      const users = getUserMessages();
-      const currentAssistantId = getLastAssistantId(now);
-      const currentUserId = getLastUserId(users);
-      const hasNew = rec.baseline?.lastAssistantId != null
-        ? !!currentAssistantId && currentAssistantId !== rec.baseline.lastAssistantId
-        : now.length > (rec.baseline?.assistantCount ?? 0);
-      const hasNewUser = rec.baseline?.lastUserId != null
-        ? !!currentUserId && currentUserId !== rec.baseline.lastUserId
-        : users.length > (rec.baseline?.userCount ?? 0);
-
-      if (hasNew && !isGenerating()) {
-        const last = getLastText(now);
-        if (last) {
-          console.log("[relay content] recovered reply from DOM:", last.slice(0, 50));
-          const r = await chrome.runtime.sendMessage({
-            type: "recover-task",
-            taskId: rec.taskId,
-            text: last,
-          });
-          if (r?.recovered) updateBanner(`Recovered: ${rec.taskId.slice(0, 8)}`, "#27ae60");
-          clearInflight();
-          return;
-        }
-      }
-      if (rec.stopRequestedAt) {
-        chrome.runtime.sendMessage({
-          type: "user-stop-requested",
-          taskId: rec.taskId,
-        }).catch(() => {});
+      const result = await chrome.runtime.sendMessage({
+        type: "recover-inflight",
+        taskId: rec.taskId,
+        recordedSession: rec.session,
+        currentSession,
+        conversationChanged,
+        baseline: rec.baseline ?? {},
+        deliveryPhase: rec.phase ?? "unknown",
+        submittedAt: rec.submittedAt,
+        submittedUserMessageId: rec.submittedUserMessageId ?? null,
+        stopRequestedAt: rec.stopRequestedAt ?? null,
+      });
+      if (result?.error) throw new Error(result.error);
+      if (result?.action === "clear" || result?.action === "deferred") {
+        clearInflight();
         return;
       }
-      if (isGenerating()) {
-        // Generation continues; let the service worker actively sample the page.
-        updateBanner(`Recovering (generating): ${rec.taskId.slice(0, 8)}`, "#f39c12");
-        chrome.runtime.sendMessage({
-          type: "reattach-pending",
-          taskId: rec.taskId,
-          baseline: rec.baseline ?? {
-            assistantCount: 0, lastAssistantText: "", userCount: 0, startedAt: Date.now(),
-          },
-        }).catch(() => {});
-        return;
+      if (result?.action === "reattached") {
+        const uncertain = result.deliveryPhase === "unknown" ||
+          result.deliveryPhase === "send-attempted" ||
+          result.deliveryPhase === "send-fenced" ||
+          result.deliveryPhase === "send-clicked";
+        updateBanner(
+          uncertain
+            ? `Delivery uncertain; observing: ${rec.taskId.slice(0, 8)}…`
+            : `Waiting for reply: ${rec.taskId.slice(0, 8)}…`,
+          uncertain ? "#f39c12" : "#3498db",
+        );
       }
-      if (hasNewUser) {
-        // The user message was sent but no assistant message exists yet; do not resubmit.
-        chrome.runtime.sendMessage({
-          type: rec.stopRequestedAt ? "user-stop-requested" : "reattach-pending",
-          taskId: rec.taskId,
-          baseline: rec.baseline ?? {},
-        }).catch(() => {});
-        return;
-      }
-      if (rec.phase === "send-attempted" || rec.phase === "send-clicked") {
-        // A refresh near the click boundary makes submission uncertain. Sample
-        // conservatively rather than risk sending the prompt twice.
-        chrome.runtime.sendMessage({
-          type: "reattach-pending",
-          taskId: rec.taskId,
-          baseline: rec.baseline ?? {},
-          submissionState: rec.phase,
-        }).catch(() => {});
-        return;
-      }
-      console.log("[relay content] no new reply found; requeuing", rec.taskId);
-      await chrome.runtime.sendMessage({ type: "requeue-task", taskId: rec.taskId });
-      clearInflight();
     } catch (e) {
       console.warn("[relay content] recover failed", e);
     }
@@ -602,15 +571,32 @@
       try {
         if (msg.type === "poll-reply") {
           try {
+            if (msg.expectedSession && msg.expectedSession !== getSessionId()) {
+              sendResponse({
+                status: "session-mismatch",
+                expectedSession: msg.expectedSession,
+                currentSession: getSessionId(),
+              });
+              return;
+            }
             const block = findSafetyBlock();
             if (block) {
               sendResponse({ status: "safety", reason: block.reason });
               return;
             }
+            const readiness = getPageReadiness();
+            if (!readiness.ready && !readiness.generating) {
+              sendResponse({
+                status: "page-unready",
+                reason: readiness.reason,
+                stableForMs: readiness.stableForMs,
+              });
+              return;
+            }
             const baseline = msg.baseline ?? { assistantCount: 0, lastAssistantText: "", lastAssistantId: null, userCount: 0 };
             const msgs = getAssistantMessages();
             const users = getUserMessages();
-            const generating = isGenerating();
+            const generating = readiness.generating;
             const lastId = getLastAssistantId(msgs);
             // Virtual scrolling makes counts unreliable. Compare message IDs;
             // a null lastId means the page has not inserted a placeholder.
@@ -618,12 +604,24 @@
             // User messages can also be unmounted. This count only distinguishes
             // a completely ineffective submission in the most conservative way.
             const currentUserId = getLastUserId(users);
-            const hasNewUser = baseline.lastUserId != null
-              ? !!currentUserId && currentUserId !== baseline.lastUserId
-              : users.length > (baseline.userCount ?? 0);
+            const expectedUserId = msg.submittedUserMessageId ?? null;
+            const hasExpectedUser = expectedUserId
+              ? users.some((user) =>
+                  user.getAttribute("data-message-id") === expectedUserId)
+              : false;
+            const hasNewUser = expectedUserId
+              ? hasExpectedUser
+              : baseline.lastUserId != null
+                ? !!currentUserId && currentUserId !== baseline.lastUserId
+                : users.length > (baseline.userCount ?? 0);
             const lastText = getLastText(msgs);
             if (generating) {
-              sendResponse({ status: "generating", lastText: lastText, assistantCount: msgs.length });
+              sendResponse({
+                status: "generating",
+                lastText: lastText,
+                assistantCount: msgs.length,
+                submittedUserMessageId: hasNewUser ? currentUserId : expectedUserId,
+              });
               return;
             }
             if (!hasNewUser && !hasNewAssistant) {
@@ -634,7 +632,12 @@
               sendResponse({ status: "reply-ready", reply: lastText, assistantCount: msgs.length });
               return;
             }
-            sendResponse({ status: "posted-no-reply-yet", lastText: lastText, assistantCount: msgs.length });
+            sendResponse({
+              status: "posted-no-reply-yet",
+              lastText: lastText,
+              assistantCount: msgs.length,
+              submittedUserMessageId: currentUserId ?? expectedUserId,
+            });
           } catch (e) {
             sendResponse({ error: e.message });
           }
@@ -677,19 +680,38 @@
             inflight.phase = "send-attempted";
             inflight.sendAttemptedAt = Date.now();
             writeInflight(inflight);
+            const fence = await chrome.runtime.sendMessage({
+              type: "send-attempted",
+              taskId: msg.taskId,
+              baseline,
+            });
+            if (fence?.status !== "fenced") {
+              throw new Error(`send fence failed: ${fence?.error ?? "no acknowledgement"}`);
+            }
+            inflight.phase = "send-fenced";
+            inflight.sendFencedAt = Date.now();
+            writeInflight(inflight);
             await clickSend();
             inflight.phase = "send-clicked";
             inflight.sendClickedAt = Date.now();
             writeInflight(inflight);
-            await waitForSubmissionAccepted(baseline);
+            const acceptance = await waitForSubmissionAccepted(baseline);
             inflight.phase = "accepted";
             inflight.acceptedAt = Date.now();
+            inflight.acceptanceKind = acceptance.kind;
+            inflight.submittedUserMessageId = acceptance.submittedUserMessageId;
             writeInflight(inflight);
             updateBanner(`Waiting for reply: ${msg.taskId?.slice?.(0, 8) ?? ""}…`, "#3498db");
 
             // run-task only submits, records the baseline, and returns. The
             // service worker owns all subsequent reply polling.
-            sendResponse({ status: "submitted", baseline, submissionState: "accepted" });
+            sendResponse({
+              status: "submitted",
+              baseline,
+              submissionState: "accepted",
+              acceptanceKind: acceptance.kind,
+              submittedUserMessageId: acceptance.submittedUserMessageId,
+            });
           } catch (e) {
             console.warn("[relay content] run-task failed", e);
             updateBanner(`Error: ${e.message.slice(0, 40)}`, "#e74c3c");
