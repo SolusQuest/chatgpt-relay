@@ -80,6 +80,34 @@ test("recover flow: no new reply remains in progress instead of becoming resenda
   assert.equal(secondClaim.json.task, null);
 });
 
+test("recover flow: terminal uncertain task releases the next queued task without replay", async () => {
+  const first = await post("/v1/tasks", {
+    session: "recQueue",
+    text: "uncertain first task",
+  });
+  const firstId = first.json.taskId;
+  await get("/internal/next_task?session=recQueue");
+  await post(`/internal/tasks/${firstId}/progress`, { phase: "send_attempted" });
+
+  const second = await post("/v1/tasks", {
+    session: "recQueue",
+    text: "queued second task",
+  });
+  const blocked = await get("/internal/next_task?session=recQueue");
+  assert.equal(blocked.json.task, null);
+
+  const failed = await post(`/internal/tasks/${firstId}/complete`, {
+    error: "submission_outcome_unknown",
+  });
+  assert.equal(failed.json.status, "failed");
+
+  const next = await get("/internal/next_task?session=recQueue");
+  assert.equal(next.json.task?.taskId, second.json.taskId);
+  const old = await get(`/v1/tasks/${firstId}`);
+  assert.equal(old.json.status, "failed");
+  assert.equal(old.json.requeueCount, 0);
+});
+
 test("recover flow: agent already saw failed status but recover still races -> idempotent noop", async () => {
   const c = await post("/v1/tasks", { session: "recC", text: "race case" });
   const taskId = c.json.taskId;

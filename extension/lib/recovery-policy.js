@@ -42,6 +42,30 @@ export function isRecoverableLateReply(task, now = Date.now()) {
     task.lateReplyDeadlineAt > now;
 }
 
+export function shouldYieldPendingToQueuedTask(
+  snapshotStatus,
+  record = {},
+  hasQueuedTask = false,
+  now = Date.now(),
+  uncertainIdleReleaseMs = 5_000,
+) {
+  if (!hasQueuedTask) return false;
+
+  if (snapshotStatus === "not-started") {
+    return typeof record.uncertainIdleSince === "number" &&
+      now - record.uncertainIdleSince >= uncertainIdleReleaseMs;
+  }
+
+  // A visible submitted user message remains authoritative until the task's
+  // hard deadline. After that deadline, queued work may preempt ambiguous
+  // late-reply observation as long as the page is idle.
+  if (snapshotStatus === "posted-no-reply-yet") {
+    return typeof record.hardTimedOutAt === "number";
+  }
+
+  return false;
+}
+
 export function classifyRecoveryAction(task, record = {}, now = Date.now()) {
   if (!task) return "wait";
   if (task.status === "done" || task.status === "cancelled" || task.status === "expired") {

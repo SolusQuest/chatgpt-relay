@@ -68,6 +68,7 @@ test("config.js exports required constants", () => {
     "STORAGE_KEYS",
     "RUN_TASK_ACK_TIMEOUT_MS",
     "POLL_LATE_REPLY_GRACE_MS",
+    "UNCERTAIN_QUEUE_RELEASE_MS",
   ]) {
     assert.match(src, new RegExp(`export const ${sym}`), `missing export: ${sym}`);
   }
@@ -119,5 +120,7 @@ test("durable send fence precedes Send and post-attempt polling cannot requeue",
   assert.ok(fence >= 0, "missing content-script send fence");
   assert.ok(click > fence, "Send must occur only after the durable fence");
   assert.match(worker, /snap\.status === "not-started"[\s\S]*hasSendFence\(rec\)/);
+  assert.match(worker, /shouldYieldPendingToQueuedTask/);
+  assert.match(worker, /status=queued&limit=500/);
   assert.doesNotMatch(worker, /requeuePending/);
 });

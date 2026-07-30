@@ -4,6 +4,7 @@ import {
   classifyRecoveryAction,
   hasSendFence,
   isRecoverableLateReply,
+  shouldYieldPendingToQueuedTask,
 } from "../extension/lib/recovery-policy.js";
 
 function task(overrides: Record<string, unknown> = {}) {
@@ -75,4 +76,48 @@ test("eligible timeout failures reattach only inside the late-reply window", () 
   assert.equal(classifyRecoveryAction(failed, {}, 1_000), "reattach");
   assert.equal(isRecoverableLateReply(failed, 60_000), false);
   assert.equal(classifyRecoveryAction(failed, {}, 60_000), "clear");
+});
+
+test("stable uncertain delivery yields only when newer work is queued", () => {
+  const record = {
+    deliveryPhase: "send-clicked",
+    uncertainIdleSince: 1_000,
+  };
+  assert.equal(
+    shouldYieldPendingToQueuedTask("not-started", record, false, 10_000, 5_000),
+    false,
+  );
+  assert.equal(
+    shouldYieldPendingToQueuedTask("not-started", record, true, 5_999, 5_000),
+    false,
+  );
+  assert.equal(
+    shouldYieldPendingToQueuedTask("not-started", record, true, 6_000, 5_000),
+    true,
+  );
+  assert.equal(
+    shouldYieldPendingToQueuedTask("generating", record, true, 10_000, 5_000),
+    false,
+  );
+});
+
+test("visible submitted work yields only after its hard timeout", () => {
+  assert.equal(
+    shouldYieldPendingToQueuedTask(
+      "posted-no-reply-yet",
+      { deliveryPhase: "accepted" },
+      true,
+      10_000,
+    ),
+    false,
+  );
+  assert.equal(
+    shouldYieldPendingToQueuedTask(
+      "posted-no-reply-yet",
+      { deliveryPhase: "accepted", hardTimedOutAt: 9_000 },
+      true,
+      10_000,
+    ),
+    true,
+  );
 });

@@ -31,6 +31,7 @@ uses a real browser, ChatGPT page, extension, and relay server.
 | SS-013 | Enforce the at-most-once send boundary | P0 | `extension-recovery-policy` and unsafe-requeue tests |
 | SS-014 | Reject empty text and accept very short text | P2 | Input validation |
 | SS-015 | Allow a five-minute task timeout | P2 | Timeout lifecycle |
+| SS-016 | Advance queued work after stable delivery uncertainty | P0 | `stable uncertain delivery yields only when newer work is queued` |
 
 ## SS-001: Basic short-text round trip
 
@@ -285,6 +286,25 @@ Expected:
 
 - The task does not expire early.
 - It finishes as `done` with a reply.
+
+## SS-016: Advance queued work after stable delivery uncertainty
+
+Purpose: verify that an uncertain recovered task does not reserve the session indefinitely.
+
+Steps:
+
+1. Submit a task and refresh immediately after Send so the banner enters `Delivery uncertain`.
+2. Submit a second task to the same session.
+3. Wait for the conversation to finish hydrating and remain visibly idle.
+4. Inspect both relay tasks and the ChatGPT conversation.
+
+Expected:
+
+- The first task is never submitted a second time.
+- Visible generation or a visible submitted user message continues to block the second task.
+- If no submission evidence appears, the first task ends as `submission_outcome_unknown` after the idle quarantine.
+- The second task leaves `queued` and runs normally.
+- Its reply is not captured as a late reply for the first task.
 
 ## Execution guidance
 

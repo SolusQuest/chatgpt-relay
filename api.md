@@ -70,7 +70,7 @@ The relay uses stable machine-readable codes for maintenance failures:
 |---|---|
 | `task_expired_before_dispatch` | A queued task crossed its deadline before the extension claimed it |
 | `task_processing_timeout` | An in-progress task crossed its deadline and active-task grace period |
-| `submission_outcome_unknown` | Send may have been attempted, but the extension could not confirm submission before the deadline |
+| `submission_outcome_unknown` | Send may have been attempted, but the extension could not confirm submission before the deadline or before safely advancing queued work |
 | `session_heartbeat_lost` | The relay released an in-progress task after its browser session became stale |
 | `aborted` | The extension task wait was aborted |
 
@@ -298,6 +298,8 @@ Defaults:
 - late-reply grace: 30 minutes.
 
 After a page-submitted task crosses its hard deadline, it remains `failed`, but the extension can store final page output in `lateReply` before `lateReplyDeadlineAt`. A task with `sendAttemptedAt` but without later acknowledgement evidence fails as `submission_outcome_unknown` instead of being automatically replayed.
+
+Late-reply observation normally keeps the session exclusive so a later reply cannot be attributed to newer work. New queued work may preempt that observation only after the page is fully hydrated and stably idle. In that case, the uncertain task remains terminal and is never replayed; the extension clears its browser-side observer before claiming the next task.
 
 If one `GET /v1/tasks/:id?wait=60000` call returns a non-terminal state, continue
 polling. An HTTP long-poll timeout is not a task timeout.

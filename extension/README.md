@@ -91,7 +91,9 @@ Agent -> POST /v1/tasks -> Relay server (Express + SQLite)
 | Extension or browser restarts | Service worker reconciliation | Restores the durable send fence before claiming more work and removes terminal orphan records |
 | Network changes | Content script | Observes connectivity and repeated request failures and reloads when needed |
 
-The browser path provides at-most-once automatic delivery. Once `send_attempted` has been durably recorded, an empty or still-hydrating DOM is treated as unknown evidence and never makes the task resendable. If submission cannot be confirmed before the task deadline, the task fails with `submission_outcome_unknown`; a reply discovered during the late-reply window is still stored as `lateReply`.
+The browser path provides at-most-once automatic delivery. Once `send_attempted` has been durably recorded, an empty or still-hydrating DOM is treated as unknown evidence and never makes the task resendable. If submission cannot be confirmed before the task deadline or before safely advancing queued work, the task fails with `submission_outcome_unknown`; a reply discovered while its observer remains active during the late-reply window is stored as `lateReply`.
+
+Late-reply observation does not reserve a session indefinitely. When a recovered delivery remains unconfirmed, the page is fully hydrated and stably idle, and newer work is queued, the extension ends the ambiguous observation with `submission_outcome_unknown` and advances the queue. A visible submitted user message continues to block until its hard deadline, and active generation always blocks. Advancing the queue never requeues or resends the uncertain task.
 
 ## Sanity check
 

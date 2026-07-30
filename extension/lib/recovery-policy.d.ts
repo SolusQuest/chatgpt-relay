@@ -9,6 +9,8 @@ export interface RecoveryRecord {
   deliveryPhase?: string | null;
   phase?: string | null;
   ackState?: string | null;
+  uncertainIdleSince?: number | null;
+  hardTimedOutAt?: number | null;
   [key: string]: unknown;
 }
 
@@ -32,6 +34,14 @@ export function hasSendFence(
 export function isRecoverableLateReply(
   task: RecoveryTask,
   now?: number,
+): boolean;
+
+export function shouldYieldPendingToQueuedTask(
+  snapshotStatus: string,
+  record?: RecoveryRecord,
+  hasQueuedTask?: boolean,
+  now?: number,
+  uncertainIdleReleaseMs?: number,
 ): boolean;
 
 export function classifyRecoveryAction(

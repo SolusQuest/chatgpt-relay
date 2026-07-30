@@ -14,6 +14,7 @@ import {
   POLL_NOT_STARTED_MAX,
   POLL_HARD_TIMEOUT_MS,
   POLL_LATE_REPLY_GRACE_MS,
+  UNCERTAIN_QUEUE_RELEASE_MS,
   POLL_REPLY_SENDMSG_TIMEOUT_MS,
   RUN_TASK_ACK_TIMEOUT_MS,
   PAGE_STATE_SENDMSG_TIMEOUT_MS,
@@ -22,6 +23,7 @@ import {
   classifyRecoveryAction,
   hasSendFence,
   isRecoverableLateReply,
+  shouldYieldPendingToQueuedTask,
 } from "./lib/recovery-policy.js";
 
 // Development debugging: set DEBUG to true or window.__gptRelayDebug in the popup.
@@ -226,6 +228,16 @@ async function reportTaskProgress(taskId, phase) {
 async function getSessionPendingReply(session) {
   const pending = await listPendingReplies();
   return Object.values(pending).find((rec) => rec?.session === session) ?? null;
+}
+
+async function hasQueuedTaskForSession(session) {
+  const response = await httpJson(
+    "GET",
+    `/v1/tasks?session=${encodeURIComponent(session)}&status=queued&limit=500`,
+  );
+  return Array.isArray(response?.tasks) &&
+    response.tasks.some((task) =>
+      typeof task?.expiresAt !== "number" || task.expiresAt > Date.now());
 }
 
 async function setClaimPendingReply(
@@ -783,8 +795,10 @@ async function pollOnePending(taskId, rec) {
 
   if (snap.status === "page-unready") {
     // Loading and hydration are absence of evidence, not evidence that Send
-    // failed. Do not advance any retry/failure counter.
+    // failed. Reset the idle quarantine so a later stable page must establish
+    // fresh evidence before queued work can advance.
     rec.pageUnreadyReason = snap.reason ?? "unknown";
+    rec.uncertainIdleSince = null;
     await setPendingReply(taskId, rec);
     return;
   }
@@ -837,6 +851,7 @@ async function pollOnePending(taskId, rec) {
   if (snap.status === "generating") {
     // Generation confirms submission, so reset the not-started counter.
     rec.notStartedCount = 0;
+    rec.uncertainIdleSince = null;
     rec.wasGenerating = true;
     rec.stoppedNoReplyCount = 0;
     rec.stableSampleCount = 0;
@@ -854,6 +869,7 @@ async function pollOnePending(taskId, rec) {
   if (snap.status === "posted-no-reply-yet") {
     // The user message was submitted but generation has not started.
     rec.notStartedCount = 0;
+    rec.uncertainIdleSince = null;
     if (rec.stopRequestedAt || rec.wasGenerating) {
       rec.stoppedNoReplyCount = (rec.stoppedNoReplyCount ?? 0) + 1;
       if (rec.stoppedNoReplyCount >= 2) {
@@ -864,6 +880,24 @@ async function pollOnePending(taskId, rec) {
     rec.lastSampleText = snap.lastText ?? rec.lastSampleText ?? "";
     rec.submittedUserMessageId =
       rec.submittedUserMessageId ?? snap.submittedUserMessageId ?? null;
+    if (rec.hardTimedOutAt) {
+      const hasQueuedTask = await hasQueuedTaskForSession(rec.session).catch((e) => {
+        console.warn("[relay sw] queued-task check failed", rec.session, e.message);
+        return false;
+      });
+      if (
+        shouldYieldPendingToQueuedTask(
+          snap.status,
+          rec,
+          hasQueuedTask,
+          now,
+          UNCERTAIN_QUEUE_RELEASE_MS,
+        )
+      ) {
+        await yieldUncertainPendingToQueue(taskId, rec);
+        return;
+      }
+    }
     await setPendingReply(taskId, rec);
     return;
   }
@@ -875,9 +909,28 @@ async function pollOnePending(taskId, rec) {
     }
     if (hasSendFence(rec)) {
       // The task crossed (or may have crossed) the Send boundary. An empty DOM
-      // after refresh can never make it automatically resendable.
+      // after refresh can never make it automatically resendable. Once the
+      // fully hydrated page has remained idle for a bounded quarantine, newer
+      // queued work may fail this task as uncertain and advance the session.
       rec.notStartedCount = 0;
       rec.deliveryUnconfirmedCount = (rec.deliveryUnconfirmedCount ?? 0) + 1;
+      rec.uncertainIdleSince ??= now;
+      const hasQueuedTask = await hasQueuedTaskForSession(rec.session).catch((e) => {
+        console.warn("[relay sw] queued-task check failed", rec.session, e.message);
+        return false;
+      });
+      if (
+        shouldYieldPendingToQueuedTask(
+          snap.status,
+          rec,
+          hasQueuedTask,
+          now,
+          UNCERTAIN_QUEUE_RELEASE_MS,
+        )
+      ) {
+        await yieldUncertainPendingToQueue(taskId, rec);
+        return;
+      }
       await setPendingReply(taskId, rec);
       return;
     }
@@ -911,6 +964,43 @@ async function failPending(taskId, rec, reason) {
   await setStorage(STORAGE_KEYS.LAST_ERROR, {
     taskId, session: rec.session, error: reason, at: Date.now(),
   });
+}
+
+async function yieldUncertainPendingToQueue(taskId, rec) {
+  const reason = "submission_outcome_unknown";
+  try {
+    await httpJson("POST", `/internal/tasks/${taskId}/complete`, { error: reason });
+  } catch (e) {
+    // A maintenance tick may already have made the old task terminal. Confirm
+    // that before clearing the browser-side dispatch lock; transient relay
+    // failures must leave the pending record intact for a later retry.
+    const current = await httpJson("GET", `/v1/tasks/${taskId}`).catch(() => null);
+    if (!current || !["done", "failed", "cancelled", "expired"].includes(current.status)) {
+      console.warn(
+        "[relay sw] cannot release uncertain task for queued work",
+        taskId,
+        e.message,
+      );
+      await setPendingReply(taskId, rec);
+      return false;
+    }
+  }
+
+  console.warn(
+    "[relay sw] releasing stable uncertain task for queued work",
+    taskId,
+    rec.session,
+  );
+  await deletePendingReply(taskId);
+  await clearInflight(rec.session);
+  await notifyTabCleared(rec.tabId);
+  await setStorage(STORAGE_KEYS.LAST_ERROR, {
+    taskId,
+    session: rec.session,
+    error: reason,
+    at: Date.now(),
+  });
+  return true;
 }
 
 async function abandonPending(taskId, rec, reason) {
