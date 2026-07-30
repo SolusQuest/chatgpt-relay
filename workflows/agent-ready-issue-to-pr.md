@@ -29,6 +29,10 @@ Use `issue-to-pr.md` when material product, scope, or acceptance questions remai
 
 Read the complete issue, repository instructions, relevant contracts, current implementation, and nearby tests. Confirm explicit scope/non-goals, testable acceptance criteria, no unresolved product or public-contract decision, and usable dependency handling. This is classification, not refinement.
 
+Verify or derive the issue's concise project constraint profile from current evidence, recording only dimensions that can change the implementation decision: release state and milestone purpose; real or committed near-term consumers and deployments; persisted production data or long-lived artifacts; compatibility/versioning commitments; reversibility and failure cost; and security, privacy, or regulatory boundaries. Use it throughout plan and PR review. Do not infer release-grade requirements from a maturity label or generic best practice.
+
+If an explicit frozen requirement appears materially disproportionate and cannot reasonably be satisfied by a narrower interpretation, record one contract-applicability challenge with evidence. Do not silently ignore it or spend implementation effort before resolving the contract: use one consolidated checkpoint in `default`, or return `BLOCKED_HANDOFF` in `auto`. A relay preference that is not part of the frozen contract does not trigger this checkpoint.
+
 If readiness fails, return the complete missing-decision set and recommend `issue-to-pr.md`. Use one checkpoint in `default`; in `auto`, do not rewrite the frozen issue and return `BLOCKED_HANDOFF` after independent safe analysis.
 
 ### Plan creation
@@ -45,7 +49,7 @@ The resulting visible plan contains:
 2. Implementation order and key engineering choices.
 3. Every acceptance criterion mapped to production behavior and tests.
 4. Happy, boundary, failure, regression, concurrency, and state-transition coverage as applicable.
-5. Relevant compatibility, migration, security, privacy, performance, and operational considerations.
+5. The applicable compatibility, migration, security, privacy, performance, and operational measures, with evidence and the minimum sufficient approach.
 6. Focused and complete validation, including CI-only or manual checks.
 7. Known risks and assumptions.
 
@@ -67,16 +71,33 @@ failure paths, security, performance, operational behavior, tests, validation,
 and ordering. For each blocker, cite the exact criterion or source, explain the
 implementation failure, and give the minimum correction.
 
+Evaluate applicability before severity. A general best practice is a blocker
+only when required by the frozen issue or repository policy, or omission causes
+a concrete current failure for a real consumer, persisted artifact, security
+boundary, or release commitment. State that basis, affected exposure, failure,
+why this plan must address it now, and why a simpler reversible measure is
+insufficient.
+
+Also identify planned release-grade versioning, migration, compatibility,
+deprecation, or operational complexity that lacks current evidence; recommend
+the minimum sufficient alternative. Project maturity is evidence, not a blanket
+exemption.
+
 Separate blockers from implementation-local detail, optional hardening, style,
 and follow-up work. State explicitly when implementation may begin.
 
 Issue: <url>
+
+--- project constraint profile ---
+<evidence and unknowns>
 
 --- implementation/test plan ---
 <complete plan>
 ```
 
 Apply the three-round budget and stable ledger from `review-convergence.md`. A plan `critical-late-finding` must identify the exact criterion, code path, contract, or source; the concrete implementation failure; and why it must be resolved before implementation. Record `late-nonblocking` and `out-of-scope` work without silently changing the issue.
+
+The agent independently applies the shared applicability test to every relay finding. Reject or defer a generally sound recommendation when it lacks current authority, exposure, failure, or scope necessity; use the narrowest adequate measure for an admitted blocker. Repetition without new evidence does not reopen the finding.
 
 The second submission includes the complete current plan, ledger, revision summary, and verified repository evidence.
 
@@ -90,7 +111,8 @@ or add optional scope.
 Review only unresolved ledger findings, revision regressions, new authoritative
 evidence, and proven critical late findings. For each blocker, give its ID,
 classification, exact source, concrete implementation failure, why it blocks,
-and the minimum correction.
+current applicability evidence, and the minimum sufficient correction. A generic
+best practice without a real current exposure and failure is non-blocking.
 
 Return exactly one verdict:
 - READY: no admissible implementation blocker remains.
@@ -101,6 +123,9 @@ Return exactly one verdict:
 Do not request another full review.
 
 Issue: <url>
+
+--- project constraint profile ---
+<evidence and unknowns>
 
 --- finding ledger ---
 <complete ledger>
@@ -132,6 +157,8 @@ Implement production behavior and tests together within the frozen issue:
 - For bugs, demonstrate a failing regression before the fix when practical; for new behavior, directly cover acceptance and failure paths.
 
 Do not create artificial naive/no-op evidence that proves nothing. Update the visible plan when implementation-local details improve without changing scope.
+
+Do not add compatibility, versioning, migration, abstraction, or operational machinery solely because relay recommended it. Implement only admitted requirements and the minimum sufficient corrections recorded in the ledger.
 
 If implementation reveals a material architecture, public-contract, migration, security, or test-strategy change, use a remaining Phase 2 round only when available. After budget exhaustion, continue only for a deterministic in-scope correction verified from authoritative evidence and covered later by tests and PR review. A fresh broad review or missing product decision requires one checkpoint in `default` or `BLOCKED_HANDOFF` in `auto`; never reset automatically.
 
@@ -166,17 +193,32 @@ exact file/code path/input-state sequence or failing check, expected versus
 actual failure, affected criterion or contract, why this PR must fix it, and the
 minimum correction.
 
+Evaluate applicability before severity. A general best practice is a blocker
+only when required by the frozen issue or repository policy, or omission causes
+a concrete current failure for a real consumer, persisted artifact, security
+boundary, or release commitment. State that basis, affected exposure, failure,
+why this PR must fix it now, and why a simpler reversible measure is
+insufficient.
+
+Also identify implementation that adds release-grade versioning, migration,
+compatibility, deprecation, abstraction, or operations without current evidence;
+recommend the minimum sufficient simplification. Project maturity is evidence,
+not a blanket exemption.
+
 Separate blockers from optional hardening, style, refactoring, and follow-up
 work. Return READY_FOR_HUMAN_REVIEW when no blocker remains and list risks.
 
 PR: <url>
 Issue: <url>
 Current pushed head: <sha>
+
+--- project constraint profile ---
+<evidence and unknowns>
 ```
 
 Apply the shared three-round protocol to the relay submission in each integrated round. The unified PR ledger records source, classification/severity, contract impact, status, observed/reviewed/fix heads, disposition, and evidence. A PR `critical-late-finding` from any channel may block only with exact code location/path, triggering input/state/call sequence, expected versus actual failure, acceptance or contract impact, and why this PR must fix it.
 
-After the round barrier, verify disputed repository facts locally and reconcile duplicate or conflicting reports by evidence. If no admissible blocker remains, proceed to the final readiness gate. If blockers remain before the third round, fix the combined verified set, validate, commit, and push the next head. Record non-blocking work or scope expansion without adopting it mechanically. A readiness verdict applies only to its exact pushed head.
+After the round barrier, verify disputed repository facts locally, apply the shared applicability test independently, and reconcile duplicate or conflicting reports by evidence. If no admissible blocker remains, proceed to the final readiness gate. If blockers remain before the third round, fix the combined verified set with minimum sufficient measures, validate, commit, and push the next head. Record non-blocking work or scope expansion without adopting it mechanically. A readiness verdict applies only to its exact pushed head.
 
 The second full review includes the PR URL, previous and current heads, complete ledger, fix summary, and head-to-head diff. It verifies prior findings, revision regressions, and new evidence without renaming or reopening findings silently.
 
@@ -207,7 +249,8 @@ acceptance or repository-contract violations on the current head.
 
 For each blocker, give its ID and classification, exact path and trigger,
 expected versus actual failure, affected criterion or contract, why it blocks,
-and the minimum correction.
+current applicability evidence, and the minimum sufficient correction. A generic
+best practice without a real current exposure and failure is non-blocking.
 
 Return exactly one verdict:
 - READY_FOR_HUMAN_REVIEW: no blocker remains on this head.
@@ -221,6 +264,9 @@ Do not request another full review.
 PR: <url>
 Previous reviewed head: <sha>
 Current pushed head: <sha>
+
+--- project constraint profile ---
+<evidence and unknowns>
 
 --- finding ledger ---
 <complete ledger>

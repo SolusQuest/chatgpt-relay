@@ -20,6 +20,20 @@ Do not reset the budget because relay introduces a later finding, the artifact c
 
 Never start a fourth unrestricted review. The limit bounds re-review; it never makes a real blocker non-blocking or turns exhausted budget into approval.
 
+## Applicability and proportionality
+
+Before admitting any agent, relay, CI, or GitHub finding as a blocker, the agent must establish:
+
+1. **Authority** — the current issue, repository policy, approved design, user instruction, or another binding source requires it; or verified evidence proves a correctness, security, privacy, data, or operational failure.
+2. **Current exposure** — identify the real current or committed near-term consumer, persisted artifact, interoperability boundary, deployment, release commitment, or protected asset affected now; a hypothetical future consumer is insufficient.
+3. **Concrete failure** — state what fails if the requirement is omitted in the current artifact.
+4. **Timing and scope** — explain why the current issue, plan, or PR must address it rather than a later release gate or follow-up.
+5. **Minimum sufficient measure** — explain why a simpler, reversible, or narrower solution is insufficient.
+
+Assess project maturity from repository and user evidence: release state, real consumers, persisted production data, compatibility/versioning commitments, reversibility, failure cost, security or regulatory boundaries, and the current milestone's purpose. A maturity label is neither proof of exposure nor a blanket exemption. A pre-release project may still need a small internal format discriminator or safety invariant, but it does not inherit full release-grade versioning, migration, deprecation, or operational machinery without evidence.
+
+A generally sound best practice that fails this test is not a current blocker. Mark it `deferred`, `out-of-scope`, or `rejected` with evidence and, when useful, record the release condition that would make it applicable. Relay may challenge the agent's assessment, but repetition or stronger wording is not new evidence. If an explicit frozen contract itself appears materially disproportionate, do not silently ignore or reinterpret it; record one contract-applicability challenge and use the active workflow's user-decision rule.
+
 ## Finding ledger
 
 After the initial response, maintain stable finding IDs and record:
@@ -28,6 +42,8 @@ After the initial response, maintain stable finding IDs and record:
 |---|---|
 | Classification | Why the finding is admissible and blocking or non-blocking |
 | Basis | Acceptance criterion, contract, code path, test, CI result, or other authoritative source |
+| Applicability | `required-now`, `defer`, or `not-applicable`; blockers and disputed findings include current exposure, concrete failure, timing, and scope evidence |
+| Minimum sufficient measure | For `required-now`, the narrowest adequate correction; otherwise why no current change is required and, when useful, the future activation condition |
 | Status | `open`, `resolved`, `rejected`, `deferred`, or `disputed` |
 | Artifact lineage | Reviewed revision or head and, when applicable, correction revision or head |
 | Disposition | Agent action and verification evidence |
@@ -41,7 +57,7 @@ Classify a finding first raised after the initial review as:
 - `out-of-scope` — valid work not required for the current artifact to be correct.
 - `user-decision` — when supported by the phase, a product or material trade-off the agent is not authorized to settle.
 
-Timing alone neither admits nor waives a blocker. Verify relay claims against authoritative repository evidence. Fix a real in-scope blocker, record or defer non-blocking work, reject unsupported claims with evidence, and never expand scope silently.
+Timing alone neither admits nor waives a blocker. Verify relay claims against authoritative repository evidence and apply the applicability test independently. Fix a real in-scope blocker with the minimum sufficient measure, record or defer non-blocking work, reject unsupported or context-inapplicable claims with evidence, and never expand scope silently.
 
 ## Final convergence and continuation
 

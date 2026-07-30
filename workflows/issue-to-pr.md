@@ -31,12 +31,14 @@ Identify every material decision required for an implementable issue contract.
 
 Use the independent-discussion barriers from `agent-instructions.md`:
 
-1. Submit the issue or accessible URL to relay first and request an independent list of blocking decision points.
-2. Before reading the reply, inspect the repository and persist the agent's own list to a visible draft.
+1. Submit the issue or accessible URL to relay first and request an independent list of blocking decision points plus the project-stage facts needed to judge them.
+2. Before reading the reply, inspect the repository and persist the agent's own decision list and project constraint profile to a visible draft.
 3. Compare overlap, agent-only points, relay-only points, and substantive conflicts.
 4. Verify repository claims and discuss only material gaps.
 
 Cover scope and non-goals, testable acceptance criteria, public contracts and compatibility, migration or rollout, failure and operational constraints, security/privacy/performance, dependencies, sequencing, and naming where relevant.
+
+The project constraint profile is a concise evidence summary, not a new design document. Record only dimensions that can change the current contract: release state and milestone purpose; real or committed near-term consumers and deployments; persisted production data or long-lived artifacts; compatibility/versioning commitments; reversibility and failure cost; and security, privacy, or regulatory boundaries. Use it to select the minimum sufficient durability for the current stage. Do not introduce release-grade versioning, migration, deprecation, compatibility, or operational machinery merely because it is generally useful.
 
 Stop when no unresolved decision blocks drafting, another round adds no substantive point, or remaining differences are wording or optional follow-ups. Use at most three discussion follow-up rounds; `auto` does not add more.
 
@@ -50,7 +52,7 @@ Create a visible local draft using the target repository's issue template. Inclu
 2. Scope, exclusions, and non-goals.
 3. Concrete, testable acceptance criteria.
 4. Dependencies and sequencing.
-5. Relevant compatibility, migration, security, and operational requirements.
+5. The evidence-based lifecycle/compatibility posture and only the compatibility, migration, security, and operational requirements applicable now.
 6. Risks and deferred follow-ups.
 7. Resolved decisions that prevent implementation ambiguity.
 
@@ -67,10 +69,25 @@ and unresolved decisions. For each blocker, cite the issue section or
 authoritative source, explain the implementation ambiguity or failure, and give
 the minimum correction.
 
+Evaluate applicability before severity. A general best practice is a blocker
+only when required by the current contract or repository policy, or omission
+causes a concrete current failure for a real consumer, persisted artifact,
+security boundary, or release commitment. State that basis, affected exposure,
+failure, why this issue must address it now, and why a simpler reversible
+measure is insufficient.
+
+Also identify requirements in the draft that impose release-grade versioning,
+migration, compatibility, deprecation, or operations without current evidence;
+recommend the minimum sufficient alternative. Project maturity is evidence, not
+a blanket exemption.
+
 Separate blockers from wording, style, optional enhancements, and follow-up
 work. If no blocker remains, state that the issue is agent-ready.
 
 Issue or placeholder: <url if available>
+
+--- project constraint profile ---
+<evidence and unknowns>
 
 --- refined issue draft ---
 <complete draft>
@@ -81,6 +98,8 @@ Apply the three-round budget and stable finding ledger from `review-convergence.
 - `critical-late-finding` requires the exact issue section or source, resulting ambiguity or failure, affected acceptance criterion or contract boundary, and why this issue must resolve it.
 - `user-decision` identifies a material trade-off outside agent authority.
 - `late-nonblocking` and `out-of-scope` are recorded as exclusions, deferred work, or remaining risk.
+
+The agent independently applies the shared applicability test to every relay finding. A repeated general recommendation without new authority or failure evidence does not reopen a rejected or deferred finding. If the draft's explicit frozen requirement is materially disproportionate, record one contract-applicability challenge rather than silently weakening it.
 
 The second submission includes the complete current body, ledger, and revision summary.
 
@@ -93,7 +112,9 @@ reopen resolved findings without evidence, or add optional scope.
 Review only unresolved ledger findings, revision regressions, new authoritative
 evidence, and proven critical late findings. For each blocker, give its stable
 ID, classification, exact source, concrete implementation failure, why it blocks
-an agent-ready contract, and the minimum correction or user decision.
+an agent-ready contract, current applicability evidence, and the minimum
+sufficient correction or user decision. A generic best practice without a real
+current exposure and failure is non-blocking.
 
 Return exactly one verdict:
 - READY: no admissible contract blocker remains.
@@ -103,6 +124,9 @@ Return exactly one verdict:
 Do not request another full review.
 
 Issue or placeholder: <url if available>
+
+--- project constraint profile ---
+<evidence and unknowns>
 
 --- finding ledger ---
 <complete ledger>

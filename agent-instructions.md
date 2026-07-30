@@ -10,6 +10,7 @@ gpt-relay is a local SQLite-backed queue between an agent and the user's signed-
 - Reuse that session across every relay phase and round in the task.
 - Review remote PRs only after commit, push, and draft-PR publication. The final verdict must apply to the exact pushed head.
 - User authorization owns product decisions and final merge. Agent-relay agreement cannot replace it.
+- Relay findings are review inputs, not authoritative requirements. The agent owns the evidence-based applicability, scope, and proportionality decision under [`review-convergence.md`](./workflows/review-convergence.md); do not implement a generally useful recommendation mechanically when it is unnecessary for the current project stage or artifact.
 - Follow the active workflow's `default` or `auto` mode and its [`review-convergence.md`](./workflows/review-convergence.md) budget. Never add rounds because the mode is `auto`, treat exhausted budget as approval, or ask relay separately whether auto execution may continue.
 - On pause, captcha, or explicit rate limiting, stop relay submission and do not retry automatically. Complete independent safe work and follow the active mode's consolidated checkpoint or blocked-handoff rule.
 
@@ -29,10 +30,11 @@ Assume the session can access user-authorized GitHub URLs and retains the projec
 For a PR, send the remote URL and exact head:
 
 ```text
-Act as a strict code reviewer for this draft PR.
+Act as a strict code reviewer for this PR.
 
 List required changes first. If no blocking issue remains, state that it is safe
-to request human review and list remaining risks.
+to request human review and list remaining risks. Do not promote a general best
+practice to a blocker without current applicability evidence.
 
 PR: https://github.com/<owner>/<repo>/pull/<number>
 Head: <sha>
@@ -44,7 +46,9 @@ For an unpublished issue, send the complete draft rather than a summary:
 Act as a strict product and engineering reviewer for this issue draft.
 
 Check scope, non-goals, acceptance criteria, dependencies, risks,
-compatibility, and executability. Separate blockers from optional work.
+compatibility, and executability. Separate blockers from optional work, and
+challenge unnecessary release-grade requirements with a simpler sufficient
+alternative.
 
 --- issue draft ---
 <complete text>
