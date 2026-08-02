@@ -8,11 +8,13 @@ import path from "node:path";
 import http from "node:http";
 import { createApp } from "../server/app.js";
 import { loadConfig } from "../server/config.js";
+import type { TaskStore } from "../server/task-store.js";
 import type { AddressInfo } from "node:net";
 
 let baseUrl = "";
 let server: http.Server | null = null;
 let stopMaintenance: (() => void) | null = null;
+let taskStore: TaskStore | null = null;
 let dataDir = "";
 
 before(async () => {
@@ -21,6 +23,7 @@ before(async () => {
   process.env.GPT_RELAY_PORT = "0";
   const config = loadConfig();
   const handle = createApp(config);
+  taskStore = handle.store;
   stopMaintenance = handle.stopMaintenance;
   await new Promise<void>((resolve) => {
     server = handle.app.listen(0, "127.0.0.1", () => resolve());
@@ -102,6 +105,7 @@ test("internal next_task returns null then task on demand", async () => {
   assert.equal(got.json.task?.text, "hi");
   assert.equal(typeof got.json.task?.expiresAt, "number");
   assert.equal(typeof got.json.task?.completionDeadlineAt, "number");
+  assert.equal(typeof got.json.task?.recoveryDeadlineAt, "number");
   assert.equal(typeof got.json.task?.lateReplyDeadlineAt, "number");
 });
 
@@ -243,6 +247,7 @@ test("progress endpoint records page lifecycle timestamps", async () => {
     "send_attempted",
     "submit_acknowledged",
     "generating_seen",
+    "recovery_observed",
     "reply_detected",
   ]) {
     const progress = await post(`/internal/tasks/${id}/progress`, { phase });
@@ -253,7 +258,64 @@ test("progress endpoint records page lifecycle timestamps", async () => {
   assert.equal(typeof task.json.sendAttemptedAt, "number");
   assert.equal(typeof task.json.submitAcknowledgedAt, "number");
   assert.equal(typeof task.json.generatingSeenAt, "number");
+  assert.equal(typeof task.json.recoveryObservedAt, "number");
   assert.equal(typeof task.json.replyDetectedAt, "number");
+});
+
+test("soft deadline exposes recovering until a normal reply completes it", async () => {
+  const c = await post("/v1/tasks", {
+    session: "recovering-api",
+    text: "keep waiting",
+    timeout: 1000,
+  });
+  const id = c.json.taskId;
+  await get("/internal/next_task?session=recovering-api");
+  await post(`/internal/tasks/${id}/progress`, { phase: "send_attempted" });
+  await post(`/internal/tasks/${id}/progress`, { phase: "submit_acknowledged" });
+  const active = await get(`/v1/tasks/${id}`);
+  taskStore!.expireDueTasks(active.json.completionDeadlineAt + 1);
+
+  const recovering = await get(`/v1/tasks/${id}?wait=1`);
+  assert.equal(recovering.json.status, "recovering");
+  assert.equal(recovering.json.error, null);
+  assert.equal(recovering.json.recoveryReason, "task_deadline_exceeded");
+  assert.equal(typeof recovering.json.recoveryStartedAt, "number");
+  assert.equal(typeof recovering.json.recoveryLeaseDeadlineAt, "number");
+  assert.equal(typeof recovering.json.recoveryDeadlineAt, "number");
+
+  const sessions = await get("/v1/sessions");
+  const session = sessions.json.sessions.find((row: any) => row.session === "recovering-api");
+  assert.equal(session.activeTaskId, id);
+  assert.equal(session.activeTaskStatus, "recovering");
+
+  const captured = await post(`/internal/tasks/${id}/capture`, { text: "finished late" });
+  assert.equal(captured.json.status, "done");
+  assert.equal(captured.json.late, false);
+  const done = await get(`/v1/tasks/${id}`);
+  assert.equal(done.json.reply, "finished late");
+  assert.equal(done.json.lateReply, null);
+});
+
+test("page user Stop cancels a recovering task", async () => {
+  const c = await post("/v1/tasks", {
+    session: "recovering-stop-api",
+    text: "stop this recovery",
+    timeout: 1000,
+  });
+  const id = c.json.taskId;
+  await get("/internal/next_task?session=recovering-stop-api");
+  await post(`/internal/tasks/${id}/progress`, { phase: "send_attempted" });
+  const active = await get(`/v1/tasks/${id}`);
+  taskStore!.expireDueTasks(active.json.completionDeadlineAt + 1);
+
+  const stopped = await post(`/internal/tasks/${id}/user-stop`, {
+    reason: "user selected Stop",
+  });
+  assert.equal(stopped.status, 200);
+  assert.equal(stopped.json.status, "cancelled");
+  const cancelled = await get(`/v1/tasks/${id}`);
+  assert.equal(cancelled.json.status, "cancelled");
+  assert.equal(cancelled.json.error, "user selected Stop");
 });
 
 test("defer endpoint returns a claimed page-busy task to queued", async () => {

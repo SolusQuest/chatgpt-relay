@@ -31,8 +31,8 @@ ChatGPT web interface.
 ## Popup
 
 - Health indicator: green when the relay is reachable, red otherwise.
-- Sessions: each connected ChatGPT tab, its server-side status, and in-flight
-  task.
+- Sessions: each connected ChatGPT tab, its server-side status, queued count,
+  and active task status (including `recovering`).
 - Recent tasks: status and duration for the latest eight tasks.
 - Relay URL: defaults to `http://127.0.0.1:8765`.
 - **Poll now**: requests an immediate poll instead of waiting for the next
@@ -77,7 +77,9 @@ Agent -> POST /v1/tasks -> Relay server (Express + SQLite)
   - sends `run-task` to the content script;
   - records the task in its persistent pending-reply state;
   - samples the page every two seconds and completes the task after the reply is
-    stable.
+    stable;
+  - after the soft deadline, renews a bounded recovery lease only while strong
+    evidence for the original task remains visible.
 - Durable extension state lives in `chrome.storage.local`, including
   `inflight`, `pending_replies`, and `tab_session_map`.
 
@@ -91,9 +93,14 @@ Agent -> POST /v1/tasks -> Relay server (Express + SQLite)
 | Extension or browser restarts | Service worker reconciliation | Restores the durable send fence before claiming more work and removes terminal orphan records |
 | Network changes | Content script | Observes connectivity and repeated request failures and reloads when needed |
 
-The browser path provides at-most-once automatic delivery. Once `send_attempted` has been durably recorded, an empty or still-hydrating DOM is treated as unknown evidence and never makes the task resendable. If submission cannot be confirmed before the task deadline or before safely advancing queued work, the task fails with `submission_outcome_unknown`; a reply discovered while its observer remains active during the late-reply window is stored as `lateReply`.
+The browser path provides at-most-once automatic delivery. Once `send_attempted` has been durably recorded, an empty or still-hydrating DOM is treated as unknown evidence and never makes the task resendable. When the normal task lifetime plus active grace passes, the server exposes non-terminal `recovering` instead of immediately failing the task. A reply captured in that state completes normally and is stored as `reply`.
 
-Late-reply observation does not reserve a session indefinitely. When a recovered delivery remains unconfirmed, the page is fully hydrated and stably idle, and newer work is queued, the extension ends the ambiguous observation with `submission_outcome_unknown` and advances the queue. A visible submitted user message continues to block until its hard deadline, and active generation always blocks. Advancing the queue never requeues or resends the uncertain task.
+Active generation or the exact submitted user message with no reply is strong recovery evidence. The extension reports that observation at a bounded cadence, renewing a short server lease. A generic heartbeat, history hydration, or empty DOM does not renew it. Recovery ends on a reply, explicit Stop/cancel, session heartbeat loss, lease expiry, or the absolute recovery deadline.
+
+A recovering task reserves the session. A visible submitted message continues to block until a terminal transition, and active generation always blocks. When a recovered delivery remains genuinely unconfirmed, the page is fully hydrated and stably idle, and newer work is queued, the extension can end the ambiguous observation with `submission_outcome_unknown` and advance the queue. Advancing never requeues or resends the uncertain task. A reply discovered after an eligible early terminal failure can still be stored as `lateReply` during the remaining bounded window.
+
+See [`task-lifecycle.md`](../task-lifecycle.md) for the complete state diagram,
+lease rules, and Agent behavior.
 
 ## Sanity check
 
@@ -108,4 +115,4 @@ printf '%s' 'Review this function: function add(a,b){return a+b}' |
   gpt-relay review --session <session-id> --stdin --wait-timeout 60000
 ```
 
-To exercise recovery, submit a review and refresh the ChatGPT page while it is generating. The extension should recover or reattach to the reply, the conversation should contain exactly one copy of the user prompt, and the CLI should eventually receive either the completed task or an explicit `submission_outcome_unknown` failure.
+To exercise recovery, submit a review and refresh the ChatGPT page while it is generating. The extension should recover or reattach to the reply, the conversation should contain exactly one copy of the user prompt, and the task should either complete normally or reach one explicit terminal recovery error. It must never be automatically submitted a second time.

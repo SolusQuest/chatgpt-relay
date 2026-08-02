@@ -37,7 +37,12 @@ async function refresh() {
     let view = "(not seen)";
     if (tab.offline) view = "offline";
     else if (server?.paused) view = `paused: ${server.pauseReason ?? ''}`;
-    else if (server) view = `pending=${server.pendingTasks}`;
+    else if (server) {
+      const activeId = server.activeTaskId ?? server.inProgressTaskId;
+      const activeStatus = server.activeTaskStatus ?? (activeId ? "in_progress" : null);
+      view = `pending=${server.pendingTasks}` +
+        (activeId ? ` · active=${activeStatus}:${activeId.slice(0, 8)}` : "");
+    }
     tr.innerHTML = `
       <td class="mono" title="${tab.session ?? ''}">${(tab.session ?? '?').slice(0, 12)}…</td>
       <td>${view}</td>

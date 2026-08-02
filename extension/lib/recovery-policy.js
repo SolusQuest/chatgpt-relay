@@ -12,6 +12,8 @@ const PROVEN_PRE_SEND_PHASES = new Set([
 const LATE_REPLY_ERRORS = new Set([
   "task_processing_timeout",
   "submission_outcome_unknown",
+  "task_recovery_timeout",
+  "task_recovery_lease_expired",
   "session_heartbeat_lost",
   "aborted",
 ]);
@@ -56,13 +58,8 @@ export function shouldYieldPendingToQueuedTask(
       now - record.uncertainIdleSince >= uncertainIdleReleaseMs;
   }
 
-  // A visible submitted user message remains authoritative until the task's
-  // hard deadline. After that deadline, queued work may preempt ambiguous
-  // late-reply observation as long as the page is idle.
-  if (snapshotStatus === "posted-no-reply-yet") {
-    return typeof record.hardTimedOutAt === "number";
-  }
-
+  // A visible submitted user message is strong task evidence. It reserves the
+  // session until the task itself reaches a terminal transition.
   return false;
 }
 
@@ -83,6 +80,9 @@ export function classifyRecoveryAction(task, record = {}, now = Date.now()) {
   }
   if (task.status === "in_progress") {
     return fenced ? "reattach" : "defer";
+  }
+  if (task.status === "recovering") {
+    return fenced ? "reattach" : "clear";
   }
   return "wait";
 }

@@ -32,6 +32,7 @@ uses a real browser, ChatGPT page, extension, and relay server.
 | SS-014 | Reject empty text and accept very short text | P2 | Input validation |
 | SS-015 | Allow a five-minute task timeout | P2 | Timeout lifecycle |
 | SS-016 | Advance queued work after stable delivery uncertainty | P0 | `stable uncertain delivery yields only when newer work is queued` |
+| SS-017 | Maintain and terminate soft-deadline recovery | P0 | recovering lifecycle and API tests |
 
 ## SS-001: Basic short-text round trip
 
@@ -189,7 +190,8 @@ Expected:
 - The relay banner reappears and enters recovery or waiting state.
 - Every post-attempt case contains exactly one copy of the user prompt.
 - A proven pre-send interruption may defer and execute once after the page stabilizes.
-- A post-attempt case finishes with the captured reply or the explicit `submission_outcome_unknown` error; it is never automatically replayed.
+- A post-attempt case finishes with the captured reply or an explicit terminal
+  recovery error; it is never automatically replayed.
 
 ## SS-010: Recover after reloading the extension
 
@@ -306,9 +308,46 @@ Expected:
 - The second task leaves `queued` and runs normally.
 - Its reply is not captured as a late reply for the first task.
 
+## SS-017: Maintain and terminate soft-deadline recovery
+
+Purpose: verify that a long page-submitted task remains non-terminal after its
+normal lifetime, blocks queued work, and ends through the correct explicit
+transition.
+
+Setup:
+
+1. During an idle test window, start a disposable relay data directory with
+   short values for `GPT_RELAY_DEFAULT_TIMEOUT_MS`,
+   `GPT_RELAY_ACTIVE_TASK_GRACE_MS`, `GPT_RELAY_RECOVERY_LEASE_MS`, and
+   `GPT_RELAY_LATE_REPLY_GRACE_MS`.
+2. Reload the extension and refresh the target ChatGPT tab so both sides use
+   the test server.
+
+Steps:
+
+1. Submit a prompt that visibly generates beyond `completionDeadlineAt`.
+2. Submit a second task to the same session.
+3. Inspect the first task with `gpt-relay show <task-id>` while generation is
+   active.
+4. Let one run finish normally; repeat once and select Stop; repeat once and
+   close the ChatGPT tab.
+
+Expected:
+
+- After the soft deadline, the first task is `recovering`, not `failed`.
+- `recoveryObservedAt` and `recoveryLeaseDeadlineAt` advance while strong page
+  evidence remains visible, but `recoveryDeadlineAt` does not move.
+- The queued successor remains `queued` while the first task is recovering.
+- A normal reply transitions `recovering` to `done` and is stored in `reply`.
+- Page Stop transitions it to `cancelled`.
+- Closing the tab transitions it to `failed` with `session_heartbeat_lost`
+  after the configured heartbeat grace.
+- No run submits the original prompt more than once.
+
 ## Execution guidance
 
-- Treat SS-001, SS-002, SS-003, SS-009, and SS-010 as the core regression set.
+- Treat SS-001, SS-002, SS-003, SS-009, SS-010, and SS-017 as the core
+  regression set.
 - Before each run, use `npx tsx bin/gpt-relay.ts sessions` to confirm that no
   unexpected task is in flight.
 - Allow margin for variable ChatGPT response times.

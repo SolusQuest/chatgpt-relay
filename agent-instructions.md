@@ -1,6 +1,6 @@
 # gpt-relay agent guide
 
-Use this guide for relay mechanics. Multi-stage orchestration lives in [`workflows/`](./workflows/README.md); HTTP schemas, lifecycle details, and environment variables live in [`api.md`](./api.md).
+Use this guide for relay mechanics. Multi-stage orchestration lives in [`workflows/`](./workflows/README.md); HTTP schemas and environment variables live in [`api.md`](./api.md); the complete state machine lives in [`task-lifecycle.md`](./task-lifecycle.md).
 
 ## Core rules
 
@@ -98,7 +98,7 @@ gpt-relay resume
 gpt-relay cancel <task-id>
 ```
 
-The client waits 10 minutes by default and tasks live for 30 minutes by default. `--wait-timeout` changes only the current CLI wait; `--task-timeout` changes the server deadline. Pending records under `~/.gpt-relay/pending/` let `resume` recover without duplicate submission. Retriable calls should use `--cri <stable-key>` for same-session idempotency.
+The client waits 10 minutes by default and the normal task lifetime is 30 minutes by default. A page-submitted task that crosses that lifetime plus active-task grace becomes non-terminal `recovering`; the extension can maintain it with strong page evidence until its bounded recovery deadline. `--wait-timeout` changes only the current CLI wait; `--task-timeout` changes the normal server lifetime. Pending records under `~/.gpt-relay/pending/` let `resume` recover without duplicate submission. Retriable calls should use `--cri <stable-key>` for same-session idempotency.
 
 Different user-supplied sessions may run concurrently; one session processes at most one in-flight task. Never switch sessions merely because another is idle.
 
@@ -110,11 +110,12 @@ Different user-supplied sessions may run concurrently; one session processes at 
 | Supplied session absent | Ask the user to open that conversation and confirm the relay banner |
 | Session paused, captcha, or rate limited | Stop submission, report `pauseReason`, and do not retry automatically |
 | Client wait times out | Keep `taskId`; use `show` or `resume`; do not resubmit |
+| Task is `recovering` | The original ChatGPT request may still complete; keep the task ID, inspect with `show` or `resume`, and do not resubmit |
 | Task failed, cancelled, or expired | Report `error`; use `resume` only when a late-reply window remains |
 | Relay cannot access an artifact | Send the complete authorized material or ask the user to fix access |
 | Reply is clearly off topic | Add missing context or confirm the session; it is not a substantive review round |
 
-A long poll returning `queued` or `in_progress` is not failure. See [`api.md`](./api.md) for lifecycle and late-reply semantics.
+A long poll returning `queued`, `in_progress`, or `recovering` is not failure. A queued successor remains blocked while the original task is recovering; do not bypass that guard by creating another copy. See [`task-lifecycle.md`](./task-lifecycle.md) for recovery evidence and terminal transitions.
 
 ## Safety and anti-patterns
 

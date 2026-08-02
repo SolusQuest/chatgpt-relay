@@ -16,6 +16,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     defaultTimeoutMs: 60_000,
     maxTaskTimeoutMs: 3_600_000,
     activeTaskGraceMs: 5_000,
+    recoveryLeaseMs: 10_000,
     lateReplyGraceMs: 30_000,
     heartbeatStaleMs: 30_000,
     sessionActiveMs: 30_000,
@@ -38,13 +39,15 @@ function makeStore(overrides: Partial<Config> = {}): TaskStore {
       submit_started_at INTEGER, send_attempted_at INTEGER,
       submit_acknowledged_at INTEGER,
       generating_seen_at INTEGER, reply_detected_at INTEGER,
+      recovery_started_at INTEGER, recovery_observed_at INTEGER,
+      recovery_reason TEXT,
       expires_at INTEGER NOT NULL,
       requeue_count INTEGER NOT NULL DEFAULT 0
     );
     CREATE UNIQUE INDEX uniq_tasks_cri ON tasks(session, client_request_id)
       WHERE client_request_id IS NOT NULL;
     CREATE UNIQUE INDEX uniq_tasks_active ON tasks(session)
-      WHERE status = 'in_progress';
+      WHERE status IN ('in_progress', 'recovering');
     CREATE TABLE sessions (
       id TEXT PRIMARY KEY, last_seen INTEGER NOT NULL, last_status_at INTEGER,
       paused INTEGER NOT NULL DEFAULT 0, pause_reason TEXT, paused_at INTEGER
@@ -96,6 +99,23 @@ test("claimNextTask returns null when session already has in_progress", () => {
   store.claimNextTask("s1");
   const second = store.claimNextTask("s1");
   assert.equal(second, null);
+});
+
+test("claimNextTask treats recovering as the session's active task", () => {
+  const store = makeStore({
+    activeTaskGraceMs: 500,
+    recoveryLeaseMs: 5_000,
+    lateReplyGraceMs: 10_000,
+  });
+  const first = store.createTask({ session: "s1", text: "slow", timeoutMs: 1000, now: 100 });
+  store.claimNextTask("s1", 200);
+  store.markTaskProgress(first.id, "send_attempted", 300);
+  store.markTaskProgress(first.id, "submit_acknowledged", 400);
+  store.createTask({ session: "s1", text: "next", timeoutMs: 5000, now: 500 });
+  store.expireDueTasks(1601);
+
+  assert.equal(store.getTask(first.id)?.status, "recovering");
+  assert.equal(store.claimNextTask("s1", 1700), null);
 });
 
 test("claimNextTask returns null on empty queue", () => {
@@ -207,29 +227,92 @@ test("markTaskProgress records each page lifecycle phase once", () => {
   store.markTaskProgress(t.id, "send_attempted", 250);
   store.markTaskProgress(t.id, "submit_acknowledged", 300);
   store.markTaskProgress(t.id, "generating_seen", 400);
+  store.markTaskProgress(t.id, "recovery_observed", 450);
+  store.markTaskProgress(t.id, "recovery_observed", 475);
   const progressed = store.markTaskProgress(t.id, "reply_detected", 500);
   assert.equal(progressed.submitStartedAt, 100);
   assert.equal(progressed.sendAttemptedAt, 250);
   assert.equal(progressed.submitAcknowledgedAt, 300);
   assert.equal(progressed.generatingSeenAt, 400);
+  assert.equal(progressed.recoveryObservedAt, 475);
   assert.equal(progressed.replyDetectedAt, 500);
 });
 
-test("send-attempted task times out as submission outcome unknown and accepts a late reply", () => {
-  const store = makeStore({ activeTaskGraceMs: 500, lateReplyGraceMs: 5_000 });
+test("send-attempted task enters recovering and a reply completes normally", () => {
+  const store = makeStore({
+    activeTaskGraceMs: 500,
+    recoveryLeaseMs: 5_000,
+    lateReplyGraceMs: 5_000,
+  });
   const t = store.createTask({ session: "s1", text: "q", timeoutMs: 1000, now: 100 });
   store.claimNextTask("s1", 200);
   store.markTaskProgress(t.id, "send_attempted", 300);
 
   store.expireDueTasks(1601);
-  const failed = store.getTask(t.id);
-  assert.equal(failed?.status, "failed");
-  assert.equal(failed?.error, "submission_outcome_unknown");
+  const recovering = store.getTask(t.id);
+  assert.equal(recovering?.status, "recovering");
+  assert.equal(recovering?.error, null);
+  assert.equal(recovering?.recoveryReason, "delivery_uncertain");
+  assert.equal(recovering?.recoveryStartedAt, 1601);
 
   const captured = store.captureReply(t.id, "eventual answer", 2000);
   assert.equal(captured.captured, true);
-  assert.equal(captured.late, true);
-  assert.equal(captured.task.lateReply, "eventual answer");
+  assert.equal(captured.late, false);
+  assert.equal(captured.task.status, "done");
+  assert.equal(captured.task.reply, "eventual answer");
+  assert.equal(captured.task.lateReply, null);
+});
+
+test("strong recovery observations renew the lease until the absolute deadline", () => {
+  const store = makeStore({
+    activeTaskGraceMs: 500,
+    recoveryLeaseMs: 1_000,
+    lateReplyGraceMs: 5_000,
+  });
+  const t = store.createTask({ session: "lease", text: "q", timeoutMs: 1000, now: 100 });
+  store.claimNextTask("lease", 200);
+  store.markTaskProgress(t.id, "send_attempted", 300);
+  store.markTaskProgress(t.id, "submit_acknowledged", 400);
+  store.expireDueTasks(1601);
+  assert.equal(store.getTask(t.id)?.recoveryReason, "task_deadline_exceeded");
+
+  store.markTaskProgress(t.id, "recovery_observed", 2200);
+  assert.equal(store.expireDueTasks(3000), 0);
+  assert.equal(store.getTask(t.id)?.status, "recovering");
+  assert.equal(store.expireDueTasks(3201), 1);
+  assert.equal(store.getTask(t.id)?.status, "failed");
+  assert.equal(store.getTask(t.id)?.error, "task_recovery_lease_expired");
+});
+
+test("recovering task fails at the absolute recovery deadline despite lease renewal", () => {
+  const store = makeStore({
+    activeTaskGraceMs: 500,
+    recoveryLeaseMs: 10_000,
+    lateReplyGraceMs: 5_000,
+  });
+  const t = store.createTask({ session: "hard", text: "q", timeoutMs: 1000, now: 100 });
+  store.claimNextTask("hard", 200);
+  store.markTaskProgress(t.id, "send_attempted", 300);
+  store.markTaskProgress(t.id, "generating_seen", 400);
+  store.expireDueTasks(1601);
+  store.markTaskProgress(t.id, "recovery_observed", 6000);
+
+  assert.equal(store.expireDueTasks(6599), 0);
+  assert.equal(store.expireDueTasks(6601), 1);
+  assert.equal(store.getTask(t.id)?.status, "failed");
+  assert.equal(store.getTask(t.id)?.error, "task_recovery_timeout");
+});
+
+test("cancelTask terminates recovering work as cancelled", () => {
+  const store = makeStore({ activeTaskGraceMs: 500 });
+  const t = store.createTask({ session: "cancel-recovery", text: "q", timeoutMs: 1000, now: 100 });
+  store.claimNextTask("cancel-recovery", 200);
+  store.markTaskProgress(t.id, "send_attempted", 300);
+  store.expireDueTasks(1601);
+
+  const cancelled = store.cancelTask(t.id, 1700, "user stopped before reply");
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(cancelled.error, "user stopped before reply");
 });
 
 test("cancelTask cancels queued task", () => {
@@ -329,6 +412,19 @@ test("releaseHeartbeatLostTasks uses a stable error code", () => {
   const result = store.getTask(t.id);
   assert.equal(result?.status, "failed");
   assert.equal(result?.error, "session_heartbeat_lost");
+});
+
+test("heartbeat loss also terminates recovering tasks", () => {
+  const store = makeStore({ activeTaskGraceMs: 500, heartbeatStaleMs: 500 });
+  const t = store.createTask({ session: "lost-recovery", text: "a", timeoutMs: 1000, now: 100 });
+  store.claimNextTask("lost-recovery", 200);
+  store.markTaskProgress(t.id, "send_attempted", 300);
+  store.expireDueTasks(1601);
+  store.touchSession("lost-recovery", 1601);
+
+  assert.equal(store.releaseHeartbeatLostTasks(2101), 1);
+  assert.equal(store.getTask(t.id)?.status, "failed");
+  assert.equal(store.getTask(t.id)?.error, "session_heartbeat_lost");
 });
 
 test("requeueTask returns task to queued", () => {

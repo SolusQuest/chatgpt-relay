@@ -33,6 +33,7 @@
     "workflows",
     "agent-instructions.md",
     "api.md",
+    "task-lifecycle.md",
     "README.md",
     "tsconfig.json"
   ],

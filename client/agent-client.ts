@@ -51,8 +51,13 @@ export interface TaskView {
   submitAcknowledgedAt: number | null;
   generatingSeenAt: number | null;
   replyDetectedAt: number | null;
+  recoveryStartedAt: number | null;
+  recoveryObservedAt: number | null;
+  recoveryReason: string | null;
   expiresAt: number;
   completionDeadlineAt: number;
+  recoveryLeaseDeadlineAt: number | null;
+  recoveryDeadlineAt: number;
   lateReplyDeadlineAt: number;
   requeueCount: number;
 }
@@ -64,6 +69,8 @@ export interface SessionView {
   pauseReason: string | null;
   pendingTasks: number;
   inProgressTaskId: string | null;
+  activeTaskId: string | null;
+  activeTaskStatus: string | null;
 }
 
 interface PendingRecord {
@@ -268,6 +275,8 @@ function shouldKeepPendingForLateReply(task: TaskView): boolean {
     (
       task.error === "task_processing_timeout" ||
       task.error === "submission_outcome_unknown" ||
+      task.error === "task_recovery_timeout" ||
+      task.error === "task_recovery_lease_expired" ||
       task.error === "session_heartbeat_lost" ||
       task.error === "aborted"
     );

@@ -41,15 +41,16 @@ export function createInternalRouter(store: TaskStore): Router {
         submittedAt: task.submittedAt,
         expiresAt: task.expiresAt,
         completionDeadlineAt: task.expiresAt + store.getActiveTaskGraceMs(),
+        recoveryDeadlineAt: store.getRecoveryDeadlineAt(task),
         lateReplyDeadlineAt:
-          task.expiresAt + store.getActiveTaskGraceMs() + store.getLateReplyGraceMs(),
+          store.getLateReplyDeadlineAt(task),
         requeueCount: task.requeueCount,
       },
     });
   });
 
-  // Capture a DOM reply. Active tasks complete normally; timeout replies are
-  // stored separately without rewriting the terminal status.
+  // Capture a DOM reply. In-progress and recovering tasks complete normally;
+  // only replies after a true terminal failure use lateReply.
   router.post("/tasks/:id/capture", (req: Request, res: Response) => {
     const id = String(req.params.id ?? "");
     const body = (req.body ?? {}) as { text?: unknown };
@@ -79,6 +80,7 @@ export function createInternalRouter(store: TaskStore): Router {
       "send_attempted",
       "submit_acknowledged",
       "generating_seen",
+      "recovery_observed",
       "reply_detected",
     ];
     if (typeof body.phase !== "string" || !phases.includes(body.phase as TaskProgressPhase)) {
@@ -131,9 +133,9 @@ export function createInternalRouter(store: TaskStore): Router {
     }
   });
 
-  // Report a DOM reply discovered after extension or page restart. Active tasks
-  // complete normally, timeout replies are stored separately, and other
-  // terminal tasks are ignored.
+  // Report a DOM reply discovered after extension or page restart. Active and
+  // recovering tasks complete normally; eligible terminal failures use the
+  // bounded late-reply field.
   router.post("/tasks/:id/recover", (req: Request, res: Response) => {
     const id = String(req.params.id ?? "");
     const body = (req.body ?? {}) as { text?: unknown };

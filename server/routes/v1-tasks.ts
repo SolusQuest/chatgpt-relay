@@ -11,6 +11,7 @@ import { tryFixEncoding } from "../encoding-fix.js";
 const VALID_STATUSES: readonly TaskStatus[] = [
   "queued",
   "in_progress",
+  "recovering",
   "done",
   "failed",
   "cancelled",
@@ -36,8 +37,13 @@ export interface TaskView {
   submitAcknowledgedAt: number | null;
   generatingSeenAt: number | null;
   replyDetectedAt: number | null;
+  recoveryStartedAt: number | null;
+  recoveryObservedAt: number | null;
+  recoveryReason: string | null;
   expiresAt: number;
   completionDeadlineAt: number;
+  recoveryLeaseDeadlineAt: number | null;
+  recoveryDeadlineAt: number;
   lateReplyDeadlineAt: number;
   requeueCount: number;
 }
@@ -61,8 +67,13 @@ export function toTaskView(store: TaskStore, t: Task, includeText = false): Task
     submitAcknowledgedAt: t.submitAcknowledgedAt,
     generatingSeenAt: t.generatingSeenAt,
     replyDetectedAt: t.replyDetectedAt,
+    recoveryStartedAt: t.recoveryStartedAt,
+    recoveryObservedAt: t.recoveryObservedAt,
+    recoveryReason: t.recoveryReason,
     expiresAt: t.expiresAt,
     completionDeadlineAt: t.expiresAt + store.getActiveTaskGraceMs(),
+    recoveryLeaseDeadlineAt: store.getRecoveryLeaseDeadlineAt(t),
+    recoveryDeadlineAt: store.getRecoveryDeadlineAt(t),
     lateReplyDeadlineAt: store.getLateReplyDeadlineAt(t),
     requeueCount: t.requeueCount,
   };

@@ -8,17 +8,25 @@ export function createV1SessionsRouter(store: TaskStore): Router {
   const router = Router();
 
   router.get("/sessions", (_req: Request, res: Response) => {
-    const sessions = store.listSessions().map((s) => ({
-      session: s.id,
-      lastSeen: s.lastSeen,
-      lastStatusAt: s.lastStatusAt,
-      paused: s.paused,
-      pauseReason: s.pauseReason,
-      pausedAt: s.pausedAt,
-      pendingTasks: store.listTasks({ session: s.id, status: "queued" }).length,
-      inProgressTaskId:
-        store.listTasks({ session: s.id, status: "in_progress" })[0]?.id ?? null,
-    }));
+    const sessions = store.listSessions().map((s) => {
+      const active = store.listTasks({
+        session: s.id,
+        status: ["in_progress", "recovering"],
+      })[0] ?? null;
+      return {
+        session: s.id,
+        lastSeen: s.lastSeen,
+        lastStatusAt: s.lastStatusAt,
+        paused: s.paused,
+        pauseReason: s.pauseReason,
+        pausedAt: s.pausedAt,
+        pendingTasks: store.listTasks({ session: s.id, status: "queued" }).length,
+        // Compatibility alias retained for existing clients.
+        inProgressTaskId: active?.id ?? null,
+        activeTaskId: active?.id ?? null,
+        activeTaskStatus: active?.status ?? null,
+      };
+    });
     res.json({ sessions });
   });
 

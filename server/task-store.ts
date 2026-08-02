@@ -8,6 +8,7 @@ import type { Config } from "./config.js";
 export type TaskStatus =
   | "queued"
   | "in_progress"
+  | "recovering"
   | "done"
   | "failed"
   | "cancelled"
@@ -39,6 +40,9 @@ export interface Task {
   submitAcknowledgedAt: number | null;
   generatingSeenAt: number | null;
   replyDetectedAt: number | null;
+  recoveryStartedAt: number | null;
+  recoveryObservedAt: number | null;
+  recoveryReason: string | null;
   expiresAt: number;
   requeueCount: number;
 }
@@ -72,6 +76,9 @@ interface TaskRowRaw {
   submit_acknowledged_at: number | null;
   generating_seen_at: number | null;
   reply_detected_at: number | null;
+  recovery_started_at: number | null;
+  recovery_observed_at: number | null;
+  recovery_reason: string | null;
   expires_at: number;
   requeue_count: number;
 }
@@ -104,6 +111,9 @@ function rowToTask(r: TaskRowRaw): Task {
     submitAcknowledgedAt: r.submit_acknowledged_at,
     generatingSeenAt: r.generating_seen_at,
     replyDetectedAt: r.reply_detected_at,
+    recoveryStartedAt: r.recovery_started_at,
+    recoveryObservedAt: r.recovery_observed_at,
+    recoveryReason: r.recovery_reason,
     expiresAt: r.expires_at,
     requeueCount: r.requeue_count,
   };
@@ -145,6 +155,7 @@ export type TaskProgressPhase =
   | "send_attempted"
   | "submit_acknowledged"
   | "generating_seen"
+  | "recovery_observed"
   | "reply_detected";
 
 export interface CaptureReplyResult {
@@ -262,8 +273,22 @@ export class TaskStore {
     return this.config.lateReplyGraceMs;
   }
 
-  getLateReplyDeadlineAt(task: Task): number {
+  getRecoveryLeaseMs(): number {
+    return this.config.recoveryLeaseMs;
+  }
+
+  getRecoveryDeadlineAt(task: Task): number {
     return task.expiresAt + this.config.activeTaskGraceMs + this.config.lateReplyGraceMs;
+  }
+
+  getRecoveryLeaseDeadlineAt(task: Task): number | null {
+    const anchor = task.recoveryObservedAt ?? task.recoveryStartedAt;
+    if (anchor === null) return null;
+    return Math.min(anchor + this.config.recoveryLeaseMs, this.getRecoveryDeadlineAt(task));
+  }
+
+  getLateReplyDeadlineAt(task: Task): number {
+    return this.getRecoveryDeadlineAt(task);
   }
 
   listTasks(query: ListTasksQuery = {}): Task[] {
@@ -303,7 +328,8 @@ export class TaskStore {
     try {
       const active = this.db
         .prepare(
-          `SELECT id FROM tasks WHERE session = ? AND status = 'in_progress' LIMIT 1`,
+          `SELECT id FROM tasks
+             WHERE session = ? AND status IN ('in_progress', 'recovering') LIMIT 1`,
         )
         .get(sessionId) as { id: string } | undefined;
       if (active) {
@@ -344,7 +370,11 @@ export class TaskStore {
     const now = input.now ?? Date.now();
     const existing = this.getTask(id);
     if (!existing) throw new TaskStoreError(`task ${id} not found`, "task_not_found");
-    if (existing.status !== "in_progress" && existing.status !== "queued") {
+    if (
+      existing.status !== "in_progress" &&
+      existing.status !== "recovering" &&
+      existing.status !== "queued"
+    ) {
       throw new TaskStoreError(
         `task ${id} cannot complete from status ${existing.status}`,
         "invalid_transition",
@@ -373,7 +403,11 @@ export class TaskStore {
   captureReply(id: string, text: string, now = Date.now()): CaptureReplyResult {
     const existing = this.getTask(id);
     if (!existing) throw new TaskStoreError(`task ${id} not found`, "task_not_found");
-    if (existing.status === "queued" || existing.status === "in_progress") {
+    if (
+      existing.status === "queued" ||
+      existing.status === "in_progress" ||
+      existing.status === "recovering"
+    ) {
       return { task: this.completeTask(id, { text, now }), captured: true, late: false };
     }
     if (existing.status === "done") {
@@ -411,7 +445,19 @@ export class TaskStore {
         "invalid_transition",
       );
     }
-    const column: Record<TaskProgressPhase, string> = {
+    if (phase === "recovery_observed") {
+      if (existing.status !== "in_progress" && existing.status !== "recovering") {
+        throw new TaskStoreError(
+          `task ${id} cannot renew recovery from status ${existing.status}`,
+          "invalid_transition",
+        );
+      }
+      this.db
+        .prepare(`UPDATE tasks SET recovery_observed_at = ? WHERE id = ?`)
+        .run(now, id);
+      return this.mustGetTask(id);
+    }
+    const column: Record<Exclude<TaskProgressPhase, "recovery_observed">, string> = {
       submit_started: "submit_started_at",
       send_attempted: "send_attempted_at",
       submit_acknowledged: "submit_acknowledged_at",
@@ -453,10 +499,10 @@ export class TaskStore {
     if (TERMINAL_STATUSES.includes(existing.status)) {
       return existing;
     }
-      this.db
-        .prepare(
-          `UPDATE tasks SET status = 'cancelled', completed_at = ?, error = ? WHERE id = ?`,
-        )
+    this.db
+      .prepare(
+        `UPDATE tasks SET status = 'cancelled', completed_at = ?, error = ? WHERE id = ?`,
+      )
       .run(now, reason, id);
     const task = this.mustGetTask(id);
     this.emitTaskChange(task);
@@ -497,7 +543,7 @@ export class TaskStore {
     return task;
   }
 
-  // Maintenance for expired queued and in-progress tasks.
+  // Maintenance for queued, active, and recovering tasks.
   expireDueTasks(now = Date.now()): number {
     // Expired queued tasks become expired.
     const q = this.db
@@ -508,28 +554,72 @@ export class TaskStore {
            WHERE status = 'queued' AND expires_at <= ?`,
       )
       .run(now, now);
-    // In-progress tasks that exceed the grace period become failed.
+    // A post-send task crossing the soft deadline remains non-terminal. The
+    // extension can renew this recovery state while strong page evidence is
+    // still visible, and a captured reply completes it normally.
     const grace = this.config.activeTaskGraceMs;
-    const p = this.db
+    const recovering = this.db
+      .prepare(
+        `UPDATE tasks
+           SET status = 'recovering', recovery_started_at = ?, error = NULL,
+               recovery_reason = CASE
+                 WHEN submit_acknowledged_at IS NULL AND generating_seen_at IS NULL
+                   THEN 'delivery_uncertain'
+                 ELSE 'task_deadline_exceeded'
+               END
+           WHERE status = 'in_progress'
+             AND send_attempted_at IS NOT NULL
+             AND expires_at + ? <= ?`,
+      )
+      .run(now, grace, now);
+
+    // A claimed task that never crossed the durable Send fence has nothing to
+    // recover and can fail at the soft deadline.
+    const preSend = this.db
+      .prepare(
+        `UPDATE tasks
+           SET status = 'failed', completed_at = ?, error = 'task_processing_timeout'
+           WHERE status = 'in_progress'
+             AND send_attempted_at IS NULL
+             AND expires_at + ? <= ?`,
+      )
+      .run(now, grace, now);
+
+    const hardTimeout = this.db
       .prepare(
         `UPDATE tasks
            SET status = 'failed', completed_at = ?,
                error = CASE
-                 WHEN send_attempted_at IS NOT NULL
-                  AND submit_acknowledged_at IS NULL
-                  AND generating_seen_at IS NULL
+                 WHEN recovery_reason = 'delivery_uncertain'
                    THEN 'submission_outcome_unknown'
-                 ELSE 'task_processing_timeout'
+                 ELSE 'task_recovery_timeout'
                END
-           WHERE status = 'in_progress' AND expires_at + ? <= ?`,
+           WHERE status = 'recovering'
+             AND expires_at + ? + ? <= ?`,
       )
-      .run(now, grace, now);
-    const total = Number(q.changes) + Number(p.changes);
+      .run(now, grace, this.config.lateReplyGraceMs, now);
+
+    const leaseExpired = this.db
+      .prepare(
+        `UPDATE tasks
+           SET status = 'failed', completed_at = ?,
+               error = CASE
+                 WHEN recovery_reason = 'delivery_uncertain'
+                   THEN 'submission_outcome_unknown'
+                 ELSE 'task_recovery_lease_expired'
+               END
+           WHERE status = 'recovering'
+             AND COALESCE(recovery_observed_at, recovery_started_at) + ? <= ?`,
+      )
+      .run(now, this.config.recoveryLeaseMs, now);
+
+    const total = Number(q.changes) + Number(recovering.changes) +
+      Number(preSend.changes) + Number(hardTimeout.changes) + Number(leaseExpired.changes);
     if (total > 0) this.emitBulkChange();
     return total;
   }
 
-  // Release in-progress tasks after session heartbeat loss.
+  // Release active tasks after session heartbeat loss.
   releaseHeartbeatLostTasks(now = Date.now()): number {
     const stale = this.config.heartbeatStaleMs;
     const staleSessions = this.db
@@ -544,7 +634,7 @@ export class TaskStore {
           `UPDATE tasks
              SET status = 'failed', completed_at = ?,
                  error = 'session_heartbeat_lost'
-             WHERE session = ? AND status = 'in_progress'`,
+             WHERE session = ? AND status IN ('in_progress', 'recovering')`,
         )
         .run(now, s.id);
       changed += Number(info.changes);
@@ -596,13 +686,13 @@ export class TaskStore {
              WHERE id = ?`,
         )
         .run(reason, now, now, now, id);
-      // Fail every queued and in-progress task in the session.
+      // Fail every queued or active task in the session.
       this.db
         .prepare(
           `UPDATE tasks
              SET status = 'failed', completed_at = ?,
                  error = ?
-             WHERE session = ? AND status IN ('queued', 'in_progress')`,
+             WHERE session = ? AND status IN ('queued', 'in_progress', 'recovering')`,
         )
         .run(now, `session paused: ${reason ?? "unknown"}`, id);
       this.emitBulkChange();
@@ -681,6 +771,8 @@ function normalizeTimeout(input: number | undefined, fallback: number, max: numb
 export function isLateReplyEligible(error: string | null): boolean {
   return error === "task_processing_timeout" ||
     error === "submission_outcome_unknown" ||
+    error === "task_recovery_timeout" ||
+    error === "task_recovery_lease_expired" ||
     error === "session_heartbeat_lost" ||
     error === "aborted";
 }

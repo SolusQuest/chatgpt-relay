@@ -48,14 +48,15 @@ async function cmdSessions(): Promise<number> {
     return 0;
   }
   console.log(
-    ["session", "pending", "inFlight", "paused", "reason", "lastSeen"].join("\t"),
+    ["session", "pending", "active", "activeStatus", "paused", "reason", "lastSeen"].join("\t"),
   );
   for (const s of sessions) {
     console.log(
       [
         s.session.slice(0, 12) + "…",
         s.pendingTasks,
-        s.inProgressTaskId ? "yes" : "no",
+        (s.activeTaskId ?? s.inProgressTaskId) ? "yes" : "no",
+        s.activeTaskStatus ?? (s.inProgressTaskId ? "in_progress" : ""),
         s.paused ? "yes" : "no",
         s.pauseReason ?? "",
         new Date(s.lastSeen).toISOString(),
@@ -125,6 +126,15 @@ async function cmdShow(args: string[]): Promise<number> {
   console.log(`  id:          ${t.taskId}`);
   console.log(`  session:     ${t.session}`);
   console.log(`  status:      ${t.status}`);
+  if (t.status === "recovering") {
+    console.log(`  recovery:    ${t.recoveryReason ?? "deadline exceeded"}`);
+    console.log(
+      `  lease until: ${t.recoveryLeaseDeadlineAt
+        ? new Date(t.recoveryLeaseDeadlineAt).toISOString()
+        : "(awaiting extension evidence)"}`,
+    );
+    console.log(`  hard limit:  ${new Date(t.recoveryDeadlineAt).toISOString()}`);
+  }
   console.log(`  submitted:   ${new Date(t.submittedAt).toISOString()}`);
   console.log(
     `  dispatched:  ${t.dispatchedAt ? new Date(t.dispatchedAt).toISOString() : "(pending)"}`,
@@ -148,6 +158,10 @@ async function cmdShow(args: string[]): Promise<number> {
   if (t.error) {
     console.log("\n─── error ──────────────────────────────────────");
     console.log(t.error);
+  }
+  if (t.status === "recovering") {
+    console.log("\nNOTE: ChatGPT may still be producing this reply. Do not resubmit the prompt.");
+    console.log("Use `gpt-relay show` or `gpt-relay resume`, or cancel explicitly.");
   }
   return 0;
 }
@@ -190,6 +204,9 @@ async function cmdResume(): Promise<number> {
       console.log("─── late reply ───────────");
       console.log(task.lateReply);
       console.log("──────────────────────────");
+    }
+    if (task.status === "recovering") {
+      console.log("  note: still awaiting the original reply; do not resubmit");
     }
     if (task.error) console.log(`  error: ${task.error}`);
   }

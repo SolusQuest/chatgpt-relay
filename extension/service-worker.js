@@ -15,6 +15,7 @@ import {
   POLL_HARD_TIMEOUT_MS,
   POLL_LATE_REPLY_GRACE_MS,
   UNCERTAIN_QUEUE_RELEASE_MS,
+  RECOVERY_OBSERVATION_INTERVAL_MS,
   POLL_REPLY_SENDMSG_TIMEOUT_MS,
   RUN_TASK_ACK_TIMEOUT_MS,
   PAGE_STATE_SENDMSG_TIMEOUT_MS,
@@ -225,6 +226,18 @@ async function reportTaskProgress(taskId, phase) {
   });
 }
 
+async function reportRecoveryObservation(taskId, rec, now = Date.now()) {
+  if (!rec.hardTimedOutAt) return;
+  if (
+    typeof rec.lastRecoveryProgressAt === "number" &&
+    now - rec.lastRecoveryProgressAt < RECOVERY_OBSERVATION_INTERVAL_MS
+  ) {
+    return;
+  }
+  await reportTaskProgress(taskId, "recovery_observed");
+  rec.lastRecoveryProgressAt = now;
+}
+
 async function getSessionPendingReply(session) {
   const pending = await listPendingReplies();
   return Object.values(pending).find((rec) => rec?.session === session) ?? null;
@@ -255,6 +268,7 @@ async function setClaimPendingReply(
     taskId,
     expiresAt: claim.task.expiresAt,
     completionDeadlineAt: claim.task.completionDeadlineAt,
+    recoveryDeadlineAt: claim.task.recoveryDeadlineAt,
     lateReplyDeadlineAt: claim.task.lateReplyDeadlineAt,
     baseline: baseline ?? {
       assistantCount: 0,
@@ -309,6 +323,7 @@ async function attachPendingFromTask(task, session, tabId, record = {}) {
     taskId: task.taskId,
     expiresAt: existing?.expiresAt ?? task.expiresAt,
     completionDeadlineAt: existing?.completionDeadlineAt ?? task.completionDeadlineAt,
+    recoveryDeadlineAt: existing?.recoveryDeadlineAt ?? task.recoveryDeadlineAt,
     lateReplyDeadlineAt: existing?.lateReplyDeadlineAt ?? task.lateReplyDeadlineAt,
     baseline,
     submittedAt: existing?.submittedAt ?? record.submittedAt ?? Date.now(),
@@ -325,7 +340,13 @@ async function attachPendingFromTask(task, session, tabId, record = {}) {
       record.submittedUserMessageId ?? existing?.submittedUserMessageId ?? null,
     hardTimedOutAt:
       existing?.hardTimedOutAt ??
-      (task.status === "failed" ? (task.completedAt ?? Date.now()) : null),
+      (task.status === "recovering"
+        ? (task.recoveryStartedAt ?? Date.now())
+        : task.status === "failed"
+          ? (task.completedAt ?? Date.now())
+          : null),
+    lastRecoveryProgressAt:
+      existing?.lastRecoveryProgressAt ?? task.recoveryObservedAt ?? null,
     generatingProgressReported:
       existing?.generatingProgressReported ?? task.generatingSeenAt != null,
     replyProgressReported:
@@ -339,6 +360,7 @@ async function attachPendingFromTask(task, session, tabId, record = {}) {
       record.submittedUserMessageId ?? existing?.submittedUserMessageId ?? null,
     expiresAt: task.expiresAt,
     completionDeadlineAt: task.completionDeadlineAt,
+    recoveryDeadlineAt: task.recoveryDeadlineAt,
     lateReplyDeadlineAt: task.lateReplyDeadlineAt,
   });
 }
@@ -524,6 +546,7 @@ async function startDispatchLoop(session, tabId) {
           deliveryPhase: "preparing",
           expiresAt: claim.task.expiresAt,
           completionDeadlineAt: claim.task.completionDeadlineAt,
+          recoveryDeadlineAt: claim.task.recoveryDeadlineAt,
           lateReplyDeadlineAt: claim.task.lateReplyDeadlineAt,
         });
         await reportTaskProgress(taskId, "submit_started");
@@ -720,22 +743,21 @@ async function pollPendingReplies() {
 async function pollOnePending(taskId, rec) {
   const now = Date.now();
   dlog("[relay sw] pollOnePending", taskId.slice(0,8), "tab=", rec.tabId, "session=", rec.session?.slice?.(0,8), "notStarted=", rec.notStartedCount, "stable=", rec.stableSampleCount);
-  // Keep the session occupied during a bounded late-reply window after the
-  // server hard timeout. This preserves eventual output without dispatching
-  // another prompt into a page that is still generating.
-  const hardDeadline = rec.completionDeadlineAt ??
+  // The task lifetime is a soft deadline. After it passes, the server exposes
+  // a non-terminal recovering state while strong page evidence renews a lease.
+  const softDeadline = rec.completionDeadlineAt ??
     ((rec.expiresAt ?? rec.submittedAt + POLL_HARD_TIMEOUT_MS) + 60_000);
-  const lateDeadline = rec.lateReplyDeadlineAt ??
-    (hardDeadline + POLL_LATE_REPLY_GRACE_MS);
-  if (now > lateDeadline) {
-    console.warn("[relay sw] late reply window expired", taskId);
-    await abandonPending(taskId, rec, "late reply window expired");
+  const recoveryDeadline = rec.recoveryDeadlineAt ?? rec.lateReplyDeadlineAt ??
+    (softDeadline + POLL_LATE_REPLY_GRACE_MS);
+  if (now > recoveryDeadline) {
+    console.warn("[relay sw] recovery hard deadline expired", taskId);
+    await failPending(taskId, rec, "task_recovery_timeout");
     return;
   }
-  if (now > hardDeadline) {
+  if (now > softDeadline) {
     if (!rec.hardTimedOutAt) {
       rec.hardTimedOutAt = now;
-      console.warn("[relay sw] server deadline passed; tracking late reply", taskId);
+      console.warn("[relay sw] soft deadline passed; maintaining recovery", taskId);
       await setPendingReply(taskId, rec);
     }
   }
@@ -862,6 +884,7 @@ async function pollOnePending(taskId, rec) {
       await reportTaskProgress(taskId, "generating_seen");
       rec.generatingProgressReported = true;
     }
+    await reportRecoveryObservation(taskId, rec, now);
     await setPendingReply(taskId, rec);
     return;
   }
@@ -880,24 +903,7 @@ async function pollOnePending(taskId, rec) {
     rec.lastSampleText = snap.lastText ?? rec.lastSampleText ?? "";
     rec.submittedUserMessageId =
       rec.submittedUserMessageId ?? snap.submittedUserMessageId ?? null;
-    if (rec.hardTimedOutAt) {
-      const hasQueuedTask = await hasQueuedTaskForSession(rec.session).catch((e) => {
-        console.warn("[relay sw] queued-task check failed", rec.session, e.message);
-        return false;
-      });
-      if (
-        shouldYieldPendingToQueuedTask(
-          snap.status,
-          rec,
-          hasQueuedTask,
-          now,
-          UNCERTAIN_QUEUE_RELEASE_MS,
-        )
-      ) {
-        await yieldUncertainPendingToQueue(taskId, rec);
-        return;
-      }
-    }
+    await reportRecoveryObservation(taskId, rec, now);
     await setPendingReply(taskId, rec);
     return;
   }
@@ -1096,7 +1102,7 @@ async function reconcileInflight() {
     if (!entry?.taskId) continue;
     try {
       const t = await httpJson("GET", `/v1/tasks/${entry.taskId}`);
-      if (t?.status === "in_progress") {
+      if (t?.status === "in_progress" || t?.status === "recovering") {
         const action = classifyRecoveryAction(t, entry);
         let tabId = entry.tabId ?? null;
         if (!tabId) {
@@ -1119,6 +1125,8 @@ async function reconcileInflight() {
         [
           "task_processing_timeout",
           "submission_outcome_unknown",
+          "task_recovery_timeout",
+          "task_recovery_lease_expired",
           "session_heartbeat_lost",
           "aborted",
         ].includes(t.error);
@@ -1191,7 +1199,10 @@ async function recoverInflightForTab(msg, tabId) {
     stopRequestedAt: msg.stopRequestedAt,
   };
 
-  if (msg.stopRequestedAt && (task.status === "queued" || task.status === "in_progress")) {
+  if (
+    msg.stopRequestedAt &&
+    (task.status === "queued" || task.status === "in_progress" || task.status === "recovering")
+  ) {
     await httpJson("POST", `/internal/tasks/${task.taskId}/user-stop`, {
       reason: "user stopped before reply",
     });
@@ -1218,7 +1229,11 @@ async function recoverInflightForTab(msg, tabId) {
   }
 
   if (action === "fail-uncertain") {
-    if (task.status === "queued" || task.status === "in_progress") {
+    if (
+      task.status === "queued" ||
+      task.status === "in_progress" ||
+      task.status === "recovering"
+    ) {
       await httpJson("POST", `/internal/tasks/${task.taskId}/complete`, {
         error: "submission_outcome_unknown",
       });

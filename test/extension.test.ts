@@ -59,6 +59,12 @@ test("popup.html references popup.js and popup.css", () => {
   assert.match(html, /popup\.css/);
 });
 
+test("popup displays the server's active task status", () => {
+  const src = fs.readFileSync(path.join(EXT, "popup.js"), "utf8");
+  assert.match(src, /activeTaskStatus/);
+  assert.match(src, /active=/);
+});
+
 test("config.js exports required constants", () => {
   const src = fs.readFileSync(path.join(EXT, "lib", "config.js"), "utf8");
   for (const sym of [
@@ -69,6 +75,7 @@ test("config.js exports required constants", () => {
     "RUN_TASK_ACK_TIMEOUT_MS",
     "POLL_LATE_REPLY_GRACE_MS",
     "UNCERTAIN_QUEUE_RELEASE_MS",
+    "RECOVERY_OBSERVATION_INTERVAL_MS",
   ]) {
     assert.match(src, new RegExp(`export const ${sym}`), `missing export: ${sym}`);
   }
@@ -122,5 +129,7 @@ test("durable send fence precedes Send and post-attempt polling cannot requeue",
   assert.match(worker, /snap\.status === "not-started"[\s\S]*hasSendFence\(rec\)/);
   assert.match(worker, /shouldYieldPendingToQueuedTask/);
   assert.match(worker, /status=queued&limit=500/);
+  assert.match(worker, /reportTaskProgress\(taskId, "recovery_observed"\)/);
+  assert.match(worker, /t\?\.status === "in_progress" \|\| t\?\.status === "recovering"/);
   assert.doesNotMatch(worker, /requeuePending/);
 });

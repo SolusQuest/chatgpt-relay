@@ -49,6 +49,14 @@ test("recovery reattaches fenced work and only defers proven pre-send work", () 
     "reattach",
   );
   assert.equal(
+    classifyRecoveryAction(
+      task({ status: "recovering", recoveryReason: "task_deadline_exceeded" }),
+      { deliveryPhase: "accepted" },
+      1_000,
+    ),
+    "reattach",
+  );
+  assert.equal(
     classifyRecoveryAction(task(), { deliveryPhase: "preparing" }, 1_000),
     "defer",
   );
@@ -78,6 +86,13 @@ test("eligible timeout failures reattach only inside the late-reply window", () 
   assert.equal(classifyRecoveryAction(failed, {}, 60_000), "clear");
 });
 
+test("recovery terminal errors retain bounded late-reply compatibility", () => {
+  for (const error of ["task_recovery_timeout", "task_recovery_lease_expired"]) {
+    const failed = task({ status: "failed", error, sendAttemptedAt: 100 });
+    assert.equal(isRecoverableLateReply(failed, 1_000), true, error);
+  }
+});
+
 test("stable uncertain delivery yields only when newer work is queued", () => {
   const record = {
     deliveryPhase: "send-clicked",
@@ -101,7 +116,7 @@ test("stable uncertain delivery yields only when newer work is queued", () => {
   );
 });
 
-test("visible submitted work yields only after its hard timeout", () => {
+test("visible submitted work never yields merely because newer work is queued", () => {
   assert.equal(
     shouldYieldPendingToQueuedTask(
       "posted-no-reply-yet",
@@ -118,6 +133,6 @@ test("visible submitted work yields only after its hard timeout", () => {
       true,
       10_000,
     ),
-    true,
+    false,
   );
 });

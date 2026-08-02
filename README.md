@@ -17,9 +17,12 @@ account's plan limits and the applicable OpenAI terms.
 - **Durable SQLite queue**: tasks survive relay restarts, page refreshes, browser
   restarts, and agent interruptions.
 - **At-most-once browser delivery**: the extension persists a send fence before selecting Send. Refresh and restart recovery observe uncertain work instead of automatically replaying a prompt.
-- **Late-reply recovery**: client wait timeouts and task deadlines are separate.
-  Replies that arrive during the bounded recovery window are stored in
-  `lateReply` without rewriting the terminal task status.
+- **Soft-deadline recovery**: a page-submitted task becomes non-terminal
+  `recovering` after its normal lifetime. Strong page evidence renews a bounded
+  lease, so a long ChatGPT reply can still finish without inviting a duplicate
+  submission.
+- **Late-reply compatibility**: replies discovered after an early terminal
+  failure can still be stored in `lateReply` during the bounded recovery window.
 - **Background processing**: an MV3 service worker drives polling and recovery
   without requiring the ChatGPT tab to stay focused.
 - **Network recovery**: the extension observes network failures and page
@@ -39,6 +42,7 @@ gpt-relay/
 ├── workflows/            Composable agent workflows
 ├── agent-instructions.md Relay review and discussion guide for agents
 ├── api.md                HTTP API and task lifecycle reference
+├── task-lifecycle.md     State machine and recovery rules
 └── test/                 Unit, integration, E2E, and extension tests
 ```
 
@@ -126,8 +130,9 @@ gpt-relay review --session <session-id> --stdin
 | `POST` | `/v1/sessions/:id/resume` | Resume a session |
 | `GET` | `/health` | Check relay health |
 
-See [`api.md`](./api.md) for the complete public API, task lifecycle, and
-extension-only `/internal/*` endpoints.
+See [`api.md`](./api.md) for the complete public API and extension-only
+`/internal/*` endpoints. See [`task-lifecycle.md`](./task-lifecycle.md) for the
+state machine and recovery decisions.
 
 ## Environment variables
 
@@ -137,10 +142,11 @@ extension-only `/internal/*` endpoints.
 | `GPT_RELAY_HOST` | `127.0.0.1` | Bind address |
 | `GPT_RELAY_DATA_DIR` | `~/.gpt-relay` | Data directory |
 | `GPT_RELAY_DB_FILE` | `~/.gpt-relay/gpt-relay.db` | SQLite database |
-| `GPT_RELAY_DEFAULT_TIMEOUT_MS` | `1800000` | Default task timeout |
+| `GPT_RELAY_DEFAULT_TIMEOUT_MS` | `1800000` | Default task lifetime before active-task grace |
 | `GPT_RELAY_MAX_TASK_TIMEOUT_MS` | `3600000` | Maximum task timeout |
-| `GPT_RELAY_ACTIVE_TASK_GRACE_MS` | `60000` | Grace after the hard deadline |
-| `GPT_RELAY_LATE_REPLY_GRACE_MS` | `1800000` | Late-reply recovery window |
+| `GPT_RELAY_ACTIVE_TASK_GRACE_MS` | `60000` | Grace before an active task enters recovery |
+| `GPT_RELAY_RECOVERY_LEASE_MS` | `180000` | Recovery lease renewed by strong page evidence |
+| `GPT_RELAY_LATE_REPLY_GRACE_MS` | `1800000` | Absolute recovery and late-reply window |
 | `GPT_RELAY_MAX_TASK_BYTES` | `524288` | Maximum prompt size |
 | `GPT_RELAY_MAX_QUEUED_PER_SESSION` | `50` | Per-session queue limit |
 
@@ -179,12 +185,15 @@ To reset local relay data, stop the relay and remove the database files from
 | Session is paused | Resolve the reported captcha or rate limit, then resume |
 | Prompt submission fails | ChatGPT UI changes may require selector updates |
 | A review wait times out | Keep the task ID and use `gpt-relay resume` or `show` |
+| A task is `recovering` | The original reply may still finish; do not resubmit it |
 
 ## Documentation
 
 - [`agent-instructions.md`](./agent-instructions.md): operational rules for
   agent review and discussion
 - [`api.md`](./api.md): HTTP API, lifecycle, timeout, and recovery semantics
+- [`task-lifecycle.md`](./task-lifecycle.md): complete task state machine and
+  soft-deadline recovery rules
 - [`workflows/`](./workflows/README.md): multi-stage orchestration templates
 - [`extension/README.md`](./extension/README.md): extension setup and recovery
 - [`CONTRIBUTING.md`](./CONTRIBUTING.md): development and contribution guide

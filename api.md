@@ -21,14 +21,17 @@ operations and [`README.md`](./README.md) for installation and CLI usage.
 |---|---|
 | `queued` | Waiting for the extension to claim the task |
 | `in_progress` | Claimed and running in the ChatGPT page |
+| `recovering` | The normal task lifetime passed after Send; the extension is still observing the original page request |
 | `done` | Completed successfully; `reply` contains the final output |
 | `failed` | Failed; `error` contains the reason |
 | `cancelled` | Cancelled by the agent or page user |
 | `expired` | Passed its deadline before being claimed |
 
-`done`, `failed`, `cancelled`, and `expired` are terminal. A result that arrives
-after a timeout is stored in `lateReply`; it does not change the original
-terminal status back to `done`.
+`queued`, `in_progress`, and `recovering` are non-terminal. `done`, `failed`,
+`cancelled`, and `expired` are terminal. A reply captured while a task is
+`recovering` completes it normally and is stored in `reply`. A result discovered
+after an eligible terminal failure is stored in `lateReply`; it does not change
+the terminal status back to `done`.
 
 ## Task object
 
@@ -52,8 +55,13 @@ terminal status back to `done`.
   "submitAcknowledgedAt": 1783846987312,
   "generatingSeenAt": 1783846989344,
   "replyDetectedAt": 1783847074200,
+  "recoveryStartedAt": null,
+  "recoveryObservedAt": null,
+  "recoveryReason": null,
   "expiresAt": 1783848751352,
   "completionDeadlineAt": 1783848811352,
+  "recoveryLeaseDeadlineAt": null,
+  "recoveryDeadlineAt": 1783850611352,
   "lateReplyDeadlineAt": 1783850611352,
   "requeueCount": 0
 }
@@ -69,9 +77,11 @@ The relay uses stable machine-readable codes for maintenance failures:
 | Code | Meaning |
 |---|---|
 | `task_expired_before_dispatch` | A queued task crossed its deadline before the extension claimed it |
-| `task_processing_timeout` | An in-progress task crossed its deadline and active-task grace period |
+| `task_processing_timeout` | A claimed task crossed its soft deadline before the durable Send fence was recorded |
 | `submission_outcome_unknown` | Send may have been attempted, but the extension could not confirm submission before the deadline or before safely advancing queued work |
-| `session_heartbeat_lost` | The relay released an in-progress task after its browser session became stale |
+| `task_recovery_lease_expired` | A recovering task stopped receiving strong page observations |
+| `task_recovery_timeout` | A recovering task reached its absolute recovery deadline |
+| `session_heartbeat_lost` | The relay released an active task after its browser session became stale |
 | `aborted` | The extension task wait was aborted |
 
 Extension-originated failures can include a descriptive `error` string. Clients
@@ -99,8 +109,9 @@ Fields:
 
 - `session`: required, non-empty, at most 128 characters.
 - `text`: required, non-empty, 512 KiB by default.
-- `timeout`: optional server-side task lifetime; 30 minutes by default and
-  capped at 60 minutes.
+- `timeout`: optional server-side task lifetime before active-task grace; 30
+  minutes by default and capped at 60 minutes. A page-submitted task can remain
+  non-terminal in bounded recovery after this lifetime.
 - `clientRequestId`: optional; forms an idempotency key with `session`.
 
 Successful `201` response:
@@ -136,8 +147,8 @@ Optional query:
 - `wait=<ms>`: server-side long poll, capped at 60,000 ms.
 
 When the task becomes terminal, the long poll returns immediately. If the poll
-ends while the task is still running, it returns the current `queued` or
-`in_progress` state; that response is not an error.
+ends while the task is still running, it returns the current `queued`,
+`in_progress`, or `recovering` state; that response is not an error.
 
 `404` means the task does not exist or has been cleaned up.
 
@@ -148,6 +159,8 @@ Cancel a task:
 - `queued` becomes `cancelled` immediately.
 - `in_progress` becomes `cancelled`; current page generation may still consume
   resources, but it is not stored as a normal reply.
+- `recovering` becomes `cancelled` for the same reason. Cancellation is an
+  explicit terminal user/agent decision; it is not reported as a timeout.
 - a terminal task returns `409 invalid_transition`.
 
 The response is a Task object without `text`.
@@ -190,13 +203,17 @@ List active sessions:
       "pauseReason": null,
       "pausedAt": null,
       "pendingTasks": 0,
-      "inProgressTaskId": null
+      "inProgressTaskId": null,
+      "activeTaskId": null,
+      "activeTaskStatus": null
     }
   ]
 }
 ```
 
-An empty array means that no ChatGPT tabs are currently active.
+`inProgressTaskId` is retained as a compatibility alias and can identify either
+active status. New clients should use `activeTaskId` and `activeTaskStatus`. An
+empty array means that no ChatGPT tabs are currently active.
 
 ### `POST /v1/sessions/:id/pause`
 
@@ -208,8 +225,8 @@ Pause a session manually:
 }
 ```
 
-Pausing blocks new tasks and fails all queued and in-progress tasks in that
-session.
+Pausing blocks new tasks and fails all queued, in-progress, and recovering tasks
+in that session.
 
 ### `POST /v1/sessions/:id/resume`
 
@@ -251,6 +268,7 @@ Progress phases:
 - `send_attempted`
 - `submit_acknowledged`
 - `generating_seen`
+- `recovery_observed`
 - `reply_detected`
 
 The detailed internal request and response contracts are defined by
@@ -266,28 +284,46 @@ queued
   `-- deadline before claim --------------> expired
 
 in_progress
-  |-- capture/complete success --------------------> done
-  |-- complete error/maintenance timeout ----------> failed
-  |-- cancel/user-stop ----------------------------> cancelled
-  |-- defer/requeue before send_attempted ----------> queued
-  `-- late DOM result after eligible failure ------> lateReply on terminal task
+  |-- capture/complete success ----------------> done
+  |-- soft deadline before send_attempted ------> failed
+  |-- soft deadline after send_attempted -------> recovering
+  |-- complete error ----------------------------> failed
+  |-- cancel/user-stop --------------------------> cancelled
+  `-- defer/requeue before send_attempted -------> queued
+
+recovering
+  |-- capture/recover reply ---------------------> done
+  |-- cancel/user-stop --------------------------> cancelled
+  |-- session heartbeat lost --------------------> failed
+  |-- recovery lease expires --------------------> failed
+  `-- absolute recovery deadline ----------------> failed
+
+eligible terminal failure
+  `-- late DOM result before recoveryDeadlineAt -> lateReply (status unchanged)
 ```
 
-Each session can have at most one `in_progress` task. Queued tasks are claimed
-in submission order.
+Each session can have at most one active (`in_progress` or `recovering`) task.
+`recovering` therefore blocks queued successors from being claimed. Queued tasks
+are otherwise claimed in submission order.
 
 `send_attempted` is a durable at-most-once fence. After that phase is recorded, `defer` and `requeue` return `400 unsafe_retry_after_send_attempt`; clients must create an explicit new task if a human chooses to retry.
 
-## Timeouts and late replies
+The complete state and evidence model is documented in
+[`task-lifecycle.md`](./task-lifecycle.md).
 
-Keep three time dimensions separate:
+## Timeouts, recovery, and late replies
+
+Keep four time dimensions separate:
 
 1. **Client wait timeout**: how long the CLI or agent client waits in the
    current call. It does not alter task state.
-2. **Task timeout**: the wall-clock deadline from `submittedAt`, represented by
-   `expiresAt`.
-3. **Late-reply window**: a bounded period during which the extension continues
-   recovering page output after an in-progress task crosses its hard deadline.
+2. **Task lifetime**: the wall-clock deadline from `submittedAt`, represented by
+   `expiresAt`. For an active task, `activeTaskGraceMs` extends this to the soft
+   `completionDeadlineAt`.
+3. **Recovery lease**: after Send and the soft deadline, strong page evidence
+   renews a short lease. Its current bound is `recoveryLeaseDeadlineAt`.
+4. **Absolute recovery window**: recovery cannot extend beyond
+   `recoveryDeadlineAt`, even if the lease keeps being renewed.
 
 Defaults:
 
@@ -295,11 +331,27 @@ Defaults:
 - task timeout: 30 minutes;
 - maximum task timeout: 60 minutes;
 - active task grace: 60 seconds;
-- late-reply grace: 30 minutes.
+- recovery lease: 3 minutes;
+- absolute recovery and late-reply grace: 30 minutes after the soft deadline.
 
-After a page-submitted task crosses its hard deadline, it remains `failed`, but the extension can store final page output in `lateReply` before `lateReplyDeadlineAt`. A task with `sendAttemptedAt` but without later acknowledgement evidence fails as `submission_outcome_unknown` instead of being automatically replayed.
+After a page-submitted task crosses its soft deadline, it becomes `recovering`
+instead of `failed`. Active generation or the exact submitted user message with
+no assistant reply is strong evidence; the extension reports
+`recovery_observed` while that evidence remains visible. Generic heartbeat,
+history hydration, or an empty DOM does not renew the lease.
 
-Late-reply observation normally keeps the session exclusive so a later reply cannot be attributed to newer work. New queued work may preempt that observation only after the page is fully hydrated and stably idle. In that case, the uncertain task remains terminal and is never replayed; the extension clears its browser-side observer before claiming the next task.
+The task becomes terminal when the user or agent cancels it, the session
+heartbeat disappears, the recovery lease expires, or the absolute recovery
+deadline arrives. A visible submitted message or active generation is never
+preempted merely because newer work is queued. If delivery is still genuinely
+uncertain and the fully hydrated page is stably idle, the existing queue-aware
+release path may fail it as `submission_outcome_unknown`; it is never requeued
+or resent automatically.
+
+If an eligible task fails before the absolute recovery deadline and its
+observer later finds a reply, the reply is stored in `lateReply`. This is a
+compatibility path for true terminal failures; ordinary long-running output
+finishes from `recovering` into `done`.
 
 If one `GET /v1/tasks/:id?wait=60000` call returns a non-terminal state, continue
 polling. An HTTP long-poll timeout is not a task timeout.
@@ -328,9 +380,10 @@ gpt-relay resume
 gpt-relay show <task-id>
 ```
 
-Terminal tasks remove their pending record. A timeout failure that remains
-inside its late-reply window stays pending so that later output can be
-recovered.
+`recovering` tasks stay pending and `resume` reports that the original request
+may still complete. Agents must inspect the existing task and must not submit a
+duplicate prompt. Eligible terminal failures can remain pending inside the
+late-reply window so that later output can be recovered.
 
 ## HTTP examples
 
@@ -361,7 +414,7 @@ curl -sS "http://127.0.0.1:8765/v1/tasks/<task-id>?wait=60000"
 ### List
 
 ```bash
-curl -sS "http://127.0.0.1:8765/v1/tasks?session=<session-id>&status=queued,in_progress&limit=20"
+curl -sS "http://127.0.0.1:8765/v1/tasks?session=<session-id>&status=queued,in_progress,recovering&limit=20"
 ```
 
 For large or non-ASCII input, prefer files, stdin, or
@@ -378,10 +431,11 @@ For large or non-ASCII input, prefer files, stdin, or
 | `GPT_RELAY_DB_FILE` | `<data-dir>/gpt-relay.db` | SQLite database |
 | `GPT_RELAY_LOG_DIR` | `<data-dir>/logs` | Server log directory |
 | `GPT_RELAY_PENDING_DIR` | `~/.gpt-relay/pending` | Client pending records; currently independent from `GPT_RELAY_DATA_DIR` |
-| `GPT_RELAY_DEFAULT_TIMEOUT_MS` | `1800000` | Default task timeout |
+| `GPT_RELAY_DEFAULT_TIMEOUT_MS` | `1800000` | Default task lifetime before active-task grace |
 | `GPT_RELAY_MAX_TASK_TIMEOUT_MS` | `3600000` | Maximum task timeout |
-| `GPT_RELAY_ACTIVE_TASK_GRACE_MS` | `60000` | Grace after the hard deadline |
-| `GPT_RELAY_LATE_REPLY_GRACE_MS` | `1800000` | Late-reply recovery window |
+| `GPT_RELAY_ACTIVE_TASK_GRACE_MS` | `60000` | Grace before an active task enters recovery |
+| `GPT_RELAY_RECOVERY_LEASE_MS` | `180000` | Lease renewed by strong recovery evidence |
+| `GPT_RELAY_LATE_REPLY_GRACE_MS` | `1800000` | Absolute recovery and late-reply grace |
 | `GPT_RELAY_HEARTBEAT_STALE_MS` | `60000` | Stale session heartbeat threshold |
 | `GPT_RELAY_SESSION_ACTIVE_MS` | `30000` | Window in which a session is active |
 | `GPT_RELAY_MAINTENANCE_INTERVAL_MS` | `5000` | Expiry and heartbeat maintenance interval |
