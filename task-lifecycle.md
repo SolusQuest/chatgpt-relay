@@ -67,6 +67,13 @@ safely defer or requeue a task that never reached ChatGPT. After it exists,
 automatic replay is prohibited because the original request may already be
 present or generating.
 
+Large pasted text can become an attachment before the Send fence. Ordinary text
+waits up to 15 seconds for Send to enable; an attachment path waits up to 90
+seconds. An upload timeout or explicit upload error terminates the current task
+before Send. If automatic attachment removal cannot prove that the composer is
+clean, the session is paused with queued successors preserved. The extension
+resumes only after the stale composer payload is removed.
+
 ## Deadline model
 
 For a task submitted at `submittedAt`:

@@ -111,6 +111,7 @@ Different user-supplied sessions may run concurrently; one session processes at 
 | Session paused, captcha, or rate limited | Stop submission, report `pauseReason`, and do not retry automatically |
 | Client wait times out | Keep `taskId`; use `show` or `resume`; do not resubmit |
 | Task is `recovering` | The original ChatGPT request may still complete; keep the task ID, inspect with `show` or `resume`, and do not resubmit |
+| `attachment_upload_timeout` or `attachment_upload_failed` | Remove any unfinished attachment from the supplied ChatGPT session; queued successors are preserved and resume after the composer is clean |
 | Task failed, cancelled, or expired | Report `error`; use `resume` only when a late-reply window remains |
 | Relay cannot access an artifact | Send the complete authorized material or ask the user to fix access |
 | Reply is clearly off topic | Add missing context or confirm the session; it is not a substantive review round |

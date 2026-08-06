@@ -184,6 +184,7 @@ To reset local relay data, stop the relay and remove the database files from
 | Popup reports `unreachable` | Check the relay URL and local firewall |
 | Session is paused | Resolve the reported captcha or rate limit, then resume |
 | Prompt submission fails | ChatGPT UI changes may require selector updates |
+| Large pasted attachment times out | Remove any unfinished attachment; the extension preserves queued work and resumes after the composer is clean |
 | A review wait times out | Keep the task ID and use `gpt-relay resume` or `show` |
 | A task is `recovering` | The original reply may still finish; do not resubmit it |
 

@@ -71,7 +71,12 @@ Expected:
 
 - The task finishes as `done`.
 - The reply acknowledges the submitted text or attachment.
-- Completion may take 10 to 30 seconds depending on upload and response time.
+- The task does not fail merely because upload exceeds 15 seconds; attachment
+  upload may wait up to 90 seconds before Send.
+- Completion may take longer depending on upload and response time.
+- If the 90-second upload limit is exercised, the task reports
+  `attachment_upload_timeout`. Queued successors remain queued while any
+  unfinished attachment is present, then resume after it is removed.
 
 ## SS-003: Resume after a client wait timeout
 

@@ -37,13 +37,13 @@ ChatGPT web interface.
 - Relay URL: defaults to `http://127.0.0.1:8765`.
 - **Poll now**: requests an immediate poll instead of waiting for the next
   scheduled alarm.
-- **Clear inflight**: emergency cleanup for local in-flight and pending-reply
-  extension state.
+- **Clear inflight**: emergency cleanup for local in-flight, pending-reply, and
+  attachment-block state.
 
 ## Permissions
 
 - `storage`: stores the relay URL, in-flight task map, pending replies, tab to
-  session mapping, and recent errors.
+  session mapping, attachment-cleanup blocks, and recent errors.
 - `alarms`: wakes the MV3 service worker for background polling.
 - `tabs` and `scripting`: communicates with content scripts in ChatGPT tabs.
 - `notifications`: reserved for future use.
@@ -74,6 +74,8 @@ Agent -> POST /v1/tasks -> Relay server (Express + SQLite)
     to stabilize before claiming work;
   - long-polls `/internal/next_task`;
   - persists a send-attempt fence in browser storage and SQLite before allowing the content script to select Send;
+  - keeps the normal Send-ready wait at 15 seconds, but allows up to 90 seconds
+    when a large paste becomes a ChatGPT attachment;
   - sends `run-task` to the content script;
   - records the task in its persistent pending-reply state;
   - samples the page every two seconds and completes the task after the reply is
@@ -101,6 +103,23 @@ A recovering task reserves the session. A visible submitted message continues to
 
 See [`task-lifecycle.md`](../task-lifecycle.md) for the complete state diagram,
 lease rules, and Agent behavior.
+
+## Large-paste attachments
+
+ChatGPT can convert a large pasted prompt into a text attachment and leave the
+composer itself empty. The extension treats an enabled Send button as the final
+readiness signal. Ordinary text gets a 15-second Send-ready budget; a detected
+attachment, upload indicator, or large-paste-to-empty-composer transition gets
+up to 90 seconds. The service worker allows 120 seconds for the complete
+content-script submission acknowledgement.
+
+If upload fails or does not enable Send within that window, the task fails with
+`attachment_upload_failed` or `attachment_upload_timeout`. The content script
+tries to remove the attachment and clear the composer. If it cannot prove that
+the composer is clean, the extension pauses that session while preserving
+already queued successors. Remove the unfinished attachment manually; the
+extension resumes automatically after it observes a clean composer. **Clear
+inflight** is the explicit emergency override and also clears this block.
 
 ## Sanity check
 

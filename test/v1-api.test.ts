@@ -167,6 +167,26 @@ test("session pause fails in-flight tasks", async () => {
   assert.match(r.json.error ?? "", /captcha/);
 });
 
+test("internal attachment pause can preserve queued successors", async () => {
+  const first = await post("/v1/tasks", { session: "attachment-pause", text: "upload" });
+  const second = await post("/v1/tasks", { session: "attachment-pause", text: "next" });
+  await get("/internal/next_task?session=attachment-pause");
+  await post("/internal/sessions/attachment-pause/status", {
+    paused: true,
+    reason: "attachment cleanup uncertain",
+    preserveQueued: true,
+  });
+
+  assert.equal((await get(`/v1/tasks/${first.json.taskId}`)).json.status, "failed");
+  assert.equal((await get(`/v1/tasks/${second.json.taskId}`)).json.status, "queued");
+  const blocked = await post("/v1/tasks", { session: "attachment-pause", text: "blocked" });
+  assert.equal(blocked.status, 409);
+  assert.equal(blocked.json.error, "session_paused");
+  await post("/internal/sessions/attachment-pause/status", { paused: false });
+  const next = await get("/internal/next_task?session=attachment-pause");
+  assert.equal(next.json.task.taskId, second.json.taskId);
+});
+
 test("v1 sessions lists active sessions with pending count", async () => {
   await post("/v1/tasks", { session: "sH", text: "one" });
   await post("/v1/tasks", { session: "sH", text: "two" });

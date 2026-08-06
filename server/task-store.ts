@@ -675,6 +675,7 @@ export class TaskStore {
     paused: boolean,
     reason: string | null,
     now = Date.now(),
+    preserveQueued = false,
   ): SessionRow {
     this.upsertSession(id, now);
     if (paused) {
@@ -686,15 +687,18 @@ export class TaskStore {
              WHERE id = ?`,
         )
         .run(reason, now, now, now, id);
-      // Fail every queued or active task in the session.
+      // Safety pauses fail all outstanding work. A pre-send attachment cleanup
+      // block can preserve queued successors while still terminating active work.
       this.db
         .prepare(
           `UPDATE tasks
              SET status = 'failed', completed_at = ?,
                  error = ?
-             WHERE session = ? AND status IN ('queued', 'in_progress', 'recovering')`,
+             WHERE session = ?
+               AND status IN ('queued', 'in_progress', 'recovering')
+               AND (? = 0 OR status <> 'queued')`,
         )
-        .run(now, `session paused: ${reason ?? "unknown"}`, id);
+        .run(now, `session paused: ${reason ?? "unknown"}`, id, preserveQueued ? 1 : 0);
       this.emitBulkChange();
     } else {
       this.db

@@ -200,10 +200,20 @@ export function createInternalRouter(store: TaskStore): Router {
   router.post("/sessions/:id/status", (req: Request, res: Response) => {
     const id = String(req.params.id ?? "");
     if (!isValidSessionId(id)) return res.status(400).json({ error: "invalid session" });
-    const body = (req.body ?? {}) as { paused?: unknown; reason?: unknown };
+    const body = (req.body ?? {}) as {
+      paused?: unknown;
+      reason?: unknown;
+      preserveQueued?: unknown;
+    };
     const paused = body.paused === true;
     const reason = typeof body.reason === "string" ? body.reason : null;
-    const s = store.markSessionStatus(id, paused, reason);
+    const s = store.markSessionStatus(
+      id,
+      paused,
+      reason,
+      Date.now(),
+      paused && body.preserveQueued === true,
+    );
     res.json({ status: "ok", session: s });
   });
 

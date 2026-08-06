@@ -221,3 +221,25 @@ test("reply polling rejects snapshots from a different conversation", async () =
   assert.equal(snapshot.status, "session-mismatch");
   assert.equal(snapshot.currentSession, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
 });
+
+test("page state reports an attachment payload as not clean", async () => {
+  const harness = createHarness();
+  harness.state.readyState = "complete";
+  harness.state.users = [element("user-1", "existing prompt")];
+  const attachment = element("attachment-1", "Pasted Text");
+  const composerRoot = {
+    querySelector() {
+      return null;
+    },
+    querySelectorAll(selector: string) {
+      return selector === "[data-file-id]" ? [attachment] : [];
+    },
+  };
+  (harness.state.input as any).closest = () => composerRoot;
+
+  await harness.pageState();
+  harness.state.now += 4_000;
+  const page = await harness.pageState();
+  assert.equal((page.composer as any).attachmentPresent, true);
+  assert.equal(page.composerClean, false);
+});

@@ -16,6 +16,7 @@ import {
   POLL_LATE_REPLY_GRACE_MS,
   UNCERTAIN_QUEUE_RELEASE_MS,
   RECOVERY_OBSERVATION_INTERVAL_MS,
+  ATTACHMENT_BLOCK_CLEAN_STABLE_MS,
   POLL_REPLY_SENDMSG_TIMEOUT_MS,
   RUN_TASK_ACK_TIMEOUT_MS,
   PAGE_STATE_SENDMSG_TIMEOUT_MS,
@@ -43,6 +44,35 @@ async function getStorage(key, fallback) {
 }
 async function setStorage(key, value) {
   await chrome.storage.local.set({ [key]: value });
+}
+
+async function listAttachmentBlocks() {
+  return getStorage(STORAGE_KEYS.ATTACHMENT_BLOCKS, {});
+}
+
+let attachmentBlocksMutation = Promise.resolve();
+
+async function mutateAttachmentBlocks(mutator) {
+  const operation = attachmentBlocksMutation.then(async () => {
+    const blocks = await listAttachmentBlocks();
+    const result = mutator(blocks);
+    await setStorage(STORAGE_KEYS.ATTACHMENT_BLOCKS, blocks);
+    return result;
+  });
+  attachmentBlocksMutation = operation.catch(() => {});
+  return operation;
+}
+
+async function setAttachmentBlock(session, reason) {
+  await mutateAttachmentBlocks((blocks) => {
+    blocks[session] = { reason, at: Date.now() };
+  });
+}
+
+async function clearAttachmentBlock(session) {
+  await mutateAttachmentBlocks((blocks) => {
+    delete blocks[session];
+  });
 }
 
 async function getBaseUrl() {
@@ -442,6 +472,58 @@ async function startDispatchLoop(session, tabId) {
         break;
       }
 
+      const attachmentBlock = (await listAttachmentBlocks())[session];
+      if (attachmentBlock) {
+        try {
+          const state = await getPageState(tabId);
+          if (state.composerClean) {
+            if (typeof attachmentBlock.cleanSince !== "number") {
+              const cleanSince = Date.now();
+              attachmentBlock.cleanSince = cleanSince;
+              await mutateAttachmentBlocks((blocks) => {
+                if (blocks[session]) blocks[session].cleanSince = cleanSince;
+              });
+              await delay(DISPATCH_LOOP_RETRY_MS);
+              continue;
+            }
+            if (Date.now() - attachmentBlock.cleanSince < ATTACHMENT_BLOCK_CLEAN_STABLE_MS) {
+              await delay(DISPATCH_LOOP_RETRY_MS);
+              continue;
+            }
+            await clearAttachmentBlock(session);
+            await httpJson(
+              "POST",
+              `/internal/sessions/${encodeURIComponent(session)}/status`,
+              { paused: false },
+            ).catch(() => {});
+            await sendTabMessage(
+              tabId,
+              { type: "update-banner", text: `Relay: ${session.slice(0, 8)}…`, color: "#10a37f" },
+              PAGE_STATE_SENDMSG_TIMEOUT_MS,
+              "attachment block cleared",
+            ).catch(() => {});
+          } else {
+            if (attachmentBlock.cleanSince != null) {
+              attachmentBlock.cleanSince = null;
+              await mutateAttachmentBlocks((blocks) => {
+                if (blocks[session]) blocks[session].cleanSince = null;
+              });
+            }
+            await httpJson(
+              "POST",
+              `/internal/sessions/${encodeURIComponent(session)}/status`,
+              { paused: true, reason: attachmentBlock.reason, preserveQueued: true },
+            ).catch(() => {});
+            await delay(DISPATCH_LOOP_RETRY_MS);
+            continue;
+          }
+        } catch (e) {
+          console.warn("[relay sw] attachment cleanup state unavailable", session.slice(0, 8), e.message);
+          await delay(DISPATCH_LOOP_RETRY_MS);
+          continue;
+        }
+      }
+
       // Preserve the previous handleTab safety and pause checks.
       let safety = null;
       try {
@@ -573,6 +655,44 @@ async function startDispatchLoop(session, tabId) {
         }
 
         if (runRes?.error) {
+          if (
+            runRes.errorCode === "attachment_upload_timeout" ||
+            runRes.errorCode === "attachment_upload_failed"
+          ) {
+            const errorCode = runRes.errorCode;
+            await httpJson("POST", `/internal/tasks/${taskId}/complete`, {
+              error: errorCode,
+            }).catch(() => {});
+            await clearInflight(session);
+            await notifyTabCleared(tabId);
+            await setStorage(STORAGE_KEYS.LAST_ERROR, {
+              taskId,
+              session,
+              error: `${errorCode}: ${runRes.error}`,
+              at: Date.now(),
+            });
+
+            if (runRes.attachmentCleanupConfirmed !== true) {
+              const reason = `${errorCode}: attachment cleanup could not be confirmed`;
+              await setAttachmentBlock(session, reason);
+              await httpJson(
+                "POST",
+                `/internal/sessions/${encodeURIComponent(session)}/status`,
+                { paused: true, reason, preserveQueued: true },
+              ).catch(() => {});
+              await sendTabMessage(
+                tabId,
+                {
+                  type: "update-banner",
+                  text: "Relay paused: remove unfinished attachment",
+                  color: "#e74c3c",
+                },
+                PAGE_STATE_SENDMSG_TIMEOUT_MS,
+                "attachment pause banner",
+              ).catch(() => {});
+            }
+            continue;
+          }
           if (runRes.submissionState === "not-submitted" && /waitForPageReady/.test(runRes.error)) {
             await httpJson("POST", `/internal/tasks/${taskId}/defer`, {}).catch(() => {});
             await clearInflight(session);
@@ -1504,11 +1624,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (type === "popup-get-state") {
     (async () => {
-      const [inflight, cfg, lastError, pendingReplies] = await Promise.all([
+      const [inflight, cfg, lastError, pendingReplies, attachmentBlocks] = await Promise.all([
         getStorage(STORAGE_KEYS.INFLIGHT, {}),
         getStorage("config", {}),
         getStorage(STORAGE_KEYS.LAST_ERROR, null),
         getStorage(STORAGE_KEYS.PENDING_REPLIES, {}),
+        listAttachmentBlocks(),
       ]);
       const tabs = await listChatGPTTabs();
       const tabsInfo = [];
@@ -1521,7 +1642,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         });
       }
       sendResponse({
-        inflight, cfg, lastError, tabs: tabsInfo,
+        inflight, cfg, lastError, attachmentBlocks, tabs: tabsInfo,
         baseUrl: cfg.baseUrl || DEFAULT_BASE,
         offlineSessionCount: offlineSessions.size,
         pendingReplyCount: Object.keys(pendingReplies).length,
@@ -1542,8 +1663,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (type === "popup-clear-inflight") {
     (async () => {
+      const attachmentBlocks = await listAttachmentBlocks();
       await setStorage(STORAGE_KEYS.INFLIGHT, {});
       await setStorage(STORAGE_KEYS.PENDING_REPLIES, {});
+      await mutateAttachmentBlocks((blocks) => {
+        for (const session of Object.keys(blocks)) delete blocks[session];
+      });
+      for (const session of Object.keys(attachmentBlocks)) {
+        await httpJson(
+          "POST",
+          `/internal/sessions/${encodeURIComponent(session)}/status`,
+          { paused: false },
+        ).catch(() => {});
+      }
       for (const session of dispatchLoops.keys()) {
         stopDispatchLoop(session);
       }

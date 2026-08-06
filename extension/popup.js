@@ -22,8 +22,9 @@ async function refresh() {
 
   el("dot").className = "dot " + (healthy ? "ok" : "err");
   const offlineCount = state.offlineSessionCount ?? 0;
+  const attachmentBlockCount = Object.keys(state.attachmentBlocks ?? {}).length;
   el("status").textContent = healthy
-    ? `${state.baseUrl} · ${sessions.length} active${offlineCount ? ` · ${offlineCount} offline` : ""}`
+    ? `${state.baseUrl} · ${sessions.length} active${offlineCount ? ` · ${offlineCount} offline` : ""}${attachmentBlockCount ? ` · ${attachmentBlockCount} attachment-blocked` : ""}`
     : `${state.baseUrl} · unreachable`;
 
   const sessTbody = el("sessions").querySelector("tbody");
@@ -34,8 +35,11 @@ async function refresh() {
     if (server?.paused) tr.classList.add("paused");
     if (tab.offline) tr.classList.add("offline");
     const inflight = state.inflight[tab.session];
+    const attachmentBlock = state.attachmentBlocks?.[tab.session];
+    if (attachmentBlock) tr.classList.add("paused");
     let view = "(not seen)";
     if (tab.offline) view = "offline";
+    else if (attachmentBlock) view = `blocked: ${attachmentBlock.reason}`;
     else if (server?.paused) view = `paused: ${server.pauseReason ?? ''}`;
     else if (server) {
       const activeId = server.activeTaskId ?? server.inProgressTaskId;

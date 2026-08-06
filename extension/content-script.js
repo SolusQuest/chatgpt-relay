@@ -26,6 +26,34 @@
       '[data-testid="send-button"]',
       'button[aria-label*="Send"], button[aria-label*="发送"]',
     ],
+    attachment: [
+      '[data-testid="composer-file-pill"]',
+      '[data-testid="file-pill"]',
+      '[data-testid="file-thumbnail"]',
+      '[data-testid="attachment-pill"]',
+      '[data-file-id]',
+      '[data-file-name]',
+      '[class*="file-pill"]',
+      'button[aria-label*="Remove file" i]',
+      'button[aria-label*="Remove attachment" i]',
+      'button[aria-label*="移除文件"]',
+      'button[aria-label*="删除附件"]',
+    ],
+    attachmentRemoveButton: [
+      'button[data-testid*="remove-file" i]',
+      'button[data-testid*="remove-attachment" i]',
+      'button[aria-label*="Remove file" i]',
+      'button[aria-label*="Remove attachment" i]',
+      'button[aria-label*="移除文件"]',
+      'button[aria-label*="删除附件"]',
+    ],
+    uploadProgress: [
+      '[role="progressbar"]',
+      '[data-state="uploading"]',
+      '[data-upload-state="uploading"]',
+      '[aria-label*="Uploading" i]',
+      '[aria-label*="正在上传"]',
+    ],
     stopButton: [
       '[data-testid="stop-button"]',
       'button[aria-label*="Stop"], button[aria-label*="停止"]',
@@ -69,6 +97,11 @@
   // conversation DOM and composer remain stable before accepting new work.
   const PAGE_READY_STABLE_MS = 4000;
   const PAGE_READY_TIMEOUT_MS = 60_000;
+  const TEXT_SEND_READY_TIMEOUT_MS = 15_000;
+  const ATTACHMENT_UPLOAD_TIMEOUT_MS = 90_000;
+  const ATTACHMENT_CLEANUP_TIMEOUT_MS = 7_000;
+  const ATTACHMENT_CLEAN_STABLE_MS = 2_000;
+  const LARGE_PASTE_ATTACHMENT_THRESHOLD = 20_000;
   const SUBMISSION_ACCEPT_TIMEOUT_MS = 15_000;
 
   const delay = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -134,10 +167,64 @@
     }
     const inp = findInput();
     if (inp) {
-      const form = inp.closest("form");
-      if (form) return form.querySelector('button[type="submit"], button:last-of-type');
+      const form = inp.closest?.("form");
+      if (form?.querySelector) {
+        return form.querySelector('button[type="submit"], button:last-of-type');
+      }
     }
     return null;
+  }
+
+  function getComposerRoot(inp = findInput()) {
+    return inp?.closest?.('[data-type="unified-composer"]') ??
+      inp?.closest?.('form') ?? inp?.parentElement ?? inp ?? null;
+  }
+
+  function queryComposerAll(root, selectors) {
+    if (!root?.querySelectorAll) return [];
+    const found = [];
+    for (const selector of selectors) {
+      try { found.push(...root.querySelectorAll(selector)); } catch { /* selector drift */ }
+    }
+    return [...new Set(found)];
+  }
+
+  function isSendEnabled() {
+    const button = findSendButton();
+    return !!button && isVisible(button) && !button.disabled &&
+      button.getAttribute("aria-disabled") !== "true";
+  }
+
+  function getComposerPayloadState(inp = findInput()) {
+    const root = getComposerRoot(inp);
+    const attachmentNodes = queryComposerAll(root, SELECTORS.attachment);
+    const progressNodes = queryComposerAll(root, SELECTORS.uploadProgress);
+    const attachmentText = attachmentNodes
+      .map((node) => (node.textContent ?? node.innerText ?? "").trim())
+      .filter(Boolean)
+      .join(" ");
+    const uploadError = queryComposerAll(root, ['[role="alert"]', '[data-testid*="error" i]'])
+      .map((node) => (node.textContent ?? node.innerText ?? "").trim())
+      .find((value) => /upload|attachment|file|上传|附件|文件/i.test(value)) ?? null;
+    const uploading = progressNodes.length > 0 ||
+      /uploading|processing|正在上传|上传中|处理中/i.test(attachmentText);
+    const textLength = (inp?.innerText ?? inp?.textContent ?? "").trim().length;
+    const attachmentPresent = attachmentNodes.length > 0;
+    return {
+      attachmentPresent,
+      uploading,
+      uploadError,
+      textLength,
+      sendEnabled: isSendEnabled(),
+      clean: textLength === 0 && !attachmentPresent && !uploading,
+    };
+  }
+
+  function makeRelayError(code, message, details = {}) {
+    const error = new Error(message);
+    error.code = code;
+    Object.assign(error, details);
+    return error;
   }
 
   function isGenerating() {
@@ -182,6 +269,7 @@
     const baseline = captureBaseline();
     const generating = isGenerating();
     const input = findInput();
+    const composer = getComposerPayloadState(input);
     const conversationRoute = location.pathname.match(/\/c\/([a-f0-9-]+)/);
 
     let reason = null;
@@ -208,6 +296,8 @@
         stableForMs: 0,
         generating,
         baseline,
+        composer,
+        composerClean: !!input && composer.clean,
       };
     }
 
@@ -235,6 +325,8 @@
       stableForMs,
       generating,
       baseline,
+      composer,
+      composerClean: composer.clean,
     };
   }
 
@@ -322,6 +414,101 @@
     if (b && isVisible(b) && !b.disabled && b.getAttribute("aria-disabled") !== "true") return b;
     return null;
   }, 10000, 200, "waitForSendReady"); }
+
+  async function waitForSendEnabledAfterPaste(inp, text) {
+    const startedAt = Date.now();
+    const textDeadline = startedAt + TEXT_SEND_READY_TIMEOUT_MS;
+    const attachmentDeadline = startedAt + ATTACHMENT_UPLOAD_TIMEOUT_MS;
+    const sourceLength = text.trim().length;
+    let state = getComposerPayloadState(inp);
+    let attachmentMode = state.attachmentPresent || state.uploading ||
+      (sourceLength >= LARGE_PASTE_ATTACHMENT_THRESHOLD &&
+        state.textLength < Math.min(10, sourceLength));
+    let attachmentObserved = state.attachmentPresent || state.uploading;
+
+    while (true) {
+      const block = findSafetyBlock();
+      if (block) throw new Error(`check-send-enabled: safety block: ${block.reason}`);
+      state = getComposerPayloadState(inp);
+      attachmentObserved ||= state.attachmentPresent || state.uploading;
+      attachmentMode ||= attachmentObserved ||
+        (sourceLength >= LARGE_PASTE_ATTACHMENT_THRESHOLD &&
+          state.textLength < Math.min(10, sourceLength));
+      if (state.uploadError) {
+        throw makeRelayError(
+          "attachment_upload_failed",
+          `Attachment upload failed: ${state.uploadError}`,
+          { attachmentObserved, attachmentLikely: attachmentMode },
+        );
+      }
+      if (state.sendEnabled) {
+        return { attachmentMode, attachmentObserved, state };
+      }
+
+      const deadline = attachmentMode ? attachmentDeadline : textDeadline;
+      if (Date.now() >= deadline) break;
+      await delay(200);
+    }
+
+    if (attachmentMode) {
+      throw makeRelayError(
+        "attachment_upload_timeout",
+        `Attachment upload did not enable Send within ${ATTACHMENT_UPLOAD_TIMEOUT_MS}ms`,
+        { attachmentObserved, attachmentLikely: true },
+      );
+    }
+    return null;
+  }
+
+  function clearComposerText(inp) {
+    if (!inp) return;
+    try {
+      inp.focus?.({ preventScroll: true });
+      if (document.activeElement === inp) {
+        document.execCommand?.("selectAll", false);
+        document.execCommand?.("delete", false);
+      }
+    } catch { /* fall through to DOM cleanup */ }
+    try {
+      while (inp.firstChild) inp.removeChild(inp.firstChild);
+      inp.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        cancelable: false,
+        inputType: "deleteContentBackward",
+        data: null,
+      }));
+    } catch { /* best effort */ }
+  }
+
+  async function cleanupAfterAttachmentFailure(error) {
+    const inp = findInput();
+    if (!inp) return false;
+    const root = getComposerRoot(inp);
+    const before = getComposerPayloadState(inp);
+    const attachmentObserved = error?.attachmentObserved === true ||
+      before.attachmentPresent || before.uploading;
+    const removeButtons = queryComposerAll(root, SELECTORS.attachmentRemoveButton)
+      .filter((button) => isVisible(button));
+    for (const button of removeButtons) {
+      try { button.click(); } catch { /* best effort */ }
+    }
+    clearComposerText(inp);
+
+    let cleanSince = null;
+    const cleared = await waitForCondition(() => {
+      const state = getComposerPayloadState(inp);
+      if (!state.clean) {
+        cleanSince = null;
+        return null;
+      }
+      cleanSince ??= Date.now();
+      return Date.now() - cleanSince >= ATTACHMENT_CLEAN_STABLE_MS ? state : null;
+    }, ATTACHMENT_CLEANUP_TIMEOUT_MS, 200, "attachment-cleanup").catch(() => null);
+
+    // If no attachment/upload DOM was ever observed, an empty composer is not
+    // enough to prove that an asynchronous large-paste upload cannot reappear.
+    return attachmentObserved && !!cleared;
+  }
 
   // Background-friendly prompt injection that does not require focus.
   //
@@ -413,15 +600,9 @@
     await pacedDelay(300, 600);
 
     const injected = inp.innerText.trim();
-    // ChatGPT may convert long text into an attachment, leaving the composer
-    // empty. Treat an enabled Send button as success and allow time for upload.
-    const sendReady = await waitForCondition(() => {
-      const b = findSendButton();
-      if (!b) return null;
-      if (b.disabled) return null;
-      if (b.getAttribute("aria-disabled") === "true") return null;
-      return b;
-    }, 15000, 200, "check-send-enabled").catch(() => null);
+    // Large pastes may become attachments and leave the composer empty. Keep
+    // the normal text budget short, but allow an attachment-aware upload window.
+    const sendReady = await waitForSendEnabledAfterPaste(inp, text);
 
     if (!sendReady) {
       const suffix = injected.length === 0
@@ -430,11 +611,13 @@
       throw new Error(`Prompt injection method ${method} did not enable Send ${suffix}`);
     }
 
-    const asAttachment = injected.length < Math.min(10, text.trim().length);
+    const asAttachment = sendReady.attachmentMode ||
+      injected.length < Math.min(10, text.trim().length);
     console.log(
       `[relay content] injected via ${method}, DOM len=${injected.length}` +
         (asAttachment ? " (likely converted to attachment)" : ""),
     );
+    return { asAttachment };
   }
   async function clickSend() {
     const b = await waitForSendReady();
@@ -675,7 +858,9 @@
           writeInflight(inflight);
 
           try {
-            await pasteIntoInput(msg.text);
+            const pasteResult = await pasteIntoInput(msg.text);
+            inflight.attachmentMode = pasteResult?.asAttachment === true;
+            writeInflight(inflight);
             await pacedDelay(500, 1200);
             inflight.phase = "send-attempted";
             inflight.sendAttemptedAt = Date.now();
@@ -715,8 +900,15 @@
           } catch (e) {
             console.warn("[relay content] run-task failed", e);
             updateBanner(`Error: ${e.message.slice(0, 40)}`, "#e74c3c");
+            const attachmentFailure = e.code === "attachment_upload_timeout" ||
+              e.code === "attachment_upload_failed";
+            const attachmentCleanupConfirmed = attachmentFailure
+              ? await cleanupAfterAttachmentFailure(e).catch(() => false)
+              : null;
             sendResponse({
               error: e.message,
+              errorCode: typeof e.code === "string" ? e.code : null,
+              attachmentCleanupConfirmed,
               baseline,
               submissionState: inflight.phase === "preparing"
                 ? "not-submitted"

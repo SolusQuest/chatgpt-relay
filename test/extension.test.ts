@@ -76,6 +76,7 @@ test("config.js exports required constants", () => {
     "POLL_LATE_REPLY_GRACE_MS",
     "UNCERTAIN_QUEUE_RELEASE_MS",
     "RECOVERY_OBSERVATION_INTERVAL_MS",
+    "ATTACHMENT_BLOCK_CLEAN_STABLE_MS",
   ]) {
     assert.match(src, new RegExp(`export const ${sym}`), `missing export: ${sym}`);
   }
@@ -113,10 +114,24 @@ test("dispatch waits for hydrated stable page and verified submission", () => {
 });
 
 test("run-task acknowledgement and late reply capture are bounded", () => {
-  const src = fs.readFileSync(path.join(EXT, "service-worker.js"), "utf8");
-  assert.match(src, /RUN_TASK_ACK_TIMEOUT_MS/);
-  assert.match(src, /lateReplyDeadlineAt/);
-  assert.match(src, /\/capture/);
+  const worker = fs.readFileSync(path.join(EXT, "service-worker.js"), "utf8");
+  const config = fs.readFileSync(path.join(EXT, "lib", "config.js"), "utf8");
+  assert.match(worker, /RUN_TASK_ACK_TIMEOUT_MS/);
+  assert.match(config, /RUN_TASK_ACK_TIMEOUT_MS\s*=\s*120_000/);
+  assert.match(worker, /lateReplyDeadlineAt/);
+  assert.match(worker, /\/capture/);
+});
+
+test("large-paste attachments receive a separate upload budget and safe failure path", () => {
+  const content = fs.readFileSync(path.join(EXT, "content-script.js"), "utf8");
+  const worker = fs.readFileSync(path.join(EXT, "service-worker.js"), "utf8");
+  assert.match(content, /TEXT_SEND_READY_TIMEOUT_MS\s*=\s*15_000/);
+  assert.match(content, /ATTACHMENT_UPLOAD_TIMEOUT_MS\s*=\s*90_000/);
+  assert.match(content, /attachment_upload_timeout/);
+  assert.match(content, /cleanupAfterAttachmentFailure/);
+  assert.match(worker, /attachmentCleanupConfirmed/);
+  assert.match(worker, /preserveQueued:\s*true/);
+  assert.match(worker, /ATTACHMENT_BLOCKS/);
 });
 
 test("durable send fence precedes Send and post-attempt polling cannot requeue", () => {

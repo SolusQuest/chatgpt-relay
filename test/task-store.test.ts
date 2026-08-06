@@ -376,6 +376,24 @@ test("markSessionStatus paused fails in-flight tasks", () => {
   assert.equal(store.getTask(t2.id)?.status, "failed");
 });
 
+test("attachment cleanup pause preserves queued successors", () => {
+  const store = makeStore();
+  const active = store.createTask({ session: "upload", text: "large paste" });
+  store.claimNextTask("upload");
+  const queued = store.createTask({ session: "upload", text: "next" });
+
+  store.markSessionStatus("upload", true, "attachment cleanup uncertain", Date.now(), true);
+
+  assert.equal(store.getTask(active.id)?.status, "failed");
+  assert.equal(store.getTask(queued.id)?.status, "queued");
+  assert.throws(
+    () => store.createTask({ session: "upload", text: "blocked" }),
+    (e) => e instanceof TaskStoreError && e.code === "session_paused",
+  );
+  store.markSessionStatus("upload", false, null);
+  assert.equal(store.claimNextTask("upload")?.id, queued.id);
+});
+
 test("expireDueTasks marks past-expiry queued as expired", () => {
   const store = makeStore();
   const t = store.createTask({ session: "s1", text: "a", timeoutMs: 1000, now: 100 });

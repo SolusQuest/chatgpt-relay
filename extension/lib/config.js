@@ -19,6 +19,7 @@ export const STORAGE_KEYS = {
   PAUSE: "paused_sessions",          // Set<sessionId>
   LAST_ERROR: "last_error",
   PENDING_REPLIES: "pending_replies", // Map<taskId, PendingReplyRecord>
+  ATTACHMENT_BLOCKS: "attachment_blocked_sessions", // Map<sessionId, {reason, at, cleanSince?}>
 };
 
 // Pending-reply state-machine constants. The service worker requests one DOM
@@ -29,6 +30,7 @@ export const POLL_HARD_TIMEOUT_MS = 15 * 60_000; // Fallback for legacy pending 
 export const POLL_LATE_REPLY_GRACE_MS = 30 * 60_000;
 export const UNCERTAIN_QUEUE_RELEASE_MS = 5_000;  // Stable idle time before queued work may advance.
 export const RECOVERY_OBSERVATION_INTERVAL_MS = 30_000;
+export const ATTACHMENT_BLOCK_CLEAN_STABLE_MS = 5_000;
 export const POLL_REPLY_SENDMSG_TIMEOUT_MS = 6000;
-export const RUN_TASK_ACK_TIMEOUT_MS = 45_000;
+export const RUN_TASK_ACK_TIMEOUT_MS = 120_000;
 export const PAGE_STATE_SENDMSG_TIMEOUT_MS = 5000;

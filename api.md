@@ -70,9 +70,10 @@ the terminal status back to `done`.
 `text` is returned only by a single-task query or when a list request includes
 `include_text=1`.
 
-### Server-generated task errors
+### Stable task errors
 
-The relay uses stable machine-readable codes for maintenance failures:
+The relay and extension use stable machine-readable codes for expected
+lifecycle failures:
 
 | Code | Meaning |
 |---|---|
@@ -83,10 +84,12 @@ The relay uses stable machine-readable codes for maintenance failures:
 | `task_recovery_timeout` | A recovering task reached its absolute recovery deadline |
 | `session_heartbeat_lost` | The relay released an active task after its browser session became stale |
 | `aborted` | The extension task wait was aborted |
+| `attachment_upload_timeout` | A large pasted-text attachment did not enable Send within 90 seconds |
+| `attachment_upload_failed` | ChatGPT exposed an attachment upload failure before Send |
 
-Extension-originated failures can include a descriptive `error` string. Clients
-must use `status` to identify terminal tasks and should display unknown error
-values rather than rejecting them.
+Unexpected extension failures can still include a descriptive `error` string.
+Clients must use `status` to identify terminal tasks and should display unknown
+error values rather than rejecting them.
 
 ## Public API
 
@@ -270,6 +273,12 @@ Progress phases:
 - `generating_seen`
 - `recovery_observed`
 - `reply_detected`
+
+`POST /internal/sessions/:id/status` accepts extension-only
+`preserveQueued: true` for a pre-send attachment-cleanup block. The session is
+paused and active work is failed, but already queued successors remain queued
+until the extension confirms that the composer is clean and resumes the
+session. Public pause requests retain their existing fail-all behavior.
 
 The detailed internal request and response contracts are defined by
 [`server/routes/internal.ts`](./server/routes/internal.ts) and the extension
