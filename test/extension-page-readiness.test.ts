@@ -19,6 +19,7 @@ type FakeElement = {
   innerText: string;
   getAttribute(name: string): string | null;
   getBoundingClientRect(): { width: number; height: number };
+  querySelectorAll?(selector: string): FakeElement[];
 };
 
 function element(id: string, text = ""): FakeElement {
@@ -44,6 +45,7 @@ function createHarness() {
     input: element("input-1") as FakeElement | null,
     users: [] as FakeElement[],
     assistants: [] as FakeElement[],
+    stopButtons: [] as FakeElement[],
     pathname: "/c/6a61e3cc-3160-83ee-9aa7-f79a39d93b3e",
   };
   const storage = new Map<string, string>();
@@ -76,6 +78,7 @@ function createHarness() {
     querySelectorAll(selector: string) {
       if (selector === '[data-message-author-role="user"]') return state.users;
       if (selector === '[data-message-author-role="assistant"]') return state.assistants;
+      if (selector === '[data-testid="stop-button"]') return state.stopButtons;
       if (selector === "#prompt-textarea") return state.input ? [state.input] : [];
       return [];
     },
@@ -220,6 +223,29 @@ test("reply polling rejects snapshots from a different conversation", async () =
   );
   assert.equal(snapshot.status, "session-mismatch");
   assert.equal(snapshot.currentSession, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+});
+
+test("reply polling exposes bounded provisional generation metadata", async () => {
+  const harness = createHarness();
+  harness.state.readyState = "complete";
+  harness.state.users = [element("user-2", "new prompt")];
+  harness.state.stopButtons = [element("stop", "Stop")];
+  const activity = element("activity", "  Reading\nfiles  ");
+  const assistant = element("assistant-2", "Reading filesDraft answer");
+  assistant.querySelectorAll = (selector: string) =>
+    selector === '[role="status"]' ? [activity] : [];
+  harness.state.assistants = [assistant];
+
+  const snapshot = await harness.pollReply({
+    userCount: 1,
+    lastUserId: "user-1",
+    assistantCount: 1,
+    lastAssistantId: "assistant-1",
+  });
+  assert.equal(snapshot.status, "generating");
+  assert.equal(snapshot.activity, "Reading files");
+  assert.equal(snapshot.outputChars, "Draft answer".length);
+  assert.equal(snapshot.reply, undefined);
 });
 
 test("page state reports an attachment payload as not clean", async () => {

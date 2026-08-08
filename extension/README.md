@@ -80,6 +80,9 @@ Agent -> POST /v1/tasks -> Relay server (Express + SQLite)
   - records the task in its persistent pending-reply state;
   - samples the page every two seconds and completes the task after the reply is
     stable;
+  - reports only bounded phase, visible activity, and output-size observations
+    to server memory, at most every 10 seconds for changes or 30 seconds for an
+    unchanged heartbeat; partial reply text is never uploaded as progress;
   - after the soft deadline, renews a bounded recovery lease only while strong
     evidence for the original task remains visible.
 - Durable extension state lives in `chrome.storage.local`, including
@@ -98,6 +101,10 @@ Agent -> POST /v1/tasks -> Relay server (Express + SQLite)
 The browser path provides at-most-once automatic delivery. Once `send_attempted` has been durably recorded, an empty or still-hydrating DOM is treated as unknown evidence and never makes the task resendable. When the normal task lifetime plus active grace passes, the server exposes non-terminal `recovering` instead of immediately failing the task. A reply captured in that state completes normally and is stored as `reply`.
 
 Active generation or the exact submitted user message with no reply is strong recovery evidence. The extension reports that observation at a bounded cadence, renewing a short server lease. A generic heartbeat, history hydration, or empty DOM does not renew it. Recovery ends on a reply, explicit Stop/cancel, session heartbeat loss, lease expiry, or the absolute recovery deadline.
+
+Provisional progress is a separate observability path. It is kept only in relay
+server memory and helps clients decide when to observe again. It does not renew
+the recovery lease and is cleared when the task becomes terminal.
 
 A recovering task reserves the session. A visible submitted message continues to block until a terminal transition, and active generation always blocks. When a recovered delivery remains genuinely unconfirmed, the page is fully hydrated and stably idle, and newer work is queued, the extension can end the ambiguous observation with `submission_outcome_unknown` and advance the queue. Advancing never requeues or resends the uncertain task. A reply discovered after an eligible early terminal failure can still be stored as `lateReply` during the remaining bounded window.
 

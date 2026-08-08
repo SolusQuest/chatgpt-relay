@@ -158,6 +158,27 @@ export type TaskProgressPhase =
   | "recovery_observed"
   | "reply_detected";
 
+export type TaskObservationPhase =
+  | "accepted"
+  | "generating"
+  | "answer_streaming";
+
+export interface TaskObservation {
+  revision: number;
+  phase: TaskObservationPhase;
+  activity: string | null;
+  outputChars: number;
+  observedAt: number;
+  changedAt: number;
+  provisional: true;
+}
+
+export interface TaskObservationInput {
+  phase: TaskObservationPhase;
+  activity?: string | null;
+  outputChars?: number;
+}
+
 export interface CaptureReplyResult {
   task: Task;
   captured: boolean;
@@ -182,6 +203,7 @@ export class TaskStoreError extends Error {
 
 export class TaskStore {
   private readonly emitter = new EventEmitter();
+  private readonly taskObservations = new Map<string, TaskObservation>();
 
   constructor(
     private readonly db: Db,
@@ -263,6 +285,64 @@ export class TaskStore {
       | TaskRowRaw
       | undefined;
     return row ? rowToTask(row) : null;
+  }
+
+  getTaskObservation(id: string, now = Date.now()): TaskObservation | null {
+    const observation = this.taskObservations.get(id);
+    if (!observation) return null;
+    const task = this.getTask(id);
+    if (
+      !task ||
+      (task.status !== "in_progress" && task.status !== "recovering") ||
+      observation.observedAt + TASK_OBSERVATION_TTL_MS <= now
+    ) {
+      this.taskObservations.delete(id);
+      return null;
+    }
+    return { ...observation };
+  }
+
+  reportTaskObservation(
+    id: string,
+    input: TaskObservationInput,
+    now = Date.now(),
+  ): { task: Task; observation: TaskObservation | null } {
+    const task = this.getTask(id);
+    if (!task) throw new TaskStoreError(`task ${id} not found`, "task_not_found");
+    if (task.status !== "in_progress" && task.status !== "recovering") {
+      this.taskObservations.delete(id);
+      return { task, observation: null };
+    }
+
+    const activity = normalizeObservationActivity(input.activity);
+    const outputChars = normalizeObservationOutputChars(input.outputChars);
+    let previous = this.taskObservations.get(id);
+    if (previous && previous.observedAt + TASK_OBSERVATION_TTL_MS <= now) {
+      this.taskObservations.delete(id);
+      previous = undefined;
+    }
+    const changed = !previous ||
+      previous.phase !== input.phase ||
+      previous.activity !== activity ||
+      previous.outputChars !== outputChars;
+    let revision = Math.max(now, (previous?.revision ?? 0) + 1);
+    let changedAt = now;
+    if (previous && !changed) {
+      revision = previous.revision;
+      changedAt = previous.changedAt;
+    }
+    const observation: TaskObservation = {
+      revision,
+      phase: input.phase,
+      activity,
+      outputChars,
+      observedAt: now,
+      changedAt,
+      provisional: true,
+    };
+    this.taskObservations.set(id, observation);
+    if (changed) this.emitTaskObservation(task);
+    return { task, observation: { ...observation } };
   }
 
   getActiveTaskGraceMs(): number {
@@ -396,6 +476,7 @@ export class TaskStore {
         id,
       );
     const task = this.mustGetTask(id);
+    this.taskObservations.delete(id);
     this.emitTaskChange(task);
     return task;
   }
@@ -489,6 +570,7 @@ export class TaskStore {
       .prepare(`UPDATE tasks SET status = 'queued', dispatched_at = NULL WHERE id = ?`)
       .run(id);
     const task = this.mustGetTask(id);
+    this.taskObservations.delete(id);
     this.emitTaskChange(task);
     return task;
   }
@@ -505,6 +587,7 @@ export class TaskStore {
       )
       .run(now, reason, id);
     const task = this.mustGetTask(id);
+    this.taskObservations.delete(id);
     this.emitTaskChange(task);
     return task;
   }
@@ -539,6 +622,7 @@ export class TaskStore {
       )
       .run(id);
     const task = this.mustGetTask(id);
+    this.taskObservations.delete(id);
     this.emitTaskChange(task);
     return task;
   }
@@ -615,6 +699,7 @@ export class TaskStore {
 
     const total = Number(q.changes) + Number(recovering.changes) +
       Number(preSend.changes) + Number(hardTimeout.changes) + Number(leaseExpired.changes);
+    this.pruneTaskObservations(now);
     if (total > 0) this.emitBulkChange();
     return total;
   }
@@ -639,6 +724,7 @@ export class TaskStore {
         .run(now, s.id);
       changed += Number(info.changes);
     }
+    this.pruneTaskObservations(now);
     if (changed > 0) this.emitBulkChange();
     return changed;
   }
@@ -699,6 +785,7 @@ export class TaskStore {
                AND (? = 0 OR status <> 'queued')`,
         )
         .run(now, `session paused: ${reason ?? "unknown"}`, id, preserveQueued ? 1 : 0);
+      this.clearTaskObservationsForSession(id);
       this.emitBulkChange();
     } else {
       this.db
@@ -734,6 +821,10 @@ export class TaskStore {
     this.emitter.emit(`session:${task.session}`);
   }
 
+  private emitTaskObservation(task: Task): void {
+    this.emitter.emit(`task:${task.id}`, task);
+  }
+
   private emitBulkChange(): void {
     // Notify every listener to query again.
     this.emitter.emit("bulk");
@@ -762,6 +853,40 @@ export class TaskStore {
     if (!s) throw new Error(`session ${id} not found after upsert`);
     return s;
   }
+
+  private pruneTaskObservations(now: number): void {
+    for (const [taskId, observation] of this.taskObservations) {
+      const task = this.getTask(taskId);
+      if (
+        !task ||
+        (task.status !== "in_progress" && task.status !== "recovering") ||
+        observation.observedAt + TASK_OBSERVATION_TTL_MS <= now
+      ) {
+        this.taskObservations.delete(taskId);
+      }
+    }
+  }
+
+  private clearTaskObservationsForSession(sessionId: string): void {
+    for (const taskId of this.taskObservations.keys()) {
+      if (this.getTask(taskId)?.session === sessionId) {
+        this.taskObservations.delete(taskId);
+      }
+    }
+  }
+}
+
+const TASK_OBSERVATION_TTL_MS = 2 * 60_000;
+
+function normalizeObservationActivity(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length > 0 ? normalized.slice(0, 200) : null;
+}
+
+function normalizeObservationOutputChars(value: number | undefined): number {
+  if (!Number.isFinite(value) || value == null || value <= 0) return 0;
+  return Math.min(Math.floor(value), 10_000_000);
 }
 
 function normalizeTimeout(input: number | undefined, fallback: number, max: number): number {

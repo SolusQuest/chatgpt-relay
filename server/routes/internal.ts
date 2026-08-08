@@ -4,7 +4,7 @@ import { Router } from "express";
 import type { Request, Response } from "express";
 import type { TaskStore } from "../task-store.js";
 import { TaskStoreError } from "../task-store.js";
-import type { TaskProgressPhase } from "../task-store.js";
+import type { TaskObservationPhase, TaskProgressPhase } from "../task-store.js";
 import { longPollSession } from "../long-poll.js";
 import { asPositiveInt, isValidSessionId } from "../util.js";
 
@@ -92,6 +92,54 @@ export function createInternalRouter(store: TaskStore): Router {
     } catch (err) {
       if (err instanceof TaskStoreError) {
         return res.status(400).json({ error: err.code, message: err.message });
+      }
+      throw err;
+    }
+  });
+
+  // Record the latest provisional page observation in memory only. Unlike the
+  // lifecycle progress endpoint above, these snapshots are never persisted.
+  router.post("/tasks/:id/observation", (req: Request, res: Response) => {
+    const id = String(req.params.id ?? "");
+    const body = (req.body ?? {}) as {
+      phase?: unknown;
+      activity?: unknown;
+      outputChars?: unknown;
+    };
+    const phases: TaskObservationPhase[] = [
+      "accepted",
+      "generating",
+      "answer_streaming",
+    ];
+    if (typeof body.phase !== "string" || !phases.includes(body.phase as TaskObservationPhase)) {
+      return res.status(400).json({ error: "invalid observation phase" });
+    }
+    if (body.activity !== undefined && body.activity !== null && typeof body.activity !== "string") {
+      return res.status(400).json({ error: "invalid observation activity" });
+    }
+    if (
+      body.outputChars !== undefined &&
+      (typeof body.outputChars !== "number" ||
+        !Number.isFinite(body.outputChars) ||
+        body.outputChars < 0)
+    ) {
+      return res.status(400).json({ error: "invalid observation outputChars" });
+    }
+    try {
+      const result = store.reportTaskObservation(id, {
+        phase: body.phase as TaskObservationPhase,
+        activity: typeof body.activity === "string" ? body.activity : null,
+        outputChars: typeof body.outputChars === "number" ? body.outputChars : 0,
+      });
+      return res.json({
+        status: result.task.status,
+        taskId: result.task.id,
+        progress: result.observation,
+      });
+    } catch (err) {
+      if (err instanceof TaskStoreError) {
+        const status = err.code === "task_not_found" ? 404 : 400;
+        return res.status(status).json({ error: err.code, message: err.message });
       }
       throw err;
     }

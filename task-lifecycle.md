@@ -19,6 +19,8 @@ HTTP shapes are documented in [`api.md`](./api.md); agent operating rules are in
 5. Explicit cancellation is terminal `cancelled`. Infrastructure or evidence
    loss is terminal `failed` with a machine-readable reason.
 6. A client wait timeout never changes server task state.
+7. Provisional progress is ephemeral observability only. It cannot change task
+   state, renew recovery, or become a final reply.
 
 ## State diagram
 
@@ -130,6 +132,25 @@ the task becomes `failed` with `task_recovery_lease_expired`. If the absolute
 deadline arrives first, it becomes `failed` with `task_recovery_timeout`.
 Genuinely unconfirmed delivery uses `submission_outcome_unknown`.
 
+## Provisional progress observations
+
+While an active page request is accepted or generating, the extension can
+publish a bounded progress snapshot containing a coarse phase, an optional
+visible activity label, output character count, and observation/change
+timestamps. No partial reply text is sent. Semantic changes are rate-limited to
+one report per 10 seconds; unchanged liveness is reported at most once per 30
+seconds.
+
+The server holds only the latest snapshot in memory. It is never stored in
+SQLite, expires after two minutes without observation, is cleared on a terminal
+transition, and may disappear during a server restart. If the page remains
+active, a later extension observation recreates it.
+
+Progress and recovery evidence are deliberately separate. A progress snapshot
+can help an agent choose its next observation interval, but it does not renew a
+recovery lease, prove delivery, make partial output actionable, or alter any
+state transition. `reply` remains the only successful final result.
+
 ## Session disappearance and cancellation
 
 The browser extension heartbeat proves that the ChatGPT session is still
@@ -183,6 +204,12 @@ An Agent must treat `recovering` as â€œthe original request may still completeâ€
 A `queued`, `in_progress`, or `recovering` response from a long poll is not an
 error. Likewise, a CLI client wait timeout only ends that invocation; it does
 not authorize a duplicate task.
+
+When `progress` is present, use `changedAt` and `revision` only as scheduling
+hints. Continued changes justify a nearer observation; an advancing
+`observedAt` without a new revision means the page remains active but visibly
+unchanged. Never review, implement, or quote provisional activity as if it were
+the final response.
 
 ## Deployment and compatibility
 

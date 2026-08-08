@@ -58,6 +58,12 @@
       '[data-testid="stop-button"]',
       'button[aria-label*="Stop"], button[aria-label*="停止"]',
     ],
+    generationActivity: [
+      '[role="status"]',
+      '[data-testid*="thinking" i]',
+      '[data-testid*="reasoning" i]',
+      '[data-testid*="tool" i]',
+    ],
     assistantMessage: '[data-message-author-role="assistant"]',
     userMessage: '[data-message-author-role="user"]',
     safetyAlerts: [
@@ -87,6 +93,7 @@
     /重新连接/,
     /网络异常/,
   ];
+  const GENERATION_ACTIVITY_PATTERN = /(thinking|searching|browsing|reading|analyzing|working|running|checking|using tool|思考|搜索|浏览|读取|分析|处理中|运行|检查|使用工具)/i;
 
   const ACTION_DELAY_MIN = 250;
   const ACTION_DELAY_MAX = 900;
@@ -241,6 +248,19 @@
     // innerText depends on layout and may be empty in frozen tabs; textContent does not.
     const t = (el.textContent ?? el.innerText ?? "").replace(/\u00A0/g, " ").trim();
     return t;
+  }
+  function getGenerationActivity(msgs) {
+    const last = msgs[msgs.length - 1];
+    if (!last || typeof last.querySelectorAll !== "function") return null;
+    for (const selector of SELECTORS.generationActivity) {
+      for (const node of last.querySelectorAll(selector)) {
+        const text = getVisibleText(node).replace(/\s+/g, " ").trim();
+        if (text && text.length <= 120 && GENERATION_ACTIVITY_PATTERN.test(text)) {
+          return text;
+        }
+      }
+    }
+    return null;
   }
   function getLastAssistantId(msgs) {
     if (!msgs.length) return null;
@@ -799,9 +819,15 @@
                 : users.length > (baseline.userCount ?? 0);
             const lastText = getLastText(msgs);
             if (generating) {
+              const activity = getGenerationActivity(msgs);
+              const outputChars = hasNewAssistant
+                ? Math.max(0, lastText.length - (activity?.length ?? 0))
+                : 0;
               sendResponse({
                 status: "generating",
                 lastText: lastText,
+                activity,
+                outputChars,
                 assistantCount: msgs.length,
                 submittedUserMessageId: hasNewUser ? currentUserId : expectedUserId,
               });

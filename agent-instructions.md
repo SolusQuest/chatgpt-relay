@@ -120,6 +120,13 @@ Different user-supplied sessions may run concurrently; one session processes at 
 
 A long poll returning `queued`, `in_progress`, or `recovering` is not failure. A queued successor remains blocked while the original task is recovering; do not bypass that guard by creating another copy. See [`task-lifecycle.md`](./task-lifecycle.md) for recovery evidence and terminal transitions.
 
+An active task may expose an in-memory `progress` snapshot. Treat `revision` and
+`changedAt` only as observation-scheduling hints: continued changes can justify
+a nearer check, while only `observedAt` advancing means the page is still active
+but visibly unchanged. `activity`, `phase`, and `outputChars` are provisional;
+never review, implement, quote, or make a completion decision from them. Only a
+terminal `done` task and its `reply` are final.
+
 ## Safety and anti-patterns
 
 Prompts and replies persist in `~/.gpt-relay/gpt-relay.db`; pending records persist in `~/.gpt-relay/pending/`; task content is sent to the user's ChatGPT session. Do not submit unauthorized secrets or sensitive information.

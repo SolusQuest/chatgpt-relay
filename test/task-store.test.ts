@@ -27,7 +27,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
   };
 }
 
-function makeStore(overrides: Partial<Config> = {}): TaskStore {
+function makeTestDb(): DatabaseSync {
   const db = new DatabaseSync(":memory:");
   // Reproduce the db.ts schema here so importing it cannot create a test file.
   db.exec(`
@@ -53,6 +53,10 @@ function makeStore(overrides: Partial<Config> = {}): TaskStore {
       paused INTEGER NOT NULL DEFAULT 0, pause_reason TEXT, paused_at INTEGER
     );
   `);
+  return db;
+}
+
+function makeStore(overrides: Partial<Config> = {}, db = makeTestDb()): TaskStore {
   return new TaskStore(db, makeConfig(overrides));
 }
 
@@ -236,6 +240,60 @@ test("markTaskProgress records each page lifecycle phase once", () => {
   assert.equal(progressed.generatingSeenAt, 400);
   assert.equal(progressed.recoveryObservedAt, 475);
   assert.equal(progressed.replyDetectedAt, 500);
+});
+
+test("task observations stay in memory and distinguish changes from heartbeats", () => {
+  const db = makeTestDb();
+  const store = makeStore({}, db);
+  const task = store.createTask({ session: "observed", text: "q", now: 10 });
+  store.claimNextTask("observed", 20);
+  const seen: string[] = [];
+  const off = store.onTaskChange(task.id, (changed) => seen.push(changed.status));
+
+  const first = store.reportTaskObservation(task.id, {
+    phase: "generating",
+    activity: "  Reading\n files  ",
+    outputChars: 0,
+  }, 100).observation!;
+  assert.equal(first.activity, "Reading files");
+  assert.equal(first.observedAt, 100);
+  assert.equal(first.changedAt, 100);
+
+  const heartbeat = store.reportTaskObservation(task.id, {
+    phase: "generating",
+    activity: "Reading files",
+    outputChars: 0,
+  }, 200).observation!;
+  assert.equal(heartbeat.revision, first.revision);
+  assert.equal(heartbeat.changedAt, 100);
+  assert.equal(heartbeat.observedAt, 200);
+
+  const streaming = store.reportTaskObservation(task.id, {
+    phase: "answer_streaming",
+    outputChars: 120,
+  }, 300).observation!;
+  assert.ok(streaming.revision > first.revision);
+  assert.equal(streaming.changedAt, 300);
+  assert.deepEqual(seen, ["in_progress", "in_progress"]);
+  off();
+
+  // A new store over the same SQLite database has no observation: the snapshot
+  // is deliberately not persisted.
+  const restarted = makeStore({}, db);
+  assert.equal(restarted.getTaskObservation(task.id, 301), null);
+
+  store.completeTask(task.id, { text: "done", now: 400 });
+  assert.equal(store.getTaskObservation(task.id, 401), null);
+});
+
+test("task observations expire from memory after a bounded idle period", () => {
+  const store = makeStore();
+  const task = store.createTask({ session: "observation-ttl", text: "q", now: 10 });
+  store.claimNextTask("observation-ttl", 20);
+  store.reportTaskObservation(task.id, { phase: "accepted" }, 100);
+
+  assert.notEqual(store.getTaskObservation(task.id, 120_099), null);
+  assert.equal(store.getTaskObservation(task.id, 120_100), null);
 });
 
 test("send-attempted task enters recovering and a reply completes normally", () => {

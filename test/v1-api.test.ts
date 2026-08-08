@@ -282,6 +282,58 @@ test("progress endpoint records page lifecycle timestamps", async () => {
   assert.equal(typeof task.json.replyDetectedAt, "number");
 });
 
+test("provisional observations stay separate from durable task results", async () => {
+  const c = await post("/v1/tasks", { session: "observation-api", text: "watch me" });
+  const id = c.json.taskId;
+  await get("/internal/next_task?session=observation-api");
+
+  const first = await post(`/internal/tasks/${id}/observation`, {
+    phase: "generating",
+    activity: "  Reading\nfiles  ",
+    outputChars: 0,
+  });
+  assert.equal(first.status, 200);
+  assert.equal(first.json.progress.provisional, true);
+  assert.equal(first.json.progress.activity, "Reading files");
+  const revision = first.json.progress.revision as number;
+
+  const waiting = get(`/v1/tasks/${id}?wait=3000&progress_after=${revision}`);
+  setTimeout(() => {
+    void post(`/internal/tasks/${id}/observation`, {
+      phase: "answer_streaming",
+      outputChars: 250,
+    });
+  }, 100);
+  const changed = await waiting;
+  assert.equal(changed.status, 200);
+  assert.equal(changed.json.status, "in_progress");
+  assert.equal(changed.json.progress.phase, "answer_streaming");
+  assert.equal(changed.json.progress.outputChars, 250);
+  assert.ok(changed.json.progress.revision > revision);
+  assert.equal(changed.json.reply, null);
+
+  await post(`/internal/tasks/${id}/complete`, { text: "final answer" });
+  const done = await get(`/v1/tasks/${id}`);
+  assert.equal(done.json.status, "done");
+  assert.equal(done.json.reply, "final answer");
+  assert.equal(done.json.progress, null);
+});
+
+test("observation endpoint validates provisional fields", async () => {
+  const c = await post("/v1/tasks", { session: "observation-invalid", text: "watch" });
+  const id = c.json.taskId;
+  await get("/internal/next_task?session=observation-invalid");
+
+  assert.equal((await post(`/internal/tasks/${id}/observation`, {
+    phase: "hidden_reasoning",
+  })).status, 400);
+  assert.equal((await post(`/internal/tasks/${id}/observation`, {
+    phase: "generating",
+    outputChars: "12",
+  })).status, 400);
+  assert.equal((await get(`/v1/tasks/${id}?progress_after=invalid`)).status, 400);
+});
+
 test("soft deadline exposes recovering until a normal reply completes it", async () => {
   const c = await post("/v1/tasks", {
     session: "recovering-api",
