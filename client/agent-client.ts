@@ -33,6 +33,16 @@ export interface ReviewResult {
   elapsedMs: number;
 }
 
+export interface TaskProgressView {
+  revision: number;
+  phase: "accepted" | "generating" | "answer_streaming";
+  activity: string | null;
+  outputChars: number;
+  observedAt: number;
+  changedAt: number;
+  provisional: true;
+}
+
 export interface TaskView {
   taskId: string;
   session: string;
@@ -60,6 +70,7 @@ export interface TaskView {
   recoveryDeadlineAt: number;
   lateReplyDeadlineAt: number;
   requeueCount: number;
+  progress: TaskProgressView | null;
 }
 
 export interface SessionView {

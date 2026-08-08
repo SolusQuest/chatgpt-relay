@@ -16,6 +16,8 @@ import {
   POLL_LATE_REPLY_GRACE_MS,
   UNCERTAIN_QUEUE_RELEASE_MS,
   RECOVERY_OBSERVATION_INTERVAL_MS,
+  TASK_OBSERVATION_CHANGE_INTERVAL_MS,
+  TASK_OBSERVATION_HEARTBEAT_INTERVAL_MS,
   ATTACHMENT_BLOCK_CLEAN_STABLE_MS,
   POLL_REPLY_SENDMSG_TIMEOUT_MS,
   RUN_TASK_ACK_TIMEOUT_MS,
@@ -256,6 +258,33 @@ async function reportTaskProgress(taskId, phase) {
   });
 }
 
+async function reportTaskObservation(taskId, rec, observation, now = Date.now()) {
+  const normalized = {
+    phase: observation.phase,
+    activity: typeof observation.activity === "string" && observation.activity.trim().length > 0
+      ? observation.activity.replace(/\s+/g, " ").trim().slice(0, 200)
+      : null,
+    outputChars: Number.isFinite(observation.outputChars)
+      ? Math.max(0, Math.floor(observation.outputChars))
+      : 0,
+  };
+  const signature = JSON.stringify(normalized);
+  const changed = signature !== rec.lastObservationSignature;
+  const lastReportedAt = rec.lastObservationReportedAt ?? 0;
+  const interval = changed
+    ? TASK_OBSERVATION_CHANGE_INTERVAL_MS
+    : TASK_OBSERVATION_HEARTBEAT_INTERVAL_MS;
+  if (lastReportedAt > 0 && now - lastReportedAt < interval) return;
+
+  try {
+    await httpJson("POST", `/internal/tasks/${taskId}/observation`, normalized);
+    rec.lastObservationSignature = signature;
+    rec.lastObservationReportedAt = now;
+  } catch (e) {
+    dlog("[relay sw] observation report failed", taskId.slice(0, 8), e.message);
+  }
+}
+
 async function reportRecoveryObservation(taskId, rec, now = Date.now()) {
   if (!rec.hardTimedOutAt) return;
   if (
@@ -320,6 +349,8 @@ async function setClaimPendingReply(
     hardTimedOutAt: null,
     generatingProgressReported: false,
     replyProgressReported: false,
+    lastObservationSignature: null,
+    lastObservationReportedAt: 0,
     ...details,
   });
 }
@@ -381,6 +412,8 @@ async function attachPendingFromTask(task, session, tabId, record = {}) {
       existing?.generatingProgressReported ?? task.generatingSeenAt != null,
     replyProgressReported:
       existing?.replyProgressReported ?? task.replyDetectedAt != null,
+    lastObservationSignature: existing?.lastObservationSignature ?? null,
+    lastObservationReportedAt: existing?.lastObservationReportedAt ?? 0,
   });
   await markInflight(session, task.taskId, {
     tabId,
@@ -1004,6 +1037,11 @@ async function pollOnePending(taskId, rec) {
       await reportTaskProgress(taskId, "generating_seen");
       rec.generatingProgressReported = true;
     }
+    await reportTaskObservation(taskId, rec, {
+      phase: (snap.outputChars ?? 0) > 0 ? "answer_streaming" : "generating",
+      activity: snap.activity ?? null,
+      outputChars: snap.outputChars ?? 0,
+    }, now);
     await reportRecoveryObservation(taskId, rec, now);
     await setPendingReply(taskId, rec);
     return;
@@ -1023,6 +1061,11 @@ async function pollOnePending(taskId, rec) {
     rec.lastSampleText = snap.lastText ?? rec.lastSampleText ?? "";
     rec.submittedUserMessageId =
       rec.submittedUserMessageId ?? snap.submittedUserMessageId ?? null;
+    await reportTaskObservation(taskId, rec, {
+      phase: "accepted",
+      activity: null,
+      outputChars: 0,
+    }, now);
     await reportRecoveryObservation(taskId, rec, now);
     await setPendingReply(taskId, rec);
     return;

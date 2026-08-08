@@ -2,7 +2,7 @@
 // Public API for task submission, lookup, cancellation, and listing.
 import { Router } from "express";
 import type { Request, Response } from "express";
-import type { TaskStore, Task, TaskStatus } from "../task-store.js";
+import type { TaskStore, Task, TaskObservation, TaskStatus } from "../task-store.js";
 import { TaskStoreError, TERMINAL_STATUSES } from "../task-store.js";
 import { longPollTask } from "../long-poll.js";
 import { asPositiveInt, isValidSessionId } from "../util.js";
@@ -46,6 +46,7 @@ export interface TaskView {
   recoveryDeadlineAt: number;
   lateReplyDeadlineAt: number;
   requeueCount: number;
+  progress: TaskObservation | null;
 }
 
 export function toTaskView(store: TaskStore, t: Task, includeText = false): TaskView {
@@ -76,6 +77,7 @@ export function toTaskView(store: TaskStore, t: Task, includeText = false): Task
     recoveryDeadlineAt: store.getRecoveryDeadlineAt(t),
     lateReplyDeadlineAt: store.getLateReplyDeadlineAt(t),
     requeueCount: t.requeueCount,
+    progress: store.getTaskObservation(t.id),
   };
   if (includeText) v.text = t.text;
   return v;
@@ -125,10 +127,25 @@ export function createV1TasksRouter(store: TaskStore): Router {
     const id = String(req.params.id ?? "");
     const wait = asPositiveInt(req.query.wait) ?? 0;
     const capped = Math.min(wait, 60_000); // Cap at 60 seconds.
+    const progressAfterRaw = req.query.progress_after;
+    let progressAfter: number | null = null;
+    if (progressAfterRaw !== undefined) {
+      if (typeof progressAfterRaw !== "string") {
+        return res.status(400).json({ error: "invalid progress_after" });
+      }
+      const parsed = Number(progressAfterRaw);
+      if (!Number.isSafeInteger(parsed) || parsed < 0) {
+        return res.status(400).json({ error: "invalid progress_after" });
+      }
+      progressAfter = parsed;
+    }
     const task = await longPollTask(store, {
       taskId: id,
       timeoutMs: capped,
-      isDone: (t) => TERMINAL_STATUSES.includes(t.status),
+      isDone: (t) =>
+        TERMINAL_STATUSES.includes(t.status) ||
+        (progressAfter !== null &&
+          (store.getTaskObservation(t.id)?.revision ?? 0) > progressAfter),
     });
     if (!task) return res.status(404).json({ error: "task not found" });
     return res.json(toTaskView(store, task, true));

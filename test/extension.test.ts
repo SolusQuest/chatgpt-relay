@@ -134,6 +134,19 @@ test("large-paste attachments receive a separate upload budget and safe failure 
   assert.match(worker, /ATTACHMENT_BLOCKS/);
 });
 
+test("provisional task observations are rate-limited and omit partial reply text", () => {
+  const content = fs.readFileSync(path.join(EXT, "content-script.js"), "utf8");
+  const worker = fs.readFileSync(path.join(EXT, "service-worker.js"), "utf8");
+  const config = fs.readFileSync(path.join(EXT, "lib", "config.js"), "utf8");
+  assert.match(content, /activity,/);
+  assert.match(content, /outputChars,/);
+  assert.match(worker, /\/internal\/tasks\/\$\{taskId\}\/observation/);
+  assert.match(worker, /TASK_OBSERVATION_CHANGE_INTERVAL_MS/);
+  assert.match(worker, /TASK_OBSERVATION_HEARTBEAT_INTERVAL_MS/);
+  assert.match(config, /TASK_OBSERVATION_CHANGE_INTERVAL_MS\s*=\s*10_000/);
+  assert.doesNotMatch(worker, /observation[^\n]*lastText/);
+});
+
 test("durable send fence precedes Send and post-attempt polling cannot requeue", () => {
   const content = fs.readFileSync(path.join(EXT, "content-script.js"), "utf8");
   const worker = fs.readFileSync(path.join(EXT, "service-worker.js"), "utf8");

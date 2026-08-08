@@ -143,6 +143,15 @@ async function cmdShow(args: string[]): Promise<number> {
     `  completed:   ${t.completedAt ? new Date(t.completedAt).toISOString() : "(pending)"}`,
   );
   console.log(`  requeues:    ${t.requeueCount}`);
+  if (t.progress) {
+    console.log("\n─── progress (provisional) ─────────────────────");
+    console.log(`  phase:       ${t.progress.phase}`);
+    if (t.progress.activity) console.log(`  activity:    ${t.progress.activity}`);
+    console.log(`  outputChars: ${t.progress.outputChars}`);
+    console.log(`  changed:     ${new Date(t.progress.changedAt).toISOString()}`);
+    console.log(`  observed:    ${new Date(t.progress.observedAt).toISOString()}`);
+    console.log("  note:        scheduling signal only; wait for a final reply");
+  }
   if (t.text) {
     console.log("\n─── prompt ─────────────────────────────────────");
     console.log(t.text);
@@ -207,6 +216,12 @@ async function cmdResume(): Promise<number> {
     }
     if (task.status === "recovering") {
       console.log("  note: still awaiting the original reply; do not resubmit");
+    }
+    if (task.progress) {
+      const activity = task.progress.activity ? `, ${task.progress.activity}` : "";
+      console.log(
+        `  progress: ${task.progress.phase}, ${task.progress.outputChars} chars${activity} (provisional)`,
+      );
     }
     if (task.error) console.log(`  error: ${task.error}`);
   }

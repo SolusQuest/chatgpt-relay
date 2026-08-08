@@ -33,6 +33,7 @@ uses a real browser, ChatGPT page, extension, and relay server.
 | SS-015 | Allow a five-minute task timeout | P2 | Timeout lifecycle |
 | SS-016 | Advance queued work after stable delivery uncertainty | P0 | `stable uncertain delivery yields only when newer work is queued` |
 | SS-017 | Maintain and terminate soft-deadline recovery | P0 | recovering lifecycle and API tests |
+| SS-018 | Observe ephemeral progress without partial output persistence | P1 | observation store, API, and extension tests |
 
 ## SS-001: Basic short-text round trip
 
@@ -348,6 +349,35 @@ Expected:
 - Closing the tab transitions it to `failed` with `session_heartbeat_lost`
   after the configured heartbeat grace.
 - No run submits the original prompt more than once.
+
+## SS-018: Observe ephemeral progress without partial output persistence
+
+Purpose: verify that a long active reply exposes useful scheduling signals
+without persisting or returning unfinished answer text.
+
+Steps:
+
+1. Submit a prompt that visibly thinks, uses a tool, or streams for at least 30
+   seconds, and keep its task ID.
+2. Query `/v1/tasks/<task-id>` several times while it is active.
+3. When `progress` is present, save its `revision` and long-poll with
+   `?wait=60000&progress_after=<revision>`.
+4. Restart a disposable relay server during a separate run, without reloading
+   the ChatGPT page, then query the task again after the extension reports.
+5. Let the task finish and inspect both the API response and the SQLite task
+   row.
+
+Expected:
+
+- Progress contains only phase, bounded visible activity, output size, and
+  timestamps; it contains no partial reply text.
+- Semantic changes advance `revision` and `changedAt`; unchanged liveness may
+  advance only `observedAt`.
+- A progress-aware long poll returns on a newer revision or a terminal state.
+- Restarting the server temporarily loses the snapshot; a later extension
+  observation recreates it while the task remains active.
+- The terminal task has `progress: null`, the complete answer only in `reply`,
+  and no progress columns or partial output in SQLite.
 
 ## Execution guidance
 

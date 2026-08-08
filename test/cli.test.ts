@@ -151,3 +151,34 @@ test("gpt-relay resume reports no pending when dir empty", async () => {
     try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* */ }
   }
 });
+
+test("gpt-relay show labels in-memory progress as provisional", async () => {
+  const created = await fetch(`${baseUrl}/v1/tasks`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session: "cli-progress", text: "watch" }),
+  }).then((r) => r.json()) as { taskId: string };
+  await fetch(`${baseUrl}/internal/next_task?session=cli-progress`);
+  await fetch(`${baseUrl}/internal/tasks/${created.taskId}/observation`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      phase: "answer_streaming",
+      activity: "Reading files",
+      outputChars: 321,
+    }),
+  });
+
+  const shown = await runCli(["show", created.taskId]);
+  assert.equal(shown.code, 0, `stderr: ${shown.stderr}`);
+  assert.match(shown.stdout, /progress \(provisional\)/);
+  assert.match(shown.stdout, /answer_streaming/);
+  assert.match(shown.stdout, /Reading files/);
+  assert.match(shown.stdout, /321/);
+  assert.doesNotMatch(shown.stdout, /partial reply/);
+  await fetch(`${baseUrl}/internal/tasks/${created.taskId}/complete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "done" }),
+  });
+});

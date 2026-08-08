@@ -63,12 +63,41 @@ the terminal status back to `done`.
   "recoveryLeaseDeadlineAt": null,
   "recoveryDeadlineAt": 1783850611352,
   "lateReplyDeadlineAt": 1783850611352,
-  "requeueCount": 0
+  "requeueCount": 0,
+  "progress": null
 }
 ```
 
 `text` is returned only by a single-task query or when a list request includes
 `include_text=1`.
+
+While a task is active, `progress` can contain the latest provisional page
+observation:
+
+```jsonc
+{
+  "revision": 1783847012000,
+  "phase": "answer_streaming",
+  "activity": "Reading files",
+  "outputChars": 1830,
+  "observedAt": 1783847012000,
+  "changedAt": 1783847012000,
+  "provisional": true
+}
+```
+
+`phase` is `accepted`, `generating`, or `answer_streaming`. `activity` is an
+optional, bounded status label that was visibly exposed by the page;
+`outputChars` is only a size signal and is not partial reply content.
+`observedAt` advances on a bounded heartbeat, while `changedAt` and `revision`
+advance only when the visible phase, activity, or output size changes.
+
+Progress is held only in server memory, expires after two minutes without an
+observation, and is cleared at a terminal transition. It is not written to
+SQLite and disappears across a server restart. The extension recreates it on a
+later observation if the task is still active. Clients must never treat
+progress as a reply, a completion verdict, recovery evidence, or authorization
+to act on unfinished output.
 
 ### Stable task errors
 
@@ -148,10 +177,17 @@ Read a complete task.
 Optional query:
 
 - `wait=<ms>`: server-side long poll, capped at 60,000 ms.
+- `progress_after=<revision>`: additionally return when a newer in-memory
+  progress revision is available. Reuse the latest returned revision as the
+  next cursor. The value must be a non-negative safe integer.
 
 When the task becomes terminal, the long poll returns immediately. If the poll
 ends while the task is still running, it returns the current `queued`,
 `in_progress`, or `recovering` state; that response is not an error.
+
+Without `progress_after`, provisional observations do not end the long poll.
+An unchanged observation updates `observedAt` but does not create a revision or
+wake a progress-aware long poll.
 
 `404` means the task does not exist or has been cleaned up.
 
@@ -257,6 +293,7 @@ MV3 extension. Agents should use `/v1` or the root CLI.
 | `GET` | `/internal/next_task?session=&wait=` | Heartbeat, long-poll, and claim the next queued task; wait is capped at 25 seconds |
 | `POST` | `/internal/tasks/:id/capture` | Capture a DOM reply, including a possible late reply |
 | `POST` | `/internal/tasks/:id/progress` | Record a page lifecycle phase |
+| `POST` | `/internal/tasks/:id/observation` | Replace the latest in-memory provisional page observation |
 | `POST` | `/internal/tasks/:id/complete` | Complete or fail a task |
 | `POST` | `/internal/tasks/:id/user-stop` | Cancel after the page user selects Stop |
 | `POST` | `/internal/tasks/:id/recover` | Recover a DOM reply after page or extension restart |
@@ -273,6 +310,11 @@ Progress phases:
 - `generating_seen`
 - `recovery_observed`
 - `reply_detected`
+
+The separate observation endpoint accepts `phase`, optional `activity`, and
+optional `outputChars`. It never accepts partial reply text and never writes to
+the task database. The extension reports semantic changes at most once per 10
+seconds and unchanged liveness at most once per 30 seconds.
 
 `POST /internal/sessions/:id/status` accepts extension-only
 `preserveQueued: true` for a pre-send attachment-cleanup block. The session is
@@ -418,6 +460,13 @@ curl -sS -X POST http://127.0.0.1:8765/v1/tasks \
 
 ```bash
 curl -sS "http://127.0.0.1:8765/v1/tasks/<task-id>?wait=60000"
+```
+
+To wait for either a terminal transition or progress newer than a known
+revision:
+
+```bash
+curl -sS "http://127.0.0.1:8765/v1/tasks/<task-id>?wait=60000&progress_after=<revision>"
 ```
 
 ### List
