@@ -11,6 +11,7 @@ const PROVEN_PRE_SEND_PHASES = new Set([
 
 const LATE_REPLY_ERRORS = new Set([
   "task_processing_timeout",
+  "submission_not_observed",
   "submission_outcome_unknown",
   "task_recovery_timeout",
   "task_recovery_lease_expired",
@@ -44,23 +45,32 @@ export function isRecoverableLateReply(task, now = Date.now()) {
     task.lateReplyDeadlineAt > now;
 }
 
-export function shouldYieldPendingToQueuedTask(
+export function classifySubmissionVerification(
   snapshotStatus,
   record = {},
-  hasQueuedTask = false,
+  composerHasPayload = false,
   now = Date.now(),
-  uncertainIdleReleaseMs = 5_000,
 ) {
-  if (!hasQueuedTask) return false;
-
-  if (snapshotStatus === "not-started") {
-    return typeof record.uncertainIdleSince === "number" &&
-      now - record.uncertainIdleSince >= uncertainIdleReleaseMs;
+  if (
+    record.deliveryPhase === "accepted" ||
+    record.submissionAcknowledged === true ||
+    record.wasGenerating === true
+  ) {
+    return "acknowledged";
   }
 
-  // A visible submitted user message is strong task evidence. It reserves the
-  // session until the task itself reaches a terminal transition.
-  return false;
+  if (
+    typeof record.submissionVerificationDeadlineAt !== "number" ||
+    now < record.submissionVerificationDeadlineAt
+  ) {
+    return "wait";
+  }
+
+  const payloadObserved = composerHasPayload ||
+    record.composerPayloadObservedAfterFailure === true;
+  return snapshotStatus === "not-started" && payloadObserved
+    ? "fail-not-observed"
+    : "fail-unknown";
 }
 
 export function classifyRecoveryAction(task, record = {}, now = Date.now()) {

@@ -30,6 +30,7 @@ export interface ReviewResult {
   reply: string | null;
   lateReply: string | null;
   error: string | null;
+  submissionState: TaskView["submissionState"];
   elapsedMs: number;
 }
 
@@ -58,6 +59,14 @@ export interface TaskView {
   lateCompletedAt: number | null;
   submitStartedAt: number | null;
   sendAttemptedAt: number | null;
+  submissionState:
+    | "not_attempted"
+    | "verifying"
+    | "acknowledged"
+    | "replied"
+    | "not_observed"
+    | "unknown";
+  submissionVerificationDeadlineAt: number | null;
   submitAcknowledgedAt: number | null;
   generatingSeenAt: number | null;
   replyDetectedAt: number | null;
@@ -200,6 +209,7 @@ export async function review(
       reply: t.reply,
       lateReply: t.lateReply,
       error: t.error,
+      submissionState: t.submissionState,
       elapsedMs: Date.now() - started,
     };
   } catch (err) {
@@ -285,6 +295,7 @@ function shouldKeepPendingForLateReply(task: TaskView): boolean {
     task.lateReplyDeadlineAt > Date.now() &&
     (
       task.error === "task_processing_timeout" ||
+      task.error === "submission_not_observed" ||
       task.error === "submission_outcome_unknown" ||
       task.error === "task_recovery_timeout" ||
       task.error === "task_recovery_lease_expired" ||

@@ -2,9 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   classifyRecoveryAction,
+  classifySubmissionVerification,
   hasSendFence,
   isRecoverableLateReply,
-  shouldYieldPendingToQueuedTask,
 } from "../extension/lib/recovery-policy.js";
 
 function task(overrides: Record<string, unknown> = {}) {
@@ -75,15 +75,13 @@ test("recovery reattaches fenced work and only defers proven pre-send work", () 
 });
 
 test("eligible timeout failures reattach only inside the late-reply window", () => {
-  const failed = task({
-    status: "failed",
-    error: "submission_outcome_unknown",
-    sendAttemptedAt: 100,
-  });
-  assert.equal(isRecoverableLateReply(failed, 1_000), true);
-  assert.equal(classifyRecoveryAction(failed, {}, 1_000), "reattach");
-  assert.equal(isRecoverableLateReply(failed, 60_000), false);
-  assert.equal(classifyRecoveryAction(failed, {}, 60_000), "clear");
+  for (const error of ["submission_not_observed", "submission_outcome_unknown"]) {
+    const failed = task({ status: "failed", error, sendAttemptedAt: 100 });
+    assert.equal(isRecoverableLateReply(failed, 1_000), true, error);
+    assert.equal(classifyRecoveryAction(failed, {}, 1_000), "reattach", error);
+    assert.equal(isRecoverableLateReply(failed, 60_000), false, error);
+    assert.equal(classifyRecoveryAction(failed, {}, 60_000), "clear", error);
+  }
 });
 
 test("recovery terminal errors retain bounded late-reply compatibility", () => {
@@ -93,46 +91,60 @@ test("recovery terminal errors retain bounded late-reply compatibility", () => {
   }
 });
 
-test("stable uncertain delivery yields only when newer work is queued", () => {
+test("uncertain delivery keeps a fixed verification window from the Send fence", () => {
   const record = {
     deliveryPhase: "send-clicked",
-    uncertainIdleSince: 1_000,
+    submissionVerificationDeadlineAt: 6_000,
   };
   assert.equal(
-    shouldYieldPendingToQueuedTask("not-started", record, false, 10_000, 5_000),
-    false,
+    classifySubmissionVerification("not-started", record, true, 5_999),
+    "wait",
   );
   assert.equal(
-    shouldYieldPendingToQueuedTask("not-started", record, true, 5_999, 5_000),
-    false,
+    classifySubmissionVerification("not-started", record, true, 6_000),
+    "fail-not-observed",
   );
   assert.equal(
-    shouldYieldPendingToQueuedTask("not-started", record, true, 6_000, 5_000),
-    true,
+    classifySubmissionVerification(
+      "not-started",
+      { ...record, composerPayloadObservedAfterFailure: true },
+      false,
+      6_000,
+    ),
+    "fail-not-observed",
   );
   assert.equal(
-    shouldYieldPendingToQueuedTask("generating", record, true, 10_000, 5_000),
-    false,
+    classifySubmissionVerification("not-started", record, false, 6_000),
+    "fail-unknown",
+  );
+  assert.equal(
+    classifySubmissionVerification(
+      "not-started",
+      { ...record, deliveryPhase: "accepted" },
+      true,
+      10_000,
+    ),
+    "acknowledged",
   );
 });
 
 test("visible submitted work never yields merely because newer work is queued", () => {
   assert.equal(
-    shouldYieldPendingToQueuedTask(
+    classifySubmissionVerification(
       "posted-no-reply-yet",
-      { deliveryPhase: "accepted" },
-      true,
+      { deliveryPhase: "accepted", submissionVerificationDeadlineAt: 5_000 },
+      false,
       10_000,
     ),
-    false,
+    "acknowledged",
   );
   assert.equal(
-    shouldYieldPendingToQueuedTask(
-      "posted-no-reply-yet",
-      { deliveryPhase: "accepted", hardTimedOutAt: 9_000 },
-      true,
+    classifySubmissionVerification(
+      "generating",
+      { wasGenerating: true, submissionVerificationDeadlineAt: 5_000 },
+      false,
       10_000,
     ),
-    false,
+    "acknowledged",
   );
 });

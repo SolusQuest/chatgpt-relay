@@ -17,6 +17,13 @@ account's plan limits and the applicable OpenAI terms.
 - **Durable SQLite queue**: tasks survive relay restarts, page refreshes, browser
   restarts, and agent interruptions.
 - **At-most-once browser delivery**: the extension persists a send fence before selecting Send. Refresh and restart recovery observe uncertain work instead of automatically replaying a prompt.
+- **Bounded submission verification**: an unacknowledged Send fence is resolved
+  after a fixed two-minute observation window as acknowledged, not observed, or
+  genuinely unknown, with late replies able to correct an early operational
+  failure.
+- **Liveness-first composer cleanup**: stale composer content is cleared on a
+  bounded best-effort basis and new text replaces old text without blocking a
+  usable Send path.
 - **Soft-deadline recovery**: a page-submitted task becomes non-terminal
   `recovering` after its normal lifetime. Strong page evidence renews a bounded
   lease, so a long ChatGPT reply can still finish without inviting a duplicate
@@ -184,7 +191,7 @@ To reset local relay data, stop the relay and remove the database files from
 | Popup reports `unreachable` | Check the relay URL and local firewall |
 | Session is paused | Resolve the reported captcha or rate limit, then resume |
 | Prompt submission fails | ChatGPT UI changes may require selector updates |
-| Large pasted attachment times out | Remove any unfinished attachment; the extension preserves queued work and resumes after the composer is clean |
+| Large pasted attachment times out | The failed task is not retried; the extension makes bounded cleanup attempts before the next dispatch without blocking a usable Send path |
 | A review wait times out | Keep the task ID and use `gpt-relay resume` or `show` |
 | A task is `recovering` | The original reply may still finish; do not resubmit it |
 

@@ -163,6 +163,21 @@ test("captureReply stores a late reply without rewriting timeout failure", () =>
   assert.equal(captured.task.lateCompletedAt, 2000);
 });
 
+test("captureReply can correct a submission-not-observed failure", () => {
+  const store = makeStore({ lateReplyGraceMs: 5_000 });
+  const t = store.createTask({ session: "s1", text: "q", timeoutMs: 1000, now: 100 });
+  store.claimNextTask("s1", 200);
+  store.markTaskProgress(t.id, "send_attempted", 300);
+  store.completeTask(t.id, { error: "submission_not_observed", now: 1_000 });
+
+  const captured = store.captureReply(t.id, "surprising late answer", 2_000);
+  assert.equal(captured.captured, true);
+  assert.equal(captured.late, true);
+  assert.equal(captured.task.status, "failed");
+  assert.equal(captured.task.error, "submission_not_observed");
+  assert.equal(captured.task.lateReply, "surprising late answer");
+});
+
 test("captureReply rejects a late reply after the bounded recovery window", () => {
   const store = makeStore({ activeTaskGraceMs: 500, lateReplyGraceMs: 5_000 });
   const t = store.createTask({ session: "s1", text: "q", timeoutMs: 1000, now: 100 });

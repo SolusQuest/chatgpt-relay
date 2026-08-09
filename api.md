@@ -52,6 +52,8 @@ the terminal status back to `done`.
   "lateCompletedAt": null,
   "submitStartedAt": 1783846986255,
   "sendAttemptedAt": 1783846987000,
+  "submissionState": "replied",
+  "submissionVerificationDeadlineAt": null,
   "submitAcknowledgedAt": 1783846987312,
   "generatingSeenAt": 1783846989344,
   "replyDetectedAt": 1783847074200,
@@ -70,6 +72,14 @@ the terminal status back to `done`.
 
 `text` is returned only by a single-task query or when a list request includes
 `include_text=1`.
+
+`submissionState` is the Agent-facing delivery verdict. It is one of
+`not_attempted`, `verifying`, `acknowledged`, `replied`, `not_observed`, or
+`unknown`. After the durable Send fence, an unacknowledged task remains
+`verifying` for two minutes from `sendAttemptedAt`; during that state,
+`submissionVerificationDeadlineAt` exposes the exact deadline. A visible
+submitted message or generation changes the state to `acknowledged`. A normal
+or late reply changes it to `replied`.
 
 While a task is active, `progress` can contain the latest provisional page
 observation:
@@ -108,7 +118,8 @@ lifecycle failures:
 |---|---|
 | `task_expired_before_dispatch` | A queued task crossed its deadline before the extension claimed it |
 | `task_processing_timeout` | A claimed task crossed its soft deadline before the durable Send fence was recorded |
-| `submission_outcome_unknown` | Send may have been attempted, but the extension could not confirm submission before the deadline or before safely advancing queued work |
+| `submission_not_observed` | The two-minute verification window ended on a fully observed idle page, while prompt or attachment residue had been observed in the composer |
+| `submission_outcome_unknown` | The two-minute verification window ended without enough page evidence to prove either submission or non-submission |
 | `task_recovery_lease_expired` | A recovering task stopped receiving strong page observations |
 | `task_recovery_timeout` | A recovering task reached its absolute recovery deadline |
 | `session_heartbeat_lost` | The relay released an active task after its browser session became stale |
@@ -394,10 +405,13 @@ history hydration, or an empty DOM does not renew the lease.
 The task becomes terminal when the user or agent cancels it, the session
 heartbeat disappears, the recovery lease expires, or the absolute recovery
 deadline arrives. A visible submitted message or active generation is never
-preempted merely because newer work is queued. If delivery is still genuinely
-uncertain and the fully hydrated page is stably idle, the existing queue-aware
-release path may fail it as `submission_outcome_unknown`; it is never requeued
-or resent automatically.
+preempted merely because newer work is queued. If delivery is still
+unacknowledged, the extension keeps a fixed two-minute verification window from
+`sendAttemptedAt`; queued successors do not shorten that window. A fully
+observed `not-started` page plus recorded composer payload ends as
+`submission_not_observed`. Missing, loading, hydrating, or otherwise ambiguous
+page evidence ends as `submission_outcome_unknown`. Neither outcome requeues or
+resends the prompt automatically.
 
 If an eligible task fails before the absolute recovery deadline and its
 observer later finds a reply, the reply is stored in `lateReply`. This is a

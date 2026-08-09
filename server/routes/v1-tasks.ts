@@ -18,6 +18,16 @@ const VALID_STATUSES: readonly TaskStatus[] = [
   "expired",
 ];
 
+export const SUBMISSION_VERIFICATION_MS = 2 * 60_000;
+
+export type SubmissionState =
+  | "not_attempted"
+  | "verifying"
+  | "acknowledged"
+  | "replied"
+  | "not_observed"
+  | "unknown";
+
 export interface TaskView {
   taskId: string;
   session: string;
@@ -34,6 +44,8 @@ export interface TaskView {
   lateCompletedAt: number | null;
   submitStartedAt: number | null;
   sendAttemptedAt: number | null;
+  submissionState: SubmissionState;
+  submissionVerificationDeadlineAt: number | null;
   submitAcknowledgedAt: number | null;
   generatingSeenAt: number | null;
   replyDetectedAt: number | null;
@@ -49,7 +61,19 @@ export interface TaskView {
   progress: TaskObservation | null;
 }
 
+function getSubmissionState(t: Task): SubmissionState {
+  if (t.reply !== null || t.lateReply !== null) return "replied";
+  if (t.error === "submission_not_observed") return "not_observed";
+  if (t.error === "submission_outcome_unknown") return "unknown";
+  if (t.submitAcknowledgedAt !== null || t.generatingSeenAt !== null) {
+    return "acknowledged";
+  }
+  if (t.sendAttemptedAt !== null) return "verifying";
+  return "not_attempted";
+}
+
 export function toTaskView(store: TaskStore, t: Task, includeText = false): TaskView {
+  const submissionState = getSubmissionState(t);
   const v: TaskView = {
     taskId: t.id,
     session: t.session,
@@ -65,6 +89,11 @@ export function toTaskView(store: TaskStore, t: Task, includeText = false): Task
     lateCompletedAt: t.lateCompletedAt,
     submitStartedAt: t.submitStartedAt,
     sendAttemptedAt: t.sendAttemptedAt,
+    submissionState,
+    submissionVerificationDeadlineAt:
+      submissionState === "verifying" && t.sendAttemptedAt !== null
+        ? t.sendAttemptedAt + SUBMISSION_VERIFICATION_MS
+        : null,
     submitAcknowledgedAt: t.submitAcknowledgedAt,
     generatingSeenAt: t.generatingSeenAt,
     replyDetectedAt: t.replyDetectedAt,

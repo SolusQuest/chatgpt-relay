@@ -31,7 +31,7 @@ uses a real browser, ChatGPT page, extension, and relay server.
 | SS-013 | Enforce the at-most-once send boundary | P0 | `extension-recovery-policy` and unsafe-requeue tests |
 | SS-014 | Reject empty text and accept very short text | P2 | Input validation |
 | SS-015 | Allow a five-minute task timeout | P2 | Timeout lifecycle |
-| SS-016 | Advance queued work after stable delivery uncertainty | P0 | `stable uncertain delivery yields only when newer work is queued` |
+| SS-016 | Resolve an unacknowledged Send fence after fixed verification | P0 | submission-verification policy and API tests |
 | SS-017 | Maintain and terminate soft-deadline recovery | P0 | recovering lifecycle and API tests |
 | SS-018 | Observe ephemeral progress without partial output persistence | P1 | observation store, API, and extension tests |
 
@@ -76,8 +76,9 @@ Expected:
   upload may wait up to 90 seconds before Send.
 - Completion may take longer depending on upload and response time.
 - If the 90-second upload limit is exercised, the task reports
-  `attachment_upload_timeout`. Queued successors remain queued while any
-  unfinished attachment is present, then resume after it is removed.
+  `attachment_upload_timeout`. The extension makes a bounded cleanup attempt,
+  does not retry the failed task, and allows a successor to continue even if
+  cleanup could not be confirmed.
 
 ## SS-003: Resume after a client wait timeout
 
@@ -295,24 +296,34 @@ Expected:
 - The task does not expire early.
 - It finishes as `done` with a reply.
 
-## SS-016: Advance queued work after stable delivery uncertainty
+## SS-016: Resolve an unacknowledged Send fence after fixed verification
 
-Purpose: verify that an uncertain recovered task does not reserve the session indefinitely.
+Purpose: verify that delivery uncertainty is bounded without inviting duplicate
+automatic submission.
 
 Steps:
 
 1. Submit a task and refresh immediately after Send so the banner enters `Delivery uncertain`.
-2. Submit a second task to the same session.
-3. Wait for the conversation to finish hydrating and remain visibly idle.
-4. Inspect both relay tasks and the ChatGPT conversation.
+2. Optionally submit a second task to the same session.
+3. Inspect `gpt-relay show <task-id>` and confirm `submission: verifying` plus
+   the fixed deadline.
+4. Exercise each page outcome before or at the two-minute deadline: visible
+   generation, visible submitted user message, fully observed `not-started`
+   with composer residue, and missing/hydrating/ambiguous page evidence.
+5. Inspect both relay tasks and the ChatGPT conversation.
 
 Expected:
 
 - The first task is never submitted a second time.
 - Visible generation or a visible submitted user message continues to block the second task.
-- If no submission evidence appears, the first task ends as `submission_outcome_unknown` after the idle quarantine.
+- Queued work does not shorten the two-minute verification window.
+- Visible generation or a submitted message changes `submissionState` to `acknowledged`.
+- A fully observed idle page plus composer residue ends as `submission_not_observed`.
+- Missing or ambiguous page evidence ends as `submission_outcome_unknown`.
 - The second task leaves `queued` and runs normally.
-- Its reply is not captured as a late reply for the first task.
+- No terminal result triggers an automatic resend.
+- If the original reply appears later within the bounded late window, it is
+  captured as `lateReply` and `submissionState` becomes `replied`.
 
 ## SS-017: Maintain and terminate soft-deadline recovery
 

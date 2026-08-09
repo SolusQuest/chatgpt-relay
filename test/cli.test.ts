@@ -159,6 +159,11 @@ test("gpt-relay show labels in-memory progress as provisional", async () => {
     body: JSON.stringify({ session: "cli-progress", text: "watch" }),
   }).then((r) => r.json()) as { taskId: string };
   await fetch(`${baseUrl}/internal/next_task?session=cli-progress`);
+  await fetch(`${baseUrl}/internal/tasks/${created.taskId}/progress`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ phase: "send_attempted" }),
+  });
   await fetch(`${baseUrl}/internal/tasks/${created.taskId}/observation`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -172,6 +177,8 @@ test("gpt-relay show labels in-memory progress as provisional", async () => {
   const shown = await runCli(["show", created.taskId]);
   assert.equal(shown.code, 0, `stderr: ${shown.stderr}`);
   assert.match(shown.stdout, /progress \(provisional\)/);
+  assert.match(shown.stdout, /submission:\s+verifying/);
+  assert.match(shown.stdout, /verify until:/);
   assert.match(shown.stdout, /answer_streaming/);
   assert.match(shown.stdout, /Reading files/);
   assert.match(shown.stdout, /321/);

@@ -11,6 +11,10 @@ export interface RecoveryRecord {
   ackState?: string | null;
   uncertainIdleSince?: number | null;
   hardTimedOutAt?: number | null;
+  submissionVerificationDeadlineAt?: number | null;
+    submissionAcknowledged?: boolean;
+    wasGenerating?: boolean;
+    composerPayloadObservedAfterFailure?: boolean;
   [key: string]: unknown;
 }
 
@@ -36,13 +40,12 @@ export function isRecoverableLateReply(
   now?: number,
 ): boolean;
 
-export function shouldYieldPendingToQueuedTask(
+export function classifySubmissionVerification(
   snapshotStatus: string,
   record?: RecoveryRecord,
-  hasQueuedTask?: boolean,
+  composerHasPayload?: boolean,
   now?: number,
-  uncertainIdleReleaseMs?: number,
-): boolean;
+): "acknowledged" | "wait" | "fail-not-observed" | "fail-unknown";
 
 export function classifyRecoveryAction(
   task: RecoveryTask | null,
