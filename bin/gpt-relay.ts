@@ -75,6 +75,7 @@ interface CliTask {
   error: string | null;
   reply: string | null;
   lateReply: string | null;
+  submissionState: string;
 }
 
 async function cmdTasks(args: string[]): Promise<number> {
@@ -94,7 +95,9 @@ async function cmdTasks(args: string[]): Promise<number> {
     console.log("(no tasks)");
     return 0;
   }
-  console.log(["taskId", "session", "status", "submittedAt", "elapsedMs"].join("\t"));
+  console.log(
+    ["taskId", "session", "status", "submission", "submittedAt", "elapsedMs"].join("\t"),
+  );
   for (const t of r.tasks) {
     const elapsed =
       t.completedAt != null ? t.completedAt - t.submittedAt : Date.now() - t.submittedAt;
@@ -103,6 +106,7 @@ async function cmdTasks(args: string[]): Promise<number> {
         t.taskId.slice(0, 8),
         t.session.slice(0, 10),
         t.status,
+        t.submissionState,
         new Date(t.submittedAt).toISOString(),
         `${elapsed}ms`,
       ].join("\t"),
@@ -126,6 +130,12 @@ async function cmdShow(args: string[]): Promise<number> {
   console.log(`  id:          ${t.taskId}`);
   console.log(`  session:     ${t.session}`);
   console.log(`  status:      ${t.status}`);
+  console.log(`  submission:  ${t.submissionState}`);
+  if (t.submissionState === "verifying" && t.submissionVerificationDeadlineAt) {
+    console.log(
+      `  verify until: ${new Date(t.submissionVerificationDeadlineAt).toISOString()}`,
+    );
+  }
   if (t.status === "recovering") {
     console.log(`  recovery:    ${t.recoveryReason ?? "deadline exceeded"}`);
     console.log(
@@ -216,6 +226,9 @@ async function cmdResume(): Promise<number> {
     }
     if (task.status === "recovering") {
       console.log("  note: still awaiting the original reply; do not resubmit");
+    }
+    if (task.submissionState === "verifying") {
+      console.log("  note: verifying whether ChatGPT accepted the original submission");
     }
     if (task.progress) {
       const activity = task.progress.activity ? `, ${task.progress.activity}` : "";

@@ -253,6 +253,41 @@ test("resume keeps timeout failure pending until a late reply is captured", asyn
   assert.ok(!listPending().some((row) => row.taskId === submitted.taskId));
 });
 
+test("resume exposes a late correction after submission was not observed", async () => {
+  const submitted = await review("verify me later", {
+    session: "not-observed-pending",
+    baseUrl,
+    wait: false,
+  });
+  await fetch(`${baseUrl}/internal/next_task?session=not-observed-pending`);
+  await fetch(`${baseUrl}/internal/tasks/${submitted.taskId}/progress`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ phase: "send_attempted" }),
+  });
+  await fetch(`${baseUrl}/internal/tasks/${submitted.taskId}/complete`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ error: "submission_not_observed" }),
+  });
+
+  const failed = await resumePending(baseUrl);
+  const waiting = failed.find((row) => row.record.taskId === submitted.taskId);
+  assert.equal(waiting?.task?.submissionState, "not_observed");
+  assert.ok(listPending().some((row) => row.taskId === submitted.taskId));
+
+  await fetch(`${baseUrl}/internal/tasks/${submitted.taskId}/capture`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: "late correction" }),
+  });
+  const corrected = await resumePending(baseUrl);
+  const captured = corrected.find((row) => row.record.taskId === submitted.taskId);
+  assert.equal(captured?.task?.submissionState, "replied");
+  assert.equal(captured?.task?.lateReply, "late correction");
+  assert.ok(!listPending().some((row) => row.taskId === submitted.taskId));
+});
+
 test("sequential tasks in same session are queued and processed in order", async () => {
   const replies: string[] = [];
   const stop = startFakeExtension("sequential", (p) => {

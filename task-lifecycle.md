@@ -69,12 +69,30 @@ safely defer or requeue a task that never reached ChatGPT. After it exists,
 automatic replay is prohibited because the original request may already be
 present or generating.
 
+The task status and submission state answer different questions. While a task
+is `in_progress` or `recovering`, `submissionState` progresses independently:
+
+| Submission state | Meaning |
+|---|---|
+| `not_attempted` | No durable Send fence exists |
+| `verifying` | Send may have occurred; the extension is inside the fixed two-minute verification window |
+| `acknowledged` | A submitted user message or active generation was observed |
+| `replied` | A normal or eligible late reply was captured |
+| `not_observed` | Verification ended on a fully observed idle page with recorded composer residue |
+| `unknown` | Verification ended without enough evidence for either conclusion |
+
+Before each dispatch, the content script makes a bounded best-effort attempt to
+remove stale text and attachments. Prompt injection selects the existing
+composer contents so text is replaced rather than appended. Cleanup failure is
+reported for diagnostics but does not block a later dispatch if Send can still
+proceed.
+
 Large pasted text can become an attachment before the Send fence. Ordinary text
 waits up to 15 seconds for Send to enable; an attachment path waits up to 90
 seconds. An upload timeout or explicit upload error terminates the current task
-before Send. If automatic attachment removal cannot prove that the composer is
-clean, the session is paused with queued successors preserved. The extension
-resumes only after the stale composer payload is removed.
+before Send. The extension then makes another bounded cleanup attempt; failure
+to prove a clean composer does not pause the session or automatically replay the
+failed task.
 
 ## Deadline model
 
@@ -130,7 +148,9 @@ These signals are deliberately insufficient on their own:
 If strong evidence disappears and is not restored before the lease deadline,
 the task becomes `failed` with `task_recovery_lease_expired`. If the absolute
 deadline arrives first, it becomes `failed` with `task_recovery_timeout`.
-Genuinely unconfirmed delivery uses `submission_outcome_unknown`.
+Before those longer recovery limits matter, an unacknowledged Send fence uses a
+fixed two-minute verification window. `submission_not_observed` is the explicit
+negative result; genuinely ambiguous delivery uses `submission_outcome_unknown`.
 
 ## Provisional progress observations
 
@@ -165,17 +185,21 @@ When an agent calls `DELETE /v1/tasks/:id`, it calls the same semantic decision.
 Both make an active task `cancelled`; they are explicit cancellations, not
 system failures.
 
-## Queue behavior and uncertain delivery
+## Queue behavior and submission verification
 
 A recovering task keeps the session exclusive. Active generation and a visible
 submitted user message always block queued successors until the original task
 finishes or reaches a terminal transition.
 
-For a delivery-uncertain record, a fully hydrated and stably idle page can prove
-that there is no visible submitted request. When newer work is queued, the
-extension may end that ambiguous observation as `submission_outcome_unknown`
-and release the queue. It clears the old observer before claiming the successor
-and never requeues or resends the uncertain prompt.
+After `sendAttemptedAt`, the original task reserves the session for a fixed two
+minutes while the extension looks for a submitted message, generation, or a
+reply. The presence of newer queued work does not shorten verification. At the
+deadline, a fully hydrated `not-started` snapshot plus composer payload observed
+at failure time or still present on the page becomes `submission_not_observed`.
+Loading, history hydration, tab unavailability, or a clean but ambiguous
+composer becomes `submission_outcome_unknown`. The extension clears the old
+observer before claiming a successor and never automatically requeues or
+resends the prompt.
 
 ## Replies after a terminal transition
 
@@ -188,9 +212,11 @@ in_progress -> recovering -> done
 The final text is stored in `reply`, and the Agent sees a successful task.
 
 `lateReply` is reserved for a reply discovered after an eligible early terminal
-failure, such as session heartbeat loss, while the original absolute recovery
-window is still open. Capturing it does not rewrite `failed` to `done`. After the
-absolute deadline, no additional late reply is accepted.
+failure, including `submission_not_observed`, `submission_outcome_unknown`, or
+session heartbeat loss, while the original absolute recovery window is still
+open. Capturing it does not rewrite `failed` to `done`, but `submissionState`
+becomes `replied`, so the Agent can use the late result as the effective outcome.
+After the absolute deadline, no additional late reply is accepted.
 
 ## Agent behavior
 
@@ -200,6 +226,13 @@ An Agent must treat `recovering` as â€œthe original request may still completeâ€
 - inspect it with `gpt-relay show <task-id>` or `gpt-relay resume`;
 - do not submit the same prompt again;
 - cancel explicitly only when the user or workflow wants to abandon it.
+
+During `submissionState: verifying`, keep observing the same task until the
+published verification deadline. `acknowledged` means the original submission
+was seen and normal reply waiting should continue. `not_observed` is a concrete
+send failure; `unknown` is an ambiguity that requires an Agent or human retry
+decision. If `lateReply` later appears, prefer it over the earlier operational
+failure and do not send another copy.
 
 A `queued`, `in_progress`, or `recovering` response from a long poll is not an
 error. Likewise, a CLI client wait timeout only ends that invocation; it does

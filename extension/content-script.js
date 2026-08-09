@@ -108,6 +108,8 @@
   const ATTACHMENT_UPLOAD_TIMEOUT_MS = 90_000;
   const ATTACHMENT_CLEANUP_TIMEOUT_MS = 7_000;
   const ATTACHMENT_CLEAN_STABLE_MS = 2_000;
+  const COMPOSER_RESET_TIMEOUT_MS = 3_000;
+  const COMPOSER_RESET_STABLE_MS = 400;
   const LARGE_PASTE_ATTACHMENT_THRESHOLD = 20_000;
   const SUBMISSION_ACCEPT_TIMEOUT_MS = 15_000;
 
@@ -500,13 +502,16 @@
     } catch { /* best effort */ }
   }
 
-  async function cleanupAfterAttachmentFailure(error) {
+  async function resetComposer(
+    timeoutMs = COMPOSER_RESET_TIMEOUT_MS,
+    stableMs = COMPOSER_RESET_STABLE_MS,
+  ) {
     const inp = findInput();
-    if (!inp) return false;
+    if (!inp) return { clean: false, attachmentObserved: false };
     const root = getComposerRoot(inp);
     const before = getComposerPayloadState(inp);
-    const attachmentObserved = error?.attachmentObserved === true ||
-      before.attachmentPresent || before.uploading;
+    const attachmentObserved = before.attachmentPresent || before.uploading;
+    if (before.clean) return { clean: true, attachmentObserved };
     const removeButtons = queryComposerAll(root, SELECTORS.attachmentRemoveButton)
       .filter((button) => isVisible(button));
     for (const button of removeButtons) {
@@ -522,12 +527,20 @@
         return null;
       }
       cleanSince ??= Date.now();
-      return Date.now() - cleanSince >= ATTACHMENT_CLEAN_STABLE_MS ? state : null;
-    }, ATTACHMENT_CLEANUP_TIMEOUT_MS, 200, "attachment-cleanup").catch(() => null);
+      return Date.now() - cleanSince >= stableMs ? state : null;
+    }, timeoutMs, 200, "composer-reset").catch(() => null);
 
+    return { clean: !!cleared, attachmentObserved };
+  }
+
+  async function cleanupAfterAttachmentFailure(error) {
+    const result = await resetComposer(
+      ATTACHMENT_CLEANUP_TIMEOUT_MS,
+      ATTACHMENT_CLEAN_STABLE_MS,
+    );
     // If no attachment/upload DOM was ever observed, an empty composer is not
     // enough to prove that an asynchronous large-paste upload cannot reappear.
-    return attachmentObserved && !!cleared;
+    return (error?.attachmentObserved === true || result.attachmentObserved) && result.clean;
   }
 
   // Background-friendly prompt injection that does not require focus.
@@ -560,7 +573,6 @@
         sel.removeAllRanges();
         const range = document.createRange();
         range.selectNodeContents(inp);
-        range.collapse(false);
         sel.addRange(range);
       }
     } catch { /* ignore */ }
@@ -692,6 +704,8 @@
         submittedAt: rec.submittedAt,
         submittedUserMessageId: rec.submittedUserMessageId ?? null,
         stopRequestedAt: rec.stopRequestedAt ?? null,
+        composerPayloadObservedAfterFailure:
+          rec.composerPayloadObservedAfterFailure === true,
       });
       if (result?.error) throw new Error(result.error);
       if (result?.action === "clear" || result?.action === "deferred") {
@@ -793,6 +807,8 @@
                 status: "page-unready",
                 reason: readiness.reason,
                 stableForMs: readiness.stableForMs,
+                composer: readiness.composer,
+                composerClean: readiness.composerClean,
               });
               return;
             }
@@ -834,7 +850,13 @@
               return;
             }
             if (!hasNewUser && !hasNewAssistant) {
-              sendResponse({ status: "not-started", lastText: lastText, assistantCount: msgs.length });
+              sendResponse({
+                status: "not-started",
+                lastText: lastText,
+                assistantCount: msgs.length,
+                composer: readiness.composer,
+                composerClean: readiness.composerClean,
+              });
               return;
             }
             if (hasNewAssistant) {
@@ -856,6 +878,8 @@
           clearInflight();
           try { updateBanner(`Relay: ${getSessionId().slice(0, 8)}…`, "#10a37f"); } catch {}
           sendResponse({ status: "ok" });
+        } else if (msg.type === "reset-composer") {
+          sendResponse(await resetComposer());
         } else if (msg.type === "get-session-id") {
           sendResponse({ session: getSessionId() });
         } else if (msg.type === "get-inflight") {
@@ -884,6 +908,10 @@
           writeInflight(inflight);
 
           try {
+            const reset = await resetComposer();
+            if (!reset.clean) {
+              console.warn("[relay content] continuing after incomplete composer reset");
+            }
             const pasteResult = await pasteIntoInput(msg.text);
             inflight.attachmentMode = pasteResult?.asAttachment === true;
             writeInflight(inflight);
@@ -926,15 +954,36 @@
           } catch (e) {
             console.warn("[relay content] run-task failed", e);
             updateBanner(`Error: ${e.message.slice(0, 40)}`, "#e74c3c");
+            const failedComposer = (() => {
+              const input = findInput();
+              return input ? getComposerPayloadState(input) : null;
+            })();
+            const composerPayloadObserved = failedComposer?.clean === false;
+            inflight.composerPayloadObservedAfterFailure = composerPayloadObserved;
+            writeInflight(inflight);
+            if (inflight.phase !== "preparing") {
+              await chrome.runtime.sendMessage({
+                type: "submission-failed-evidence",
+                taskId: msg.taskId,
+                composerPayloadObserved,
+              }).catch(() => {});
+            }
             const attachmentFailure = e.code === "attachment_upload_timeout" ||
               e.code === "attachment_upload_failed";
             const attachmentCleanupConfirmed = attachmentFailure
               ? await cleanupAfterAttachmentFailure(e).catch(() => false)
               : null;
+            if (!attachmentFailure) {
+              const reset = await resetComposer().catch(() => ({ clean: false }));
+              if (!reset.clean) {
+                console.warn("[relay content] post-failure composer reset incomplete");
+              }
+            }
             sendResponse({
               error: e.message,
               errorCode: typeof e.code === "string" ? e.code : null,
               attachmentCleanupConfirmed,
+              composerPayloadObserved,
               baseline,
               submissionState: inflight.phase === "preparing"
                 ? "not-submitted"

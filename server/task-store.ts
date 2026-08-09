@@ -899,6 +899,7 @@ function normalizeTimeout(input: number | undefined, fallback: number, max: numb
 
 export function isLateReplyEligible(error: string | null): boolean {
   return error === "task_processing_timeout" ||
+    error === "submission_not_observed" ||
     error === "submission_outcome_unknown" ||
     error === "task_recovery_timeout" ||
     error === "task_recovery_lease_expired" ||

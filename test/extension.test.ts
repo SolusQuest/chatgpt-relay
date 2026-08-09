@@ -74,7 +74,7 @@ test("config.js exports required constants", () => {
     "STORAGE_KEYS",
     "RUN_TASK_ACK_TIMEOUT_MS",
     "POLL_LATE_REPLY_GRACE_MS",
-    "UNCERTAIN_QUEUE_RELEASE_MS",
+    "SUBMISSION_VERIFICATION_MS",
     "RECOVERY_OBSERVATION_INTERVAL_MS",
     "ATTACHMENT_BLOCK_CLEAN_STABLE_MS",
   ]) {
@@ -155,9 +155,22 @@ test("durable send fence precedes Send and post-attempt polling cannot requeue",
   assert.ok(fence >= 0, "missing content-script send fence");
   assert.ok(click > fence, "Send must occur only after the durable fence");
   assert.match(worker, /snap\.status === "not-started"[\s\S]*hasSendFence\(rec\)/);
-  assert.match(worker, /shouldYieldPendingToQueuedTask/);
-  assert.match(worker, /status=queued&limit=500/);
+  assert.match(worker, /classifySubmissionVerification/);
+  assert.match(worker, /submission_not_observed/);
+  assert.doesNotMatch(worker, /status=queued&limit=500/);
   assert.match(worker, /reportTaskProgress\(taskId, "recovery_observed"\)/);
   assert.match(worker, /t\?\.status === "in_progress" \|\| t\?\.status === "recovering"/);
   assert.doesNotMatch(worker, /requeuePending/);
+});
+
+test("composer cleanup is best-effort and prompt injection replaces selected text", () => {
+  const content = fs.readFileSync(path.join(EXT, "content-script.js"), "utf8");
+  const worker = fs.readFileSync(path.join(EXT, "service-worker.js"), "utf8");
+  assert.match(content, /async function resetComposer/);
+  assert.match(content, /continuing after incomplete composer reset/);
+  assert.match(content, /range\.selectNodeContents\(inp\)/);
+  assert.doesNotMatch(content, /range\.collapse\(false\)/);
+  assert.match(content, /type === "reset-composer"/);
+  assert.match(content, /type: "submission-failed-evidence"/);
+  assert.match(worker, /composerPayloadObservedAfterFailure/);
 });

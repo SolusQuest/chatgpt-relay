@@ -113,7 +113,11 @@ Different user-supplied sessions may run concurrently; one session processes at 
 | Session paused, captcha, or rate limited | Stop submission, report `pauseReason`, and do not retry automatically |
 | Client wait times out | Keep `taskId`; use `show` or `resume`; do not resubmit |
 | Task is `recovering` | The original ChatGPT request may still complete; keep the task ID, inspect with `show` or `resume`, and do not resubmit |
-| `attachment_upload_timeout` or `attachment_upload_failed` | Remove any unfinished attachment from the supplied ChatGPT session; queued successors are preserved and resume after the composer is clean |
+| `submissionState` is `verifying` | Observe the same task through `submissionVerificationDeadlineAt`; do not resubmit during verification |
+| `submissionState` is `acknowledged` | The original submission was observed; continue normal reply waiting |
+| `submission_not_observed` | Treat as a concrete send failure and decide explicitly whether to create a new task; never auto-retry |
+| `submission_outcome_unknown` | Submission remains ambiguous; inspect `show`/`resume` and make an explicit retry decision |
+| `attachment_upload_timeout` or `attachment_upload_failed` | The extension attempts bounded cleanup and does not auto-retry; inspect the composer if the next dispatch behaves unexpectedly |
 | Task failed, cancelled, or expired | Report `error`; use `resume` only when a late-reply window remains |
 | Relay cannot access an artifact | Send the complete authorized material or ask the user to fix access |
 | Reply is clearly off topic | Add missing context or confirm the session; it is not a substantive review round |
@@ -125,7 +129,9 @@ An active task may expose an in-memory `progress` snapshot. Treat `revision` and
 a nearer check, while only `observedAt` advancing means the page is still active
 but visibly unchanged. `activity`, `phase`, and `outputChars` are provisional;
 never review, implement, quote, or make a completion decision from them. Only a
-terminal `done` task and its `reply` are final.
+terminal `done` task and its `reply` are final. For an eligible failed task,
+`lateReply` is an effective successful result even though the historical task
+status remains `failed`; `submissionState` will be `replied`.
 
 ## Safety and anti-patterns
 

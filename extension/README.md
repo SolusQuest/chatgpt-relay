@@ -106,7 +106,14 @@ Provisional progress is a separate observability path. It is kept only in relay
 server memory and helps clients decide when to observe again. It does not renew
 the recovery lease and is cleared when the task becomes terminal.
 
-A recovering task reserves the session. A visible submitted message continues to block until a terminal transition, and active generation always blocks. When a recovered delivery remains genuinely unconfirmed, the page is fully hydrated and stably idle, and newer work is queued, the extension can end the ambiguous observation with `submission_outcome_unknown` and advance the queue. Advancing never requeues or resends the uncertain task. A reply discovered after an eligible early terminal failure can still be stored as `lateReply` during the remaining bounded window.
+A recovering task reserves the session. A visible submitted message continues to block until a terminal transition, and active generation always blocks. An unacknowledged Send fence gets a fixed two-minute verification window that queued successors cannot shorten. A fully observed idle page plus recorded composer residue becomes `submission_not_observed`; missing or ambiguous page evidence becomes `submission_outcome_unknown`. Advancing never requeues or resends the original task. A reply discovered after either eligible terminal result can still be stored as `lateReply` during the remaining bounded window.
+
+Before each new dispatch, the content script spends up to three seconds trying
+to remove stale text and attachments. It selects existing text before injection,
+so the new prompt replaces old text rather than appending to it. This reset is
+best effort: incomplete cleanup is logged but does not block Send. Failure paths
+make the same bounded cleanup attempt after first recording whether composer
+payload was present for the submission verdict.
 
 See [`task-lifecycle.md`](../task-lifecycle.md) for the complete state diagram,
 lease rules, and Agent behavior.
@@ -123,10 +130,9 @@ content-script submission acknowledgement.
 If upload fails or does not enable Send within that window, the task fails with
 `attachment_upload_failed` or `attachment_upload_timeout`. The content script
 tries to remove the attachment and clear the composer. If it cannot prove that
-the composer is clean, the extension pauses that session while preserving
-already queued successors. Remove the unfinished attachment manually; the
-extension resumes automatically after it observes a clean composer. **Clear
-inflight** is the explicit emergency override and also clears this block.
+the composer is clean, later work is still allowed to proceed; the next dispatch
+tries cleanup again and replaces existing text. The failed task is not retried
+automatically.
 
 ## Sanity check
 

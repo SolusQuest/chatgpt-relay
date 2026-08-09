@@ -14,7 +14,7 @@ import {
   POLL_NOT_STARTED_MAX,
   POLL_HARD_TIMEOUT_MS,
   POLL_LATE_REPLY_GRACE_MS,
-  UNCERTAIN_QUEUE_RELEASE_MS,
+  SUBMISSION_VERIFICATION_MS,
   RECOVERY_OBSERVATION_INTERVAL_MS,
   TASK_OBSERVATION_CHANGE_INTERVAL_MS,
   TASK_OBSERVATION_HEARTBEAT_INTERVAL_MS,
@@ -24,10 +24,10 @@ import {
   PAGE_STATE_SENDMSG_TIMEOUT_MS,
 } from "./lib/config.js";
 import {
+  classifySubmissionVerification,
   classifyRecoveryAction,
   hasSendFence,
   isRecoverableLateReply,
-  shouldYieldPendingToQueuedTask,
 } from "./lib/recovery-policy.js";
 
 // Development debugging: set DEBUG to true or window.__gptRelayDebug in the popup.
@@ -253,8 +253,9 @@ async function getPageState(tabId) {
 }
 
 async function reportTaskProgress(taskId, phase) {
-  await httpJson("POST", `/internal/tasks/${taskId}/progress`, { phase }).catch((e) => {
+  return httpJson("POST", `/internal/tasks/${taskId}/progress`, { phase }).then(() => true).catch((e) => {
     dlog("[relay sw] progress report failed", taskId.slice(0, 8), phase, e.message);
+    return false;
   });
 }
 
@@ -302,16 +303,6 @@ async function getSessionPendingReply(session) {
   return Object.values(pending).find((rec) => rec?.session === session) ?? null;
 }
 
-async function hasQueuedTaskForSession(session) {
-  const response = await httpJson(
-    "GET",
-    `/v1/tasks?session=${encodeURIComponent(session)}&status=queued&limit=500`,
-  );
-  return Array.isArray(response?.tasks) &&
-    response.tasks.some((task) =>
-      typeof task?.expiresAt !== "number" || task.expiresAt > Date.now());
-}
-
 async function setClaimPendingReply(
   claim,
   session,
@@ -321,7 +312,12 @@ async function setClaimPendingReply(
   details = {},
 ) {
   const taskId = claim.task.taskId;
+  const existing = await getPendingReply(taskId);
+  const verificationStartedAt = existing?.sendAttemptedAt ??
+    details.sendAttemptedAt ??
+    (deliveryPhase === "preparing" ? null : Date.now());
   await setPendingReply(taskId, {
+    ...(existing ?? {}),
     session,
     tabId,
     taskId,
@@ -346,6 +342,17 @@ async function setClaimPendingReply(
     stopRequestedAt: null,
     deliveryPhase,
     ackState: deliveryPhase,
+    sendAttemptedAt: verificationStartedAt,
+    submissionVerificationDeadlineAt:
+      existing?.submissionVerificationDeadlineAt ??
+      details.submissionVerificationDeadlineAt ??
+      (verificationStartedAt == null
+        ? null
+        : verificationStartedAt + SUBMISSION_VERIFICATION_MS),
+    submissionAcknowledged:
+      existing?.submissionAcknowledged === true || deliveryPhase === "accepted",
+    submitAcknowledgedProgressReported:
+      existing?.submitAcknowledgedProgressReported === true || deliveryPhase === "accepted",
     hardTimedOutAt: null,
     generatingProgressReported: false,
     replyProgressReported: false,
@@ -377,6 +384,9 @@ async function attachPendingFromTask(task, session, tabId, record = {}) {
     ...existing,
     ...record,
   });
+  const sendAttemptedAt = existing?.sendAttemptedAt ??
+    task.sendAttemptedAt ?? record.sendAttemptedAt ??
+    (deliveryPhase === "preparing" ? null : Date.now());
   await setPendingReply(task.taskId, {
     ...(existing ?? {}),
     session,
@@ -397,6 +407,21 @@ async function attachPendingFromTask(task, session, tabId, record = {}) {
     stopRequestedAt: existing?.stopRequestedAt ?? record.stopRequestedAt ?? null,
     deliveryPhase,
     ackState: deliveryPhase,
+    sendAttemptedAt,
+    submissionVerificationDeadlineAt:
+      task.submissionVerificationDeadlineAt ??
+      existing?.submissionVerificationDeadlineAt ??
+      record.submissionVerificationDeadlineAt ??
+      (sendAttemptedAt == null ? null : sendAttemptedAt + SUBMISSION_VERIFICATION_MS),
+    submissionAcknowledged:
+      task.submitAcknowledgedAt != null || task.generatingSeenAt != null ||
+      existing?.submissionAcknowledged === true || deliveryPhase === "accepted",
+    submitAcknowledgedProgressReported:
+      task.submitAcknowledgedAt != null || existing?.submitAcknowledgedProgressReported === true ||
+      deliveryPhase === "accepted",
+    composerPayloadObservedAfterFailure:
+      existing?.composerPayloadObservedAfterFailure === true ||
+      record.composerPayloadObservedAfterFailure === true,
     submittedUserMessageId:
       record.submittedUserMessageId ?? existing?.submittedUserMessageId ?? null,
     hardTimedOutAt:
@@ -706,23 +731,10 @@ async function startDispatchLoop(session, tabId) {
             });
 
             if (runRes.attachmentCleanupConfirmed !== true) {
-              const reason = `${errorCode}: attachment cleanup could not be confirmed`;
-              await setAttachmentBlock(session, reason);
-              await httpJson(
-                "POST",
-                `/internal/sessions/${encodeURIComponent(session)}/status`,
-                { paused: true, reason, preserveQueued: true },
-              ).catch(() => {});
-              await sendTabMessage(
-                tabId,
-                {
-                  type: "update-banner",
-                  text: "Relay paused: remove unfinished attachment",
-                  color: "#e74c3c",
-                },
-                PAGE_STATE_SENDMSG_TIMEOUT_MS,
-                "attachment pause banner",
-              ).catch(() => {});
+              console.warn(
+                "[relay sw] attachment cleanup incomplete; later dispatch remains allowed",
+                taskId,
+              );
             }
             continue;
           }
@@ -740,6 +752,10 @@ async function startDispatchLoop(session, tabId) {
               tabId,
               runRes.baseline ?? pageState?.baseline,
               "unknown",
+              {
+                composerPayloadObservedAfterFailure:
+                  runRes.composerPayloadObserved === true,
+              },
             );
             await waitForPendingReply(taskId, controller.signal);
             continue;
@@ -757,7 +773,8 @@ async function startDispatchLoop(session, tabId) {
           throw new Error("run-task did not acknowledge submission");
         }
 
-        await reportTaskProgress(taskId, "submit_acknowledged");
+        const submitAcknowledgedProgressReported =
+          await reportTaskProgress(taskId, "submit_acknowledged");
         await markInflight(session, taskId, {
           deliveryPhase: "accepted",
           submittedUserMessageId: runRes.submittedUserMessageId ?? null,
@@ -771,6 +788,7 @@ async function startDispatchLoop(session, tabId) {
           {
             submittedUserMessageId: runRes.submittedUserMessageId ?? null,
             wasGenerating: runRes.acceptanceKind === "generating",
+            submitAcknowledgedProgressReported,
           },
         );
 
@@ -944,6 +962,13 @@ async function pollOnePending(taskId, rec) {
     );
   } catch (e) {
     console.warn("[relay sw] poll-reply sendMessage failed", taskId, e.message);
+    if (
+      hasSendFence(rec) &&
+      classifySubmissionVerification("page-unready", rec, false, now) === "fail-unknown"
+    ) {
+      await failPending(taskId, rec, "submission_outcome_unknown");
+      return;
+    }
     // One sampling failure is non-terminal; the next alarm retries.
     rec.lastPollAt = now;
     await setPendingReply(taskId, rec);
@@ -954,6 +979,13 @@ async function pollOnePending(taskId, rec) {
   dlog("[relay sw] poll-reply snap", taskId.slice(0,8), "status=", snap?.status, "err=", snap?.error, "text=", (snap?.reply ?? snap?.lastText ?? "").slice(0,40));
   if (!snap || snap.error) {
     console.warn("[relay sw] poll-reply error", taskId, snap?.error);
+    if (
+      hasSendFence(rec) &&
+      classifySubmissionVerification("page-unready", rec, false, now) === "fail-unknown"
+    ) {
+      await failPending(taskId, rec, "submission_outcome_unknown");
+      return;
+    }
     await setPendingReply(taskId, rec);
     return;
   }
@@ -970,10 +1002,17 @@ async function pollOnePending(taskId, rec) {
 
   if (snap.status === "page-unready") {
     // Loading and hydration are absence of evidence, not evidence that Send
-    // failed. Reset the idle quarantine so a later stable page must establish
-    // fresh evidence before queued work can advance.
+    // failed. They resolve to unknown only when the fixed verification window
+    // has elapsed.
     rec.pageUnreadyReason = snap.reason ?? "unknown";
     rec.uncertainIdleSince = null;
+    if (
+      hasSendFence(rec) &&
+      classifySubmissionVerification(snap.status, rec, false, now) === "fail-unknown"
+    ) {
+      await failPending(taskId, rec, "submission_outcome_unknown");
+      return;
+    }
     await setPendingReply(taskId, rec);
     return;
   }
@@ -986,6 +1025,11 @@ async function pollOnePending(taskId, rec) {
     );
     await failPending(taskId, rec, "submission_outcome_unknown");
     return;
+  }
+
+  if (rec.submissionAcknowledged && !rec.submitAcknowledgedProgressReported) {
+    rec.submitAcknowledgedProgressReported =
+      await reportTaskProgress(taskId, "submit_acknowledged");
   }
 
   if (snap.status === "reply-ready") {
@@ -1028,14 +1072,17 @@ async function pollOnePending(taskId, rec) {
     rec.notStartedCount = 0;
     rec.uncertainIdleSince = null;
     rec.wasGenerating = true;
+    rec.deliveryPhase = "accepted";
+    rec.ackState = "accepted";
+    rec.submissionAcknowledged = true;
     rec.stoppedNoReplyCount = 0;
     rec.stableSampleCount = 0;
     rec.lastSampleText = snap.lastText ?? rec.lastSampleText ?? "";
     rec.submittedUserMessageId =
       rec.submittedUserMessageId ?? snap.submittedUserMessageId ?? null;
     if (!rec.generatingProgressReported) {
-      await reportTaskProgress(taskId, "generating_seen");
-      rec.generatingProgressReported = true;
+      rec.generatingProgressReported =
+        await reportTaskProgress(taskId, "generating_seen");
     }
     await reportTaskObservation(taskId, rec, {
       phase: (snap.outputChars ?? 0) > 0 ? "answer_streaming" : "generating",
@@ -1051,6 +1098,9 @@ async function pollOnePending(taskId, rec) {
     // The user message was submitted but generation has not started.
     rec.notStartedCount = 0;
     rec.uncertainIdleSince = null;
+    rec.deliveryPhase = "accepted";
+    rec.ackState = "accepted";
+    rec.submissionAcknowledged = true;
     if (rec.stopRequestedAt || rec.wasGenerating) {
       rec.stoppedNoReplyCount = (rec.stoppedNoReplyCount ?? 0) + 1;
       if (rec.stoppedNoReplyCount >= 2) {
@@ -1061,6 +1111,10 @@ async function pollOnePending(taskId, rec) {
     rec.lastSampleText = snap.lastText ?? rec.lastSampleText ?? "";
     rec.submittedUserMessageId =
       rec.submittedUserMessageId ?? snap.submittedUserMessageId ?? null;
+    if (!rec.submitAcknowledgedProgressReported) {
+      rec.submitAcknowledgedProgressReported =
+        await reportTaskProgress(taskId, "submit_acknowledged");
+    }
     await reportTaskObservation(taskId, rec, {
       phase: "accepted",
       activity: null,
@@ -1077,27 +1131,28 @@ async function pollOnePending(taskId, rec) {
       return;
     }
     if (hasSendFence(rec)) {
-      // The task crossed (or may have crossed) the Send boundary. An empty DOM
-      // after refresh can never make it automatically resendable. Once the
-      // fully hydrated page has remained idle for a bounded quarantine, newer
-      // queued work may fail this task as uncertain and advance the session.
+      // The task crossed (or may have crossed) the Send boundary. Keep a fixed
+      // verification window from the durable fence so a queued successor cannot
+      // turn a transient empty DOM into an early terminal failure.
       rec.notStartedCount = 0;
       rec.deliveryUnconfirmedCount = (rec.deliveryUnconfirmedCount ?? 0) + 1;
       rec.uncertainIdleSince ??= now;
-      const hasQueuedTask = await hasQueuedTaskForSession(rec.session).catch((e) => {
-        console.warn("[relay sw] queued-task check failed", rec.session, e.message);
-        return false;
-      });
-      if (
-        shouldYieldPendingToQueuedTask(
-          snap.status,
-          rec,
-          hasQueuedTask,
-          now,
-          UNCERTAIN_QUEUE_RELEASE_MS,
-        )
-      ) {
-        await yieldUncertainPendingToQueue(taskId, rec);
+      const composerHasPayload = snap.composerClean === false ||
+        (snap.composer?.textLength ?? 0) > 0 ||
+        snap.composer?.attachmentPresent === true ||
+        snap.composer?.uploading === true;
+      const verification = classifySubmissionVerification(
+        snap.status,
+        rec,
+        composerHasPayload,
+        now,
+      );
+      if (verification === "fail-not-observed") {
+        await failUnobservedPending(taskId, rec);
+        return;
+      }
+      if (verification === "fail-unknown") {
+        await failPending(taskId, rec, "submission_outcome_unknown");
         return;
       }
       await setPendingReply(taskId, rec);
@@ -1121,11 +1176,43 @@ async function pollOnePending(taskId, rec) {
   await setPendingReply(taskId, rec);
 }
 
-async function failPending(taskId, rec, reason) {
+async function resetComposerBestEffort(tabId) {
+  if (!tabId) return false;
+  const result = await sendTabMessage(
+    tabId,
+    { type: "reset-composer" },
+    PAGE_STATE_SENDMSG_TIMEOUT_MS,
+    "reset-composer",
+  ).catch((e) => {
+    console.warn("[relay sw] composer reset failed", tabId, e.message);
+    return null;
+  });
+  return result?.clean === true;
+}
+
+async function failPending(taskId, rec, reason, options = {}) {
+  let terminalConfirmed = false;
   try {
     await httpJson("POST", `/internal/tasks/${taskId}/complete`, { error: reason });
+    terminalConfirmed = true;
   } catch (e) {
     console.warn("[relay sw] failPending POST failed", taskId, e.message);
+    const current = await httpJson("GET", `/v1/tasks/${taskId}`).catch(() => null);
+    terminalConfirmed = current != null &&
+      ["done", "failed", "cancelled", "expired"].includes(current.status);
+  }
+  const shouldResetComposer = options.resetComposer === true ||
+    reason === "submission_not_observed" ||
+    reason === "submission_outcome_unknown";
+  if (shouldResetComposer) {
+    const clean = await resetComposerBestEffort(rec.tabId);
+    if (!clean) {
+      console.warn("[relay sw] continuing after incomplete composer reset", taskId);
+    }
+  }
+  if (!terminalConfirmed) {
+    await setPendingReply(taskId, rec);
+    return false;
   }
   await deletePendingReply(taskId);
   await clearInflight(rec.session);
@@ -1133,43 +1220,12 @@ async function failPending(taskId, rec, reason) {
   await setStorage(STORAGE_KEYS.LAST_ERROR, {
     taskId, session: rec.session, error: reason, at: Date.now(),
   });
+  return true;
 }
 
-async function yieldUncertainPendingToQueue(taskId, rec) {
-  const reason = "submission_outcome_unknown";
-  try {
-    await httpJson("POST", `/internal/tasks/${taskId}/complete`, { error: reason });
-  } catch (e) {
-    // A maintenance tick may already have made the old task terminal. Confirm
-    // that before clearing the browser-side dispatch lock; transient relay
-    // failures must leave the pending record intact for a later retry.
-    const current = await httpJson("GET", `/v1/tasks/${taskId}`).catch(() => null);
-    if (!current || !["done", "failed", "cancelled", "expired"].includes(current.status)) {
-      console.warn(
-        "[relay sw] cannot release uncertain task for queued work",
-        taskId,
-        e.message,
-      );
-      await setPendingReply(taskId, rec);
-      return false;
-    }
-  }
-
-  console.warn(
-    "[relay sw] releasing stable uncertain task for queued work",
-    taskId,
-    rec.session,
-  );
-  await deletePendingReply(taskId);
-  await clearInflight(rec.session);
-  await notifyTabCleared(rec.tabId);
-  await setStorage(STORAGE_KEYS.LAST_ERROR, {
-    taskId,
-    session: rec.session,
-    error: reason,
-    at: Date.now(),
-  });
-  return true;
+async function failUnobservedPending(taskId, rec) {
+  const reason = "submission_not_observed";
+  await failPending(taskId, rec, reason, { resetComposer: true });
 }
 
 async function abandonPending(taskId, rec, reason) {
@@ -1360,6 +1416,8 @@ async function recoverInflightForTab(msg, tabId) {
     submittedAt: msg.submittedAt,
     submittedUserMessageId: msg.submittedUserMessageId,
     stopRequestedAt: msg.stopRequestedAt,
+    composerPayloadObservedAfterFailure:
+      msg.composerPayloadObservedAfterFailure === true,
   };
 
   if (
@@ -1578,6 +1636,30 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           deliveryPhase: "send-attempted",
         });
         sendResponse({ status: "fenced", taskId: msg.taskId });
+      } catch (e) {
+        sendResponse({ error: e.message });
+      }
+    })();
+    return true;
+  }
+
+  if (type === "submission-failed-evidence") {
+    (async () => {
+      try {
+        if (!sender.tab?.id) {
+          sendResponse({ error: "no tab for submission failure evidence" });
+          return;
+        }
+        const rec = await getPendingReply(msg.taskId);
+        if (!rec || rec.tabId !== sender.tab.id || !hasSendFence(rec)) {
+          sendResponse({ error: "no matching fenced task" });
+          return;
+        }
+        rec.composerPayloadObservedAfterFailure =
+          rec.composerPayloadObservedAfterFailure === true ||
+          msg.composerPayloadObserved === true;
+        await setPendingReply(msg.taskId, rec);
+        sendResponse({ status: "recorded" });
       } catch (e) {
         sendResponse({ error: e.message });
       }

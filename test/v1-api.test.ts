@@ -282,6 +282,46 @@ test("progress endpoint records page lifecycle timestamps", async () => {
   assert.equal(typeof task.json.replyDetectedAt, "number");
 });
 
+test("task view exposes submission verification and late correction", async () => {
+  const c = await post("/v1/tasks", { session: "submission-state-api", text: "trace send" });
+  const id = c.json.taskId;
+  await get("/internal/next_task?session=submission-state-api");
+
+  const before = await get(`/v1/tasks/${id}`);
+  assert.equal(before.json.submissionState, "not_attempted");
+  assert.equal(before.json.submissionVerificationDeadlineAt, null);
+
+  await post(`/internal/tasks/${id}/progress`, { phase: "send_attempted" });
+  const verifying = await get(`/v1/tasks/${id}`);
+  assert.equal(verifying.json.submissionState, "verifying");
+  assert.equal(
+    verifying.json.submissionVerificationDeadlineAt,
+    verifying.json.sendAttemptedAt + 120_000,
+  );
+
+  await post(`/internal/tasks/${id}/complete`, { error: "submission_not_observed" });
+  const failed = await get(`/v1/tasks/${id}`);
+  assert.equal(failed.json.submissionState, "not_observed");
+
+  await post(`/internal/tasks/${id}/capture`, { text: "late correction" });
+  const corrected = await get(`/v1/tasks/${id}`);
+  assert.equal(corrected.json.submissionState, "replied");
+  assert.equal(corrected.json.lateReply, "late correction");
+
+  const c2 = await post("/v1/tasks", {
+    session: "submission-state-api",
+    text: "acknowledged send",
+  });
+  const id2 = c2.json.taskId;
+  await get("/internal/next_task?session=submission-state-api");
+  await post(`/internal/tasks/${id2}/progress`, { phase: "send_attempted" });
+  await post(`/internal/tasks/${id2}/progress`, { phase: "submit_acknowledged" });
+  const acknowledged = await get(`/v1/tasks/${id2}`);
+  assert.equal(acknowledged.json.submissionState, "acknowledged");
+  assert.equal(acknowledged.json.submissionVerificationDeadlineAt, null);
+  await post(`/internal/tasks/${id2}/complete`, { text: "done" });
+});
+
 test("provisional observations stay separate from durable task results", async () => {
   const c = await post("/v1/tasks", { session: "observation-api", text: "watch me" });
   const id = c.json.taskId;
