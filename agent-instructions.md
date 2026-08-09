@@ -98,6 +98,8 @@ gpt-relay resume
 gpt-relay cancel <task-id>
 ```
 
+Prefer bounded long waits over frequent status checks. Choose the next observation interval from the expected review cost, prompt size, prior duration in the same session, and any concrete progress signal. As a starting point, use roughly 1-2 minutes for a small request, 3-5 minutes for an ordinary review, and 5-10 minutes for a large review or long-context analysis. Shorten the interval only when observed progress suggests completion may be near; after unchanged observations, keep or lengthen it rather than polling more frequently. A wait timeout or non-terminal status is not a reason to resubmit. Preserve the original task ID and perform independent local work between observations when possible.
+
 The client waits 10 minutes by default and the normal task lifetime is 30 minutes by default. A page-submitted task that crosses that lifetime plus active-task grace becomes non-terminal `recovering`; the extension can maintain it with strong page evidence until its bounded recovery deadline. `--wait-timeout` changes only the current CLI wait; `--task-timeout` changes the normal server lifetime. Pending records under `~/.gpt-relay/pending/` let `resume` recover without duplicate submission. Retriable calls should use `--cri <stable-key>` for same-session idempotency.
 
 Different user-supplied sessions may run concurrently; one session processes at most one in-flight task. Never switch sessions merely because another is idle.
