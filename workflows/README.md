@@ -4,14 +4,28 @@ These files orchestrate multi-stage work that may use gpt-relay. Use `agent-inst
 
 ## Invocation
 
+For issue-to-PR work:
+
 ```text
 Workflow: issue-to-pr | agent-ready-issue-to-pr
 Mode: default | auto
 Issue: <url>
-Relay session: <task-specific session id>
+Relay session: <one task-specific session id reused across the entire workflow>
 ```
 
-If mode is omitted, use `default`. Record the selected mode before Phase 1, preserve it across composed workflows, and never change it without the user.
+For milestone issue-graph publication:
+
+```text
+Workflow: milestone-to-issue-graph
+Mode: default | auto
+Milestone: <existing open milestone url or owner/repo milestone number>
+Refinement parent: <issue url>
+Design authority: <document or merged PR url>@<exact commit SHA>
+Relay session: <one task-specific session id reused across the entire workflow>
+Close refinement parent: yes | no
+```
+
+If mode is omitted, use `default`. Record the selected mode before the first workflow phase, preserve it across composed workflows, and never change it without the user.
 
 ## Execution modes
 
@@ -35,6 +49,7 @@ Repeated or unsupported findings, severity wording, style preferences, repositor
 |---|---|
 | [`issue-to-pr.md`](./issue-to-pr.md) | Rough issue → decision discovery → reviewed issue contract → mode-aware publication → shared implementation workflow |
 | [`agent-ready-issue-to-pr.md`](./agent-ready-issue-to-pr.md) | Frozen agent-ready issue → reviewed plan → implementation → remote draft PR → integrated CI/GitHub/relay convergence → handoff and post-handoff feedback re-entry |
+| [`milestone-to-issue-graph.md`](./milestone-to-issue-graph.md) | Authoritative milestone design → bounded tracker/leaf batch reviews → idempotent GitHub issue-graph publication → exact remote verification and refinement handoff |
 | [`review-convergence.md`](./review-convergence.md) | Shared bounded-review budget, finding ledger, later-finding, and continuation protocol |
 
 ## Authoring rule
