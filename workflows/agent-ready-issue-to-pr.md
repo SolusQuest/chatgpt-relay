@@ -180,6 +180,8 @@ Complete relevant local validation before pushing the round head. Start CI inspe
 
 Aggregate all three channels into one ledger before fixing the next head. Do not create separate CI, GitHub, and relay review budgets or serially patch one channel while ignoring already available findings from the others.
 
+Before editing the next head, group findings by underlying cause and apply the [problem-level remediation protocol](./review-convergence.md#problem-level-remediation). Decide the correction against the complete evidenced in-scope failure surface, not only the literal commented line.
+
 ### Initial PR review
 
 ```text

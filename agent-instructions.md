@@ -10,7 +10,7 @@ gpt-relay is a local SQLite-backed queue between an agent and the user's signed-
 - Reuse that session across every relay phase and round in the task.
 - Review remote PRs only after commit, push, and draft-PR publication. The final verdict must apply to the exact pushed head.
 - User authorization owns product decisions and final merge. Agent-relay agreement cannot replace it.
-- Relay findings are review inputs, not authoritative requirements. The agent owns the evidence-based applicability, scope, and proportionality decision under [`review-convergence.md`](./workflows/review-convergence.md); do not implement a generally useful recommendation mechanically when it is unnecessary for the current project stage or artifact.
+- Relay findings are review inputs, not authoritative requirements. The agent owns the evidence-based applicability, scope, proportionality, and [problem-level remediation](./workflows/review-convergence.md#problem-level-remediation) decision under [`review-convergence.md`](./workflows/review-convergence.md); do not patch the literal comment or implement a generally useful recommendation mechanically when it is unnecessary for the current project stage or artifact.
 - Follow the active workflow's `default` or `auto` mode and its [`review-convergence.md`](./workflows/review-convergence.md) budget. Never add rounds because the mode is `auto`, treat exhausted budget as approval, or ask relay separately whether auto execution may continue.
 - On pause, captcha, or explicit rate limiting, stop relay submission and do not retry automatically. Complete independent safe work and follow the active mode's consolidated checkpoint or blocked-handoff rule.
 

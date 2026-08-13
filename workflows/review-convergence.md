@@ -43,6 +43,7 @@ After the initial response, maintain stable finding IDs and record:
 | Classification | Why the finding is admissible and blocking or non-blocking |
 | Basis | Acceptance criterion, contract, code path, test, CI result, or other authoritative source |
 | Applicability | `required-now`, `defer`, or `not-applicable`; blockers and disputed findings include current exposure, concrete failure, timing, and scope evidence |
+| Problem model | Violated invariant or root cause, affected in-scope surface, and whether the reported location is isolated or representative |
 | Minimum sufficient measure | For `required-now`, the narrowest adequate correction; otherwise why no current change is required and, when useful, the future activation condition |
 | Status | `open`, `resolved`, `rejected`, `deferred`, or `disputed` |
 | Artifact lineage | Reviewed revision or head and, when applicable, correction revision or head |
@@ -58,6 +59,14 @@ Classify a finding first raised after the initial review as:
 - `user-decision` — when supported by the phase, a product or material trade-off the agent is not authorized to settle.
 
 Timing alone neither admits nor waives a blocker. Verify relay claims against authoritative repository evidence and apply the applicability test independently. Fix a real in-scope blocker with the minimum sufficient measure, record or defer non-blocking work, reject unsupported or context-inapplicable claims with evidence, and never expand scope silently.
+
+## Problem-level remediation
+
+Before correcting an admitted finding, analyze the underlying problem rather than patching only the literal location described by the comment. Identify the violated invariant or root cause, reproduce or trace the concrete failure, and inspect the in-scope code paths, input classes, state transitions, and sibling artifacts governed by the same mechanism. Group findings that are different manifestations of the same cause into one correction set.
+
+The correction must address the evidenced problem class at the minimum sufficient scope. Verification must cover the reported trigger and representative same-cause cases where applicable.
+
+“Comprehensive” does not authorize unrestricted refactoring or scope expansion. Related work outside the current artifact's authority or scope must be recorded as `deferred` or `out-of-scope` with supporting evidence.
 
 ## Final convergence and continuation
 
