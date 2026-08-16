@@ -176,7 +176,7 @@ Use at most three integrated PR convergence rounds. Each round evaluates one exa
 2. All visible GitHub review feedback, including review summaries, conversation comments, inline comments, and review threads.
 3. One substantive relay review submission.
 
-Complete relevant local validation before pushing the round head. Start CI inspection and relay review while observing expected GitHub review on that same remote head in parallel when practical, then wait at a round barrier before deciding: required checks are terminal, required or explicitly requested automated reviews are terminal or have a documented infrastructure failure, optional reviews have reached a recorded bounded cutoff, GitHub feedback has been paginated through that cutoff, and relay has returned or failed under `agent-instructions.md`. Human review has no terminal state; the cutoff defines what the round observed.
+Complete relevant local validation before pushing the round head. On the initial published head, start CI inspection and relay review while observing expected GitHub review on that same remote head in parallel when practical. After the corrected-head stabilization gate below activates, order later relay submissions according to that gate. In every round, wait at a round barrier before deciding: required checks are terminal, required or explicitly requested automated reviews are terminal or have a documented infrastructure failure, optional reviews have reached a recorded bounded cutoff, GitHub feedback has been paginated through that cutoff, and relay has returned or failed under `agent-instructions.md`. Human review has no terminal state; the cutoff defines what the round observed.
 
 Aggregate all three channels into one ledger before fixing the next head. Do not create separate CI, GitHub, and relay review budgets or serially patch one channel while ignoring already available findings from the others.
 
@@ -224,6 +224,22 @@ After the round barrier, verify disputed repository facts locally, apply the sha
 
 The second full review includes the PR URL, previous and current heads, complete ledger, fix summary, and head-to-head diff. It verifies prior findings, revision regressions, and new evidence without renaming or reopening findings silently.
 
+### Corrected-head stabilization gate
+
+The initial published PR head may use parallel CI, GitHub feedback observation, and relay review for broad discovery. Once CI, GitHub feedback, relay, or agent verification yields an admitted finding that requires changing the PR head, or proves that a required target seam has not executed successfully, activate the stabilization gate for the remainder of that PR lineage. The gate remains active across workflow-defined post-handoff convergence cycles and targeted closure. A rejected, deferred, duplicate, stale, or non-blocking finding that neither changes the head nor invalidates its evidence does not activate the gate and does not require another relay submission by itself.
+
+Before consuming any later relay submission on a corrected head:
+
+1. Handle the complete visible feedback batch and apply problem-level remediation to the combined verified finding set.
+2. Pass complete relevant local validation and any required local target-seam proof.
+3. Commit and push the corrected head.
+4. Wait for all required CI on that exact head to finish green, including any CI-only proof of the changed or previously failing seam.
+5. Complete any specifically required target-seam, end-to-end, or manual execution proof that ordinary required CI does not provide.
+
+Only then submit relay for that head; GitHub feedback observation and the final cutoff may continue around that submission. If CI or feedback observed before relay submission requires another head change, correct the combined problem set and satisfy the gate again instead of spending the round. A pre-existing, external, or infrastructure CI failure does not waive the gate: recover or obtain authoritative evidence under repository policy, otherwise preserve the relay round and use the evidence-stable `BLOCKED_HANDOFF` rule below.
+
+This gate orders future submissions. Do not cancel or duplicate an initial relay task that was already submitted in parallel merely because CI later exposes a failure; retain its result in the unified ledger and apply the gate before reviewing the next head.
+
 ### Integrated round barrier
 
 For every round:
@@ -239,7 +255,7 @@ The gate is no **unaddressed actionable feedback**, not mechanically zero unreso
 
 ### Third full review — final PR convergence
 
-Spend the third round only on a candidate head that passed complete relevant local validation. Evaluate required CI, GitHub feedback, and relay against that head through the same integrated barrier; do not declare readiness from relay alone.
+Spend the third round only after the candidate head satisfies the corrected-head stabilization gate. Evaluate required CI, GitHub feedback, and relay against that head through the same integrated barrier; do not declare readiness from relay alone.
 
 ```text
 This is the final convergence review for the PR. Do not restart broad
@@ -283,7 +299,7 @@ After the third barrier, any admissible blocker from CI, GitHub feedback, relay,
 
 ### Targeted closure
 
-Only third-round `CORRECT_AND_CLOSE` permits one targeted closure check, and only when every remaining blocker in the unified ledger is part of the same named deterministic correction set. It is not a fourth full review. Apply only the named minimum corrections, run affected local validation, push, then evaluate required CI, GitHub feedback, and the relay targeted check on that exact closure head. An unrelated substantive change invalidates targeted closure as a broad-review substitute and leaves the PR blocked unless the user authorizes new budget.
+Only third-round `CORRECT_AND_CLOSE` permits one targeted closure check, and only when every remaining blocker in the unified ledger is part of the same named deterministic correction set. It is not a fourth full review. Apply only the named minimum corrections, run affected local validation, push, satisfy the corrected-head stabilization gate, then complete the GitHub feedback sweep and relay targeted check on that exact closure head. An unrelated substantive change invalidates targeted closure as a broad-review substitute and leaves the PR blocked unless the user authorizes new budget.
 
 ```text
 This is a targeted closure check, not a full PR review.
@@ -342,6 +358,6 @@ The user owns final human review, `gh pr ready`, and merge.
 
 After a `READY_FOR_HUMAN_REVIEW` handoff, whether the PR remains draft or the user has marked it ready, the user may request follow-up on additional human or automated GitHub feedback for the same PR. Preserve the PR's execution mode, current draft/ready state, and task-specific relay session; read every feedback item added since the last recorded cutoff and update the existing ledger. Handle the complete visible batch: fix actionable findings, answer rejected/deferred/duplicate/stale feedback, validate changes, push when PR content changed, wait for required CI, and paginate feedback again.
 
-Any post-handoff feedback batch that changes the PR head must re-enter Phase 5 and complete a fresh integrated convergence cycle of at most three rounds before another `READY_FOR_HUMAN_REVIEW` handoff. This is an explicit workflow-defined new-cycle condition under `review-convergence.md`: carry forward the prior ledger, previous relay-approved head, feedback dispositions, and reason for reopening; do not reset the ledger or the budget within the new cycle. Relay reviews the full current PR and exact pushed head, not only the comment-fix diff.
+Any post-handoff feedback batch that changes the PR head must re-enter Phase 5 and complete a fresh integrated convergence cycle of at most three rounds before another `READY_FOR_HUMAN_REVIEW` handoff. This is an explicit workflow-defined new-cycle condition under `review-convergence.md`: carry forward the prior ledger, previous relay-approved head, feedback dispositions, and reason for reopening; do not reset the ledger or the budget within the new cycle. Because the batch changed the head, the corrected-head stabilization gate is active before the new cycle's first relay submission. Relay reviews the full current PR and exact pushed head, not only the comment-fix diff.
 
 If handling the batch does not change PR content or head, the previous exact-head relay verdict remains applicable; rescan GitHub feedback and report the dispositions unless the user explicitly requests a new relay cycle. Feedback visible before a round cutoff joins the active cycle. Feedback arriving after the completed handoff starts a later batch only when the user resumes the workflow; do not monitor indefinitely or silently extend a finished cycle.
