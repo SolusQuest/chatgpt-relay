@@ -11,7 +11,7 @@
 
 ## Purpose and routing
 
-Use this workflow when the issue is a frozen implementation contract with settled product decisions, explicit scope and non-goals, testable acceptance criteria, and declared dependency handling. It maps that contract onto the current repository, reviews the implementation/test plan, then continues through code, tests, validation, a remote draft PR, CI, relay code review, GitHub review threads, and user handoff.
+Use this workflow when the issue is a frozen implementation contract with settled product decisions, explicit scope and non-goals, testable acceptance criteria, and declared dependency handling. It maps that contract onto the current repository, reviews the implementation/test plan, then continues through code, tests, validation, a remote draft PR, CI, relay code review, GitHub review threads, initial exact-gate ready-for-review promotion, and user handoff.
 
 Use `issue-to-pr.md` when material product, scope, or acceptance questions remain. Do not use this workflow for exploratory work, trivial edits whose review overhead exceeds risk, or when the user explicitly declines relay.
 
@@ -22,7 +22,7 @@ Use `issue-to-pr.md` when material product, scope, or acceptance questions remai
 - The authoritative issue is available by URL or complete text.
 - Repository instructions, design contracts, and declared dependencies are accessible.
 - Relay is reachable and the user supplied a non-paused, task-specific session.
-- The user authorized implementation, branch publication, a draft PR, and relay review.
+- The user authorized implementation, branch publication, a draft PR, relay review, and the final gate's initial draft-to-ready transition.
 - Record or inherit the execution mode; pin the same mode and session through plan and PR review.
 
 ## Phase 1 — Readiness and implementation/test plan
@@ -335,29 +335,38 @@ Before classification:
 1. Re-read required checks and paginate review threads again.
 2. Update PR summary, acceptance mapping, validation evidence, plan deviations, and risks after all fixes.
 3. Read the remote PR back and verify rendered body, metadata, and diff against the current head.
+4. Record the exact head and latest observed comment, review, thread, and check identifiers as the pre-handoff feedback cutoff.
 
-`READY_FOR_HUMAN_REVIEW` requires green required checks, no agent-verified blocker on the exact relay-approved head, every actionable thread fixed or deliberately answered, complete acceptance coverage, and a remote PR body that describes that head.
+An exact-head handoff candidate requires green required checks, no agent-verified blocker on the exact relay-approved head, every actionable thread fixed or deliberately answered, complete acceptance coverage, and a remote PR body that describes that head.
 
-Otherwise return `BLOCKED_HANDOFF` with exact evidence and keep the PR unmerged. Preserve its current draft/ready state unless the user explicitly changes it; never treat exhausted rounds as approval, mark ready, merge, or close the issue autonomously.
+When those requirements pass, convert the PR to ready for review only if it is still draft. If it is already ready, do not toggle its state. In either case, immediately read the remote PR back. Return and report `READY_FOR_HUMAN_REVIEW` only when the remote PR is not draft, its head still equals the exact approved head, and its body and metadata remain correct. Do not wait for or consume checks, reviews, or comments first triggered by the initial ready-for-review transition; anything first visible after the recorded cutoff is post-handoff feedback owned by the user-decision rule below.
+
+If the readiness requirements, required initial state transition, or readback fail, or if the head changes during promotion or confirmation, return `BLOCKED_HANDOFF` with exact evidence and keep the PR unmerged. Do not promote a draft PR that failed the gate. Preserve an already-ready PR's state unless the user explicitly requests a change, and never treat exhausted rounds as approval, merge, or issue-closure authorization.
 
 ## Phase 6 — Handoff
 
 Report:
 
 1. Execution mode and `READY_FOR_HUMAN_REVIEW` or `BLOCKED_HANDOFF`.
-2. Draft PR URL, current head, and relay-reviewed head if different.
+2. PR URL, current head, relay-reviewed head if different, and confirmed remote draft/ready state.
 3. Implementation summary and acceptance-to-code/test mapping.
 4. Local validation, CI, and actionable-feedback status.
 5. Material plan deviations.
 6. Relay verdict, integrated PR-round count, feedback cutoffs, and targeted closure result.
 7. Agent continuation decision, risks, deferred work, blockers, and answered-but-unresolved reviewer-owned threads.
 
-The user owns final human review, `gh pr ready`, and merge.
+The workflow owns only the initial exact-gate draft-to-ready transition and later idempotent ready-state confirmation. The user owns final human review, merge, any later ready/draft state change, and whether the agent re-enters for feedback first visible after the recorded handoff cutoff.
 
 ## Post-handoff PR feedback re-entry
 
-After a `READY_FOR_HUMAN_REVIEW` handoff, whether the PR remains draft or the user has marked it ready, the user may request follow-up on additional human or automated GitHub feedback for the same PR. Preserve the PR's execution mode, current draft/ready state, and task-specific relay session; read every feedback item added since the last recorded cutoff and update the existing ledger. Handle the complete visible batch: fix actionable findings, answer rejected/deferred/duplicate/stale feedback, validate changes, push when PR content changed, wait for required CI, and paginate feedback again.
+After a `READY_FOR_HUMAN_REVIEW` handoff, the PR is remotely confirmed ready for review. Checks, automated reviews, human reviews, and comments triggered by the ready-for-review transition or first visible after the recorded cutoff are post-handoff feedback. Do not monitor or handle them automatically. The user decides whether the agent re-enters this workflow for that feedback batch.
 
-Any post-handoff feedback batch that changes the PR head must re-enter Phase 5 and complete a fresh integrated convergence cycle of at most three rounds before another `READY_FOR_HUMAN_REVIEW` handoff. This is an explicit workflow-defined new-cycle condition under `review-convergence.md`: carry forward the prior ledger, previous relay-approved head, feedback dispositions, and reason for reopening; do not reset the ledger or the budget within the new cycle. Because the batch changed the head, the corrected-head stabilization gate is active before the new cycle's first relay submission. Relay reviews the full current PR and exact pushed head, not only the comment-fix diff.
+The ready state means that the agent workflow passed on the exact head at the recorded cutoff and human review may begin. It does not claim that post-cutoff automation has completed or approved the PR.
 
-If handling the batch does not change PR content or head, the previous exact-head relay verdict remains applicable; rescan GitHub feedback and report the dispositions unless the user explicitly requests a new relay cycle. Feedback visible before a round cutoff joins the active cycle. Feedback arriving after the completed handoff starts a later batch only when the user resumes the workflow; do not monitor indefinitely or silently extend a finished cycle.
+After the initial promotion, ready-for-review is sticky across agent re-entry. Do not return the PR to draft or repeat the ready transition unless the user explicitly requests that state change. Express renewed exact-head readiness through CI, relay verdicts, feedback cutoffs, and the next handoff rather than another ready-for-review event.
+
+When the user requests re-entry, preserve the PR's execution mode and task-specific relay session, read every feedback item added since the last recorded cutoff, update the existing ledger, and classify the complete visible batch before editing the PR.
+
+Any post-handoff feedback batch that requires a committed artifact change and therefore a new PR head keeps the PR ready for review while it re-enters Phase 5 and completes a fresh integrated convergence cycle of at most three rounds: handle the complete visible batch, fix actionable findings, answer rejected/deferred/duplicate/stale feedback, validate changes, push, wait for required CI, and paginate feedback again before another exact-head `READY_FOR_HUMAN_REVIEW` handoff. This is an explicit workflow-defined new-cycle condition under `review-convergence.md`: carry forward the prior ledger, previous relay-approved head, feedback dispositions, and reason for reopening; do not reset the ledger or the budget within the new cycle. Because the batch changes the head, the corrected-head stabilization gate is active before the new cycle's first relay submission. Relay reviews the full current PR and exact pushed head, not only the comment-fix diff, and the final gate confirms the existing ready state without toggling it.
+
+If the batch does not require a new PR head, keep the PR ready for review, answer rejected/deferred/duplicate/stale feedback as appropriate, and retain the previous exact-head relay verdict; rescan GitHub feedback and report the dispositions unless the user explicitly requests a new relay cycle. Feedback visible before a round cutoff joins the active cycle. Feedback arriving after the completed handoff starts a later batch only when the user resumes the workflow; do not monitor indefinitely or silently extend a finished cycle.

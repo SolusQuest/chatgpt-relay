@@ -34,7 +34,7 @@ If mode is omitted, use `default`. Record the selected mode before the first wor
 
 Both modes use identical validation gates, review budgets, finding rules, and exact-head requirements. `auto` does not add relay rounds or ask relay whether execution may continue; the agent applies [`review-convergence.md`](./review-convergence.md) and records the decision.
 
-Where the active workflow permits, `auto` covers refined-issue publication, branches, commits, pushes, draft PR creation and updates, CI and review fixes, and review-thread replies or resolution. It never authorizes ready-for-review, merge, issue closure, release, deployment, unrelated metadata changes, new credentials or paid resources, destructive action, or silent product-scope expansion.
+Where the active workflow permits, `auto` covers refined-issue publication, branches, commits, pushes, draft PR creation and updates, CI and review fixes, review-thread replies or resolution, and an initial exact-gate draft-to-ready transition explicitly owned by that workflow. It never authorizes merge, issue closure, release, deployment, unrelated metadata changes, new credentials or paid resources, destructive action, or silent product-scope expansion.
 
 Stop dependent work only for:
 
