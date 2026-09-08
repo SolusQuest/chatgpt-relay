@@ -43,9 +43,11 @@ refinement parent
     └── leaf
 ```
 
-Trackers group ownership and delivery boundaries. Leaves remain direct children of exactly one tracker and represent one focused PR with an independently testable outcome, an independently reversible change, declared path ownership, explicit dependencies, acceptance criteria, and validation commands. Do not create deeper execution nesting unless the user-authorized design authority explicitly requires it.
+Trackers group ownership and delivery boundaries. Leaves remain direct children of exactly one tracker. Each leaf must be the smallest independently acceptable delivery unit within the pinned design authority and represent one focused PR with an independently testable outcome, an independently reversible change, declared path ownership, explicit dependencies, acceptance criteria, and validation commands. Once its declared dependencies are satisfied, a leaf must deliver one meaningful outcome with explicit acceptance evidence, without requiring a later leaf to make that outcome valid. Do not create deeper execution nesting unless the user-authorized design authority explicitly requires it.
 
-Split a proposed leaf when it contains independently deliverable capabilities, combines deterministic implementation with credential-bearing or external mutation, mixes deletion families with different replacement owners or gates, requires multiple PRs to keep intermediate states valid, or shares paths without an explicit handoff order. Keep tightly coupled producer-and-only-consumer work atomic when separate delivery would not create a truthful usable state.
+Split a proposed leaf whenever it contains two or more separately acceptable outcomes that can be delivered in dependency order while preserving valid intermediate states. Express sequencing through dependency edges. Shared files, implementation convenience, or fitting into one PR are not sufficient reasons to combine outcomes. Required implementation, tests, and documentation for the same outcome may remain together; code size and file boundaries do not define independent outcomes.
+
+Also split a proposed leaf when it combines deterministic implementation with credential-bearing or external mutation, mixes deletion families with different replacement owners or gates, requires multiple PRs to keep intermediate states valid, or shares paths without an explicit handoff order. Keep tightly coupled producer-and-only-consumer work atomic when separate delivery would not create a truthful usable state. When retaining a grouping of candidate outcomes, explain the acceptance or atomicity constraint that prevents further splitting.
 
 The graph manifest is the versioned JSON source of truth for publication. Its top-level object records at least `schemaVersion`, a stable `workflowId`, repository identity, target milestone identity, refinement-parent identity, design-authority URI and exact revision, graph constraints, ordered nodes, declared substitutions, and review-unit ownership. Use `issue-graph/v1` as the initial schema version. Pin `workflowId` before the first review, preserve it across retries and resumes, and restrict it to `^[A-Za-z0-9][A-Za-z0-9._-]*$` so it is safe inside the completion marker.
 
@@ -162,7 +164,7 @@ Draft all tracker bodies and enough leaf outlines to audit tracker coverage and 
 - Every leaf has exactly one tracker parent and the configured maximum depth is respected.
 - The dependency graph is acyclic and has an executable order.
 - Tracker coverage has no unowned leaf and no overlapping responsibility without an explicit handoff.
-- Every leaf satisfies the focused-PR and split rules.
+- Every leaf satisfies the smallest independently acceptable unit, focused-PR, and split rules; any retained grouping of candidate outcomes has a concrete acceptance or atomicity reason.
 - Shared paths have a declared owner and sequencing edge where required.
 - Titles do not collide with each other or with multiple remote issues.
 - Bodies contain no undeclared symbolic GitHub issue-number substitutions.
@@ -177,10 +179,10 @@ The `trackers` review snapshot contains:
 - Invocation, authority record, project constraint profile, and permission record.
 - Complete graph manifest with explicit field ownership/status and the local validation report.
 - Complete tracker bodies.
-- All leaf outlines needed to evaluate tracker coverage, overlap, and split boundaries.
+- All leaf outlines needed to evaluate tracker coverage, overlap, leaf granularity, and split boundaries.
 - Relevant issue templates and cross-repository contracts that materially constrain publication.
 
-The Relay prompt must identify the exact review unit and `reviewDigest`; distinguish tracker-owned frozen fields from leaf-owned provisional context; request stable blocker IDs; require a complete review of tracker coverage, scope, ownership envelopes, sequencing, graph validity, cross-tracker dependencies, and leaf partitioning; and return exactly one artifact-specific verdict:
+The Relay prompt must identify the exact review unit and `reviewDigest`; distinguish tracker-owned frozen fields from leaf-owned provisional context; request stable blocker IDs; require a complete review of tracker coverage, scope, ownership envelopes, sequencing, graph validity, cross-tracker dependencies, and leaf partitioning into the smallest independently acceptable units under the split rules; and return exactly one artifact-specific verdict:
 
 ```text
 TRACKER_BATCH_READY
@@ -237,10 +239,10 @@ Read every tracker back and compare the remote body with the materialized file, 
 Process trackers in the manifest's declared order. For each tracker:
 
 1. Draft the complete bodies for all of its direct leaves.
-2. Fill only fields owned by `leaves:<tracker-stable-id>`, preserve every frozen tracker-owned field, update the manifest revision and local graph validation, and prepare a split audit mapping tracker outcomes to leaves, focused PRs, path owners, dependencies, acceptance criteria, and validation commands.
+2. Fill only fields owned by `leaves:<tracker-stable-id>`, preserve every frozen tracker-owned field, update the manifest revision and local graph validation, and prepare a split audit mapping tracker outcomes to leaves, focused PRs, path owners, dependencies, acceptance criteria, and validation commands. Include any acceptance or atomicity constraint used to justify keeping candidate outcomes together.
 3. Build the `leaves:<tracker-stable-id>` review snapshot with the frozen tracker contract, complete current graph manifest, all leaf bodies in the unit, the split audit, and every cross-unit contract required to judge them.
 4. Generate and record the unit `reviewDigest`.
-5. Ask Relay to review the leaf-owned fields against the frozen tracker outcome and ownership envelope. It must report a proven tracker-owned or cross-tracker contradiction as an explicit cross-unit blocker rather than silently redesigning the tracker contract. Request the complete blocker set with stable unit-scoped IDs and exactly one verdict:
+5. Ask Relay to review the leaf-owned fields against the frozen tracker outcome and ownership envelope and recheck leaf granularity against the smallest independently acceptable unit and split rules. It must report a required split that changes frozen tracker-owned fields, or any other proven tracker-owned or cross-tracker contradiction, as an explicit cross-unit blocker rather than silently redesigning the tracker contract. Request the complete blocker set with stable unit-scoped IDs and exactly one verdict:
 
 ```text
 <TRACKER_STABLE_ID>_LEAF_BATCH_READY
