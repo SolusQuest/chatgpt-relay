@@ -2,8 +2,9 @@
 // Runs in chatgpt.com for DOM submission, safety detection, status, recovery, and connectivity.
 //
 // This layer performs synchronous DOM operations and one poll-reply snapshot.
-// New replies are detected by data-message-id because virtual scrolling can
-// unmount old messages. textContent is used because innerText depends on layout.
+// New replies are detected by message IDs (legacy data-message-id or modern
+// content-unit keys) because virtual scrolling can unmount old messages.
+// textContent is used because innerText depends on layout.
 //
 // Long-running reply waits live in the service worker pending-reply state
 // machine. Chrome can freeze MutationObserver and setInterval in background or
@@ -19,6 +20,7 @@
   const SELECTORS = {
     input: [
       "#prompt-textarea",
+      '[data-chatgpt-composer] [contenteditable="true"][role="textbox"]',
       '[contenteditable="true"][data-testid]',
       'div[contenteditable="true"]',
     ],
@@ -170,18 +172,13 @@
   }
 
   function findSendButton() {
+    const root = getComposerRoot();
+    if (!root?.querySelectorAll) return null;
     for (const sel of SELECTORS.sendButton) {
-      const b = document.querySelector(sel);
+      const b = Array.from(root.querySelectorAll(sel)).find(isVisible);
       if (b) return b;
     }
-    const inp = findInput();
-    if (inp) {
-      const form = inp.closest?.("form");
-      if (form?.querySelector) {
-        return form.querySelector('button[type="submit"], button:last-of-type');
-      }
-    }
-    return null;
+    return Array.from(root.querySelectorAll('button[type="submit"]')).find(isVisible) ?? null;
   }
 
   function getComposerRoot(inp = findInput()) {
@@ -217,7 +214,7 @@
       .find((value) => /upload|attachment|file|上传|附件|文件/i.test(value)) ?? null;
     const uploading = progressNodes.length > 0 ||
       /uploading|processing|正在上传|上传中|处理中/i.test(attachmentText);
-    const textLength = (inp?.innerText ?? inp?.textContent ?? "").trim().length;
+    const textLength = (inp?.textContent || inp?.innerText || "").trim().length;
     const attachmentPresent = attachmentNodes.length > 0;
     return {
       attachmentPresent,
@@ -242,13 +239,30 @@
     );
   }
 
-  function getAssistantMessages() { return Array.from(document.querySelectorAll(SELECTORS.assistantMessage)); }
-  function getUserMessages()      { return Array.from(document.querySelectorAll(SELECTORS.userMessage)); }
+  function getAssistantMessages() {
+    const legacy = Array.from(document.querySelectorAll(SELECTORS.assistantMessage));
+    if (legacy.length) return legacy;
+    return Array.from(document.querySelectorAll('[data-conversation-role="assistant"]'))
+      .map((heading) => heading.closest('[data-content-search-unit-key]'))
+      .filter(Boolean);
+  }
+  function getUserMessages() {
+    const legacy = Array.from(document.querySelectorAll(SELECTORS.userMessage));
+    if (legacy.length) return legacy;
+    return Array.from(document.querySelectorAll('[data-user-message-bubble]'))
+      .map((bubble) => bubble.closest('[data-content-search-unit-key]'))
+      .filter(Boolean);
+  }
+  function getMessageId(el) {
+    return el?.getAttribute("data-message-id") ||
+      el?.getAttribute("data-content-search-unit-key") || null;
+  }
   function getLastText(msgs) {
     if (!msgs.length) return "";
     const el = msgs[msgs.length - 1];
+    const content = el.querySelector?.('[data-chatgpt-selection-message-id]') ?? el;
     // innerText depends on layout and may be empty in frozen tabs; textContent does not.
-    const t = (el.textContent ?? el.innerText ?? "").replace(/\u00A0/g, " ").trim();
+    const t = (content.textContent ?? content.innerText ?? "").replace(/\u00A0/g, " ").trim();
     return t;
   }
   function getGenerationActivity(msgs) {
@@ -266,11 +280,11 @@
   }
   function getLastAssistantId(msgs) {
     if (!msgs.length) return null;
-    return msgs[msgs.length - 1].getAttribute("data-message-id") || null;
+    return getMessageId(msgs[msgs.length - 1]);
   }
   function getLastUserId(msgs) {
     if (!msgs.length) return null;
-    return msgs[msgs.length - 1].getAttribute("data-message-id") || null;
+    return getMessageId(msgs[msgs.length - 1]);
   }
 
   function captureBaseline() {
@@ -313,6 +327,7 @@
     if (reason) {
       pageReadyCandidate = null;
       return {
+        session: getSessionId(),
         ready: false,
         reason,
         stableForMs: 0,
@@ -342,6 +357,7 @@
     const stableForMs = Math.max(0, now - pageReadyCandidate.since);
     const ready = stableForMs >= PAGE_READY_STABLE_MS;
     return {
+      session: getSessionId(),
       ready,
       reason: ready ? null : "page-stabilizing",
       stableForMs,
@@ -631,7 +647,7 @@
 
     await pacedDelay(300, 600);
 
-    const injected = inp.innerText.trim();
+    const injected = (inp.textContent || inp.innerText || "").trim();
     // Large pastes may become attachments and leave the composer empty. Keep
     // the normal text budget short, but allow an attachment-aware upload window.
     const sendReady = await waitForSendEnabledAfterPaste(inp, text);
@@ -826,7 +842,7 @@
             const expectedUserId = msg.submittedUserMessageId ?? null;
             const hasExpectedUser = expectedUserId
               ? users.some((user) =>
-                  user.getAttribute("data-message-id") === expectedUserId)
+                  getMessageId(user) === expectedUserId)
               : false;
             const hasNewUser = expectedUserId
               ? hasExpectedUser
@@ -1006,11 +1022,27 @@
 
   // Report the session ID to the service worker on load and URL changes.
   let lastReportedSid = "";
+  let lastReportedPath = "";
   function reportSid() {
     const sid = getSessionId();
-    if (sid === lastReportedSid) return;
+    const path = location.pathname;
+    if (sid === lastReportedSid && path === lastReportedPath) return;
     lastReportedSid = sid;
-    chrome.runtime.sendMessage({ type: "session-hello", session: sid }).catch(() => {});
+    lastReportedPath = path;
+    chrome.runtime.sendMessage({ type: "session-hello", session: sid })
+      .then((response) => {
+        if (response?.status !== "ok" &&
+          lastReportedSid === sid && lastReportedPath === path) {
+          lastReportedSid = "";
+          lastReportedPath = "";
+        }
+      })
+      .catch(() => {
+        if (lastReportedSid === sid && lastReportedPath === path) {
+          lastReportedSid = "";
+          lastReportedPath = "";
+        }
+      });
     updateBanner(`Relay: ${sid.slice(0, 8)}…`);
   }
   reportSid();

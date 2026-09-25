@@ -5,7 +5,7 @@ ChatGPT web interface.
 
 ## Load the extension
 
-1. Open `chrome://extensions/`.
+1. Open `edge://extensions/` in Edge or `chrome://extensions/` in Chrome.
 2. Enable **Developer mode**.
 3. Select **Load unpacked** and choose the repository's `extension/` directory.
 4. Open or refresh `https://chatgpt.com/`.
@@ -15,7 +15,7 @@ ChatGPT web interface.
 
 ## Reload after a code change
 
-1. Open `chrome://extensions/`.
+1. Open `edge://extensions/` in Edge or `chrome://extensions/` in Chrome.
 2. Find gpt-relay and select **Reload**.
 3. Refresh every `chatgpt.com` tab that should run the updated content script.
 
@@ -32,7 +32,10 @@ ChatGPT web interface.
 
 - Health indicator: green when the relay is reachable, red otherwise.
 - Sessions: each connected ChatGPT tab, its server-side status, queued count,
-  and active task status (including `recovering`).
+  active task status (including `recovering`), and page readiness reason with
+  user/assistant DOM counts. `script unavailable` means the content script did
+  not respond; `conversation-hydrating (u0/a0)` means the existing chat's
+  message history has not been detected, so dispatch remains safely queued.
 - Recent tasks: status and duration for the latest eight tasks.
 - Relay URL: defaults to `http://127.0.0.1:8765`.
 - **Poll now**: requests an immediate poll instead of waiting for the next
@@ -68,7 +71,10 @@ Agent -> POST /v1/tasks -> Relay server (Express + SQLite)
 ```
 
 - The **content script** performs synchronous page operations: inject the
-  prompt, select send, and snapshot replies.
+  prompt, select send, and snapshot replies. It recognizes both the older
+  message-role attributes and the newer Project conversation units marked by
+  `data-content-search-unit-key`, `data-user-message-bubble`, and
+  `data-conversation-role`. Send is selected only inside the composer.
 - The **service worker** drives the lifecycle:
   - waits for the document, conversation history, composer, and message baseline
     to stabilize before claiming work;

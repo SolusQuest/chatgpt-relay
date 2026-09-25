@@ -19,6 +19,8 @@ type FakeElement = {
   innerText: string;
   getAttribute(name: string): string | null;
   getBoundingClientRect(): { width: number; height: number };
+  closest?(selector: string): FakeElement | null;
+  querySelector?(selector: string): FakeElement | null;
   querySelectorAll?(selector: string): FakeElement[];
 };
 
@@ -45,10 +47,16 @@ function createHarness() {
     input: element("input-1") as FakeElement | null,
     users: [] as FakeElement[],
     assistants: [] as FakeElement[],
+    modernUserBubbles: [] as FakeElement[],
+    modernAssistantHeadings: [] as FakeElement[],
+    unrelatedSendButtons: [] as FakeElement[],
     stopButtons: [] as FakeElement[],
     pathname: "/c/6a61e3cc-3160-83ee-9aa7-f79a39d93b3e",
+    helloAcknowledged: true,
   };
   const storage = new Map<string, string>();
+  const sentMessages: unknown[] = [];
+  const intervals: Array<{ callback: () => void; ms: number }> = [];
   let onMessage:
     | ((message: unknown, sender: unknown, respond: (value: unknown) => void) => boolean)
     | undefined;
@@ -78,6 +86,9 @@ function createHarness() {
     querySelectorAll(selector: string) {
       if (selector === '[data-message-author-role="user"]') return state.users;
       if (selector === '[data-message-author-role="assistant"]') return state.assistants;
+      if (selector === '[data-user-message-bubble]') return state.modernUserBubbles;
+      if (selector === '[data-conversation-role="assistant"]') return state.modernAssistantHeadings;
+      if (selector === '[data-testid="send-button"]') return state.unrelatedSendButtons;
       if (selector === '[data-testid="stop-button"]') return state.stopButtons;
       if (selector === "#prompt-textarea") return state.input ? [state.input] : [];
       return [];
@@ -111,7 +122,10 @@ function createHarness() {
   };
   const chrome = {
     runtime: {
-      sendMessage: async () => ({ status: "ok" }),
+      sendMessage: async (message: unknown) => {
+        sentMessages.push(message);
+        return state.helloAcknowledged ? { status: "ok" } : { error: "worker unavailable" };
+      },
       onMessage: {
         addListener(listener: typeof onMessage) {
           onMessage = listener;
@@ -134,7 +148,10 @@ function createHarness() {
     Promise,
     console: { log() {}, warn() {}, error() {} },
     setTimeout: () => 0,
-    setInterval: () => 0,
+    setInterval: (callback: () => void, ms: number) => {
+      intervals.push({ callback, ms });
+      return 0;
+    },
     clearTimeout() {},
     clearInterval() {},
   });
@@ -142,6 +159,19 @@ function createHarness() {
   assert.ok(onMessage, "content script did not register onMessage");
   return {
     state,
+    sentMessages,
+    tickInterval(ms: number) {
+      for (const interval of intervals) {
+        if (interval.ms === ms) interval.callback();
+      }
+    },
+    async sessionId() {
+      return new Promise<string>((resolve) => {
+        onMessage?.({ type: "get-session-id" }, {}, (value) => {
+          resolve((value as { session: string }).session);
+        });
+      });
+    },
     async pageState() {
       return new Promise<Record<string, unknown>>((resolve) => {
         onMessage?.({ type: "get-page-state" }, {}, (value) => {
@@ -161,6 +191,125 @@ function createHarness() {
     },
   };
 }
+
+function modernMessage(role: "user" | "assistant", id: string, text: string) {
+  const unit = element(id, role === "assistant" ? `Assistant${text}` : text);
+  unit.getAttribute = (name: string) =>
+    name === "data-content-search-unit-key" ? id : null;
+  const marker = element(`${id}-marker`);
+  marker.closest = (selector: string) =>
+    selector === "[data-content-search-unit-key]" ? unit : null;
+  if (role === "assistant") {
+    const content = element(`${id}-content`, text);
+    unit.querySelector = (selector: string) =>
+      selector === "[data-chatgpt-selection-message-id]" ? content : null;
+  }
+  return { unit, marker };
+}
+
+test("project conversation path reports its conversation ID and re-registers on same-ID navigation", async () => {
+  const harness = createHarness();
+  const id = "6ab53993-e114-83ee-9b06-3859506fe3e2";
+  harness.state.pathname = `/g/g-p-6a4e822d22688191a382c7985c756fda-agentic-pr-review/c/${id}`;
+  harness.tickInterval(3000);
+  assert.equal(await harness.sessionId(), id);
+  assert.equal((harness.sentMessages.at(-1) as { session: string }).session, id);
+
+  const count = harness.sentMessages.length;
+  harness.tickInterval(3000);
+  assert.equal(harness.sentMessages.length, count, "unchanged path must not flood the worker");
+
+  harness.state.pathname = `/g/g-p-renamed-project/c/${id}`;
+  harness.tickInterval(3000);
+  assert.equal(harness.sentMessages.length, count + 1);
+  assert.equal((harness.sentMessages.at(-1) as { session: string }).session, id);
+});
+
+test("project conversation does not dispatch before its message history stabilizes", async () => {
+  const harness = createHarness();
+  const id = "6ab53993-e114-83ee-9b06-3859506fe3e2";
+  harness.state.pathname = `/g/g-p-example/c/${id}`;
+  harness.state.readyState = "complete";
+  const hydrating = await harness.pageState();
+  assert.equal(hydrating.session, id);
+  assert.equal(hydrating.reason, "conversation-hydrating");
+
+  harness.state.users = [element("user-1", "existing prompt")];
+  await harness.pageState();
+  harness.state.now += 4_000;
+  const stable = await harness.pageState();
+  assert.equal(stable.ready, true);
+  assert.equal(stable.session, id);
+});
+
+test("new ChatGPT message containers provide stable IDs and reply text", async () => {
+  const harness = createHarness();
+  harness.state.readyState = "complete";
+  const oldUser = modernMessage("user", "user-unit-1", "existing prompt");
+  const oldAssistant = modernMessage("assistant", "assistant-unit-1", "existing reply");
+  harness.state.modernUserBubbles = [oldUser.marker];
+  harness.state.modernAssistantHeadings = [oldAssistant.marker];
+
+  await harness.pageState();
+  harness.state.now += 4_000;
+  const ready = await harness.pageState();
+  assert.equal(ready.ready, true);
+  assert.equal((ready.baseline as any).lastUserId, "user-unit-1");
+  assert.equal((ready.baseline as any).lastAssistantId, "assistant-unit-1");
+
+  const newUser = modernMessage("user", "user-unit-2", "new prompt");
+  const newAssistant = modernMessage("assistant", "assistant-unit-2", "new answer");
+  harness.state.modernUserBubbles.push(newUser.marker);
+  harness.state.modernAssistantHeadings.push(newAssistant.marker);
+  await harness.pageState();
+  harness.state.now += 4_000;
+  const snapshot = await harness.pollReply(ready.baseline as Record<string, unknown>);
+  assert.equal(snapshot.status, "reply-ready");
+  assert.equal(snapshot.reply, "new answer");
+});
+
+test("an empty composer voice button is not mistaken for Send", async () => {
+  const harness = createHarness();
+  harness.state.readyState = "complete";
+  harness.state.users = [element("user-1", "existing prompt")];
+  const voiceButton = element("voice-button");
+  harness.state.unrelatedSendButtons = [element("other-send-button")];
+  (harness.state.input as any).closest = () => ({
+    querySelector(selector: string) {
+      return selector === "button:last-of-type" ? voiceButton : null;
+    },
+    querySelectorAll() { return []; },
+  });
+  const state = await harness.pageState();
+  assert.equal((state.composer as { sendEnabled: boolean }).sendEnabled, false);
+});
+
+test("a background composer draft remains visible to payload checks", async () => {
+  const harness = createHarness();
+  harness.state.readyState = "complete";
+  harness.state.users = [element("user-1", "existing prompt")];
+  const input = harness.state.input as FakeElement;
+  input.textContent = "unsent draft";
+  input.innerText = "";
+  const state = await harness.pageState();
+  assert.equal((state.composer as { clean: boolean }).clean, false);
+  assert.equal(state.composerClean, false);
+});
+
+test("session registration retries after the worker rejects a hello", async () => {
+  const harness = createHarness();
+  harness.state.helloAcknowledged = false;
+  harness.state.pathname = "/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  harness.tickInterval(3000);
+  await Promise.resolve();
+  const count = harness.sentMessages.length;
+
+  harness.state.helloAcknowledged = true;
+  harness.tickInterval(3000);
+  assert.equal(harness.sentMessages.length, count + 1);
+  assert.equal((harness.sentMessages.at(-1) as { session: string }).session,
+    "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+});
 
 test("refreshed conversation is not ready until history and composer stabilize", async () => {
   const harness = createHarness();

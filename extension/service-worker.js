@@ -162,8 +162,12 @@ async function getTabSession(tabId, opts = {}) {
 const tabSessionCache = new Map();
 
 async function rememberTabSession(tabId, session) {
-  tabSessionCache.set(tabId, session);
   const saved = (await getStorage("tab_session_map", {}));
+  const previous = tabSessionCache.get(tabId) ?? saved[tabId];
+  if (previous && previous !== session && dispatchLoops.get(previous)?.tabId === tabId) {
+    stopDispatchLoop(previous);
+  }
+  tabSessionCache.set(tabId, session);
   saved[tabId] = session;
   await setStorage("tab_session_map", saved);
 }
@@ -177,7 +181,7 @@ async function forgetTabSession(tabId) {
   const saved = (await getStorage("tab_session_map", {}));
   delete saved[tabId];
   await setStorage("tab_session_map", saved);
-  if (session) stopDispatchLoop(session);
+  if (session && dispatchLoops.get(session)?.tabId === tabId) stopDispatchLoop(session);
 }
 
 // ── inflight tracking ──
@@ -244,6 +248,7 @@ async function getPageState(tabId) {
   if (
     !state ||
     state.error ||
+    typeof state.session !== "string" ||
     typeof state.generating !== "boolean" ||
     typeof state.ready !== "boolean"
   ) {
@@ -608,11 +613,11 @@ async function startDispatchLoop(session, tabId) {
       // including a late reply, because React may overwrite a new prompt.
       try {
         const state = await getPageState(tabId);
-        if (!state.ready || state.generating) {
+        if (state.session !== session || !state.ready || state.generating) {
           dlog(
             "[relay sw] page not dispatchable",
             session.slice(0, 8),
-            state.reason,
+            state.session !== session ? "session-mismatch" : state.reason,
             state.stableForMs,
           );
           await delay(DISPATCH_LOOP_RETRY_MS);
@@ -673,7 +678,7 @@ async function startDispatchLoop(session, tabId) {
           await delay(DISPATCH_LOOP_RETRY_MS);
           continue;
         }
-        if (!pageState.ready || pageState.generating) {
+        if (pageState.session !== session || !pageState.ready || pageState.generating) {
           await httpJson("POST", `/internal/tasks/${taskId}/defer`, {}).catch(() => {});
           await clearInflight(session);
           await notifyTabCleared(tabId);
@@ -814,7 +819,7 @@ async function restoreDispatchLoops() {
   const tabs = await listChatGPTTabs();
   for (const tab of tabs) {
     if (!tab.id) continue;
-    const session = saved[tab.id] ?? tabSessionCache.get(tab.id);
+    const session = tabSessionCache.get(tab.id) ?? saved[tab.id];
     if (!session) continue;
     if (offlineSessions.has(session)) continue;
     startDispatchLoop(session, tab.id).catch((e) =>
@@ -1519,8 +1524,19 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => { void forgetTabSession(tabId); });
 chrome.tabs.onUpdated.addListener((tabId, info) => {
-  // Clear cached state after URL changes so the content script reports again.
-  if (info.url) void forgetTabSession(tabId);
+  if (!info.url) return;
+  // Project navigation can change the path without changing the conversation.
+  // Keep that dispatch loop; for a different route, query the content script
+  // immediately after clearing the old mapping instead of waiting for an alarm.
+  let routeSession = null;
+  try {
+    const url = new URL(info.url);
+    if (url.hostname === "chatgpt.com") {
+      routeSession = url.pathname.match(/\/c\/([a-f0-9-]+)(?:\/|$)/)?.[1] ?? null;
+    }
+  } catch { /* invalid navigation URL */ }
+  if (routeSession && routeSession === tabSessionCache.get(tabId)) return;
+  void forgetTabSession(tabId).then(() => handleTab(tabId));
 });
 
 chrome.runtime.onInstalled.addListener(() => { void ensureAlarms(); });
@@ -1538,12 +1554,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
  if (type === "session-hello") {
    if (sender.tab?.id && msg.session) {
      rememberTabSession(sender.tab.id, msg.session).then(() => {
-        startDispatchLoop(msg.session, sender.tab.id).catch((e) =>
+        void startDispatchLoop(msg.session, sender.tab.id).catch((e) =>
           console.warn("[relay sw] hello dispatch loop failed", e),
         );
-      });
+        sendResponse({ status: "ok" });
+      }).catch((e) => sendResponse({ error: e.message }));
+   } else {
+     sendResponse({ error: "missing session or tab" });
     }
-    sendResponse({ status: "ok" });
     return true;
   }
 
@@ -1757,17 +1775,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         listAttachmentBlocks(),
       ]);
       const tabs = await listChatGPTTabs();
-      const tabsInfo = [];
-      for (const t of tabs) {
-        if (!t.id) continue;
-        const sid = await getTabSession(t.id);
-        tabsInfo.push({
+      const tabsInfo = await Promise.all(tabs.map(async (t) => {
+        if (!t.id) return null;
+        const freshSid = await getTabSession(t.id, { forceFresh: true });
+        const sid = freshSid ?? tabSessionCache.get(t.id) ?? null;
+        const page = freshSid ? await getPageState(t.id).catch(() => null) : null;
+        return {
           tabId: t.id, url: t.url, title: t.title, session: sid,
+          page: page ? {
+            session: page.session,
+            ready: page.ready,
+            reason: page.reason,
+            userCount: page.baseline?.userCount ?? 0,
+            assistantCount: page.baseline?.assistantCount ?? 0,
+          } : null,
           offline: sid ? offlineSessions.has(sid) : false,
-        });
-      }
+        };
+      }));
       sendResponse({
-        inflight, cfg, lastError, attachmentBlocks, tabs: tabsInfo,
+        inflight, cfg, lastError, attachmentBlocks, tabs: tabsInfo.filter(Boolean),
         baseUrl: cfg.baseUrl || DEFAULT_BASE,
         offlineSessionCount: offlineSessions.size,
         pendingReplyCount: Object.keys(pendingReplies).length,

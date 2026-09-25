@@ -47,15 +47,21 @@ async function refresh() {
       view = `pending=${server.pendingTasks}` +
         (activeId ? ` · active=${activeStatus}:${activeId.slice(0, 8)}` : "");
     }
+    const page = tab.page;
+    const pageView = !tab.session || !page ? "script unavailable" :
+      page.session !== tab.session ? "session mismatch" :
+      page.ready ? `ready (u${page.userCount}/a${page.assistantCount})` :
+      `${page.reason ?? "not ready"} (u${page.userCount}/a${page.assistantCount})`;
     tr.innerHTML = `
       <td class="mono" title="${tab.session ?? ''}">${(tab.session ?? '?').slice(0, 12)}…</td>
+      <td>${pageView}</td>
       <td>${view}</td>
       <td class="mono">${inflight ? inflight.taskId.slice(0, 8) : ""}</td>
     `;
     sessTbody.appendChild(tr);
   }
   if (state.tabs.length === 0) {
-    sessTbody.innerHTML = `<tr><td colspan="3" style="color:#999">no chatgpt.com tabs open</td></tr>`;
+    sessTbody.innerHTML = `<tr><td colspan="4" style="color:#999">no chatgpt.com tabs open</td></tr>`;
   }
 
   const taskTbody = el("tasks").querySelector("tbody");
