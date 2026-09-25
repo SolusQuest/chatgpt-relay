@@ -720,9 +720,13 @@ async function startDispatchLoop(session, tabId) {
         if (runRes?.error) {
           if (
             runRes.errorCode === "attachment_upload_timeout" ||
-            runRes.errorCode === "attachment_upload_failed"
+            runRes.errorCode === "attachment_upload_failed" ||
+            runRes.errorCode === "attachment_cleanup_incomplete"
           ) {
             const errorCode = runRes.errorCode;
+            if (runRes.attachmentCleanupConfirmed !== true) {
+              await setAttachmentBlock(session, `${errorCode}: ${runRes.error}`);
+            }
             await httpJson("POST", `/internal/tasks/${taskId}/complete`, {
               error: errorCode,
             }).catch(() => {});
@@ -737,7 +741,7 @@ async function startDispatchLoop(session, tabId) {
 
             if (runRes.attachmentCleanupConfirmed !== true) {
               console.warn(
-                "[relay sw] attachment cleanup incomplete; later dispatch remains allowed",
+                "[relay sw] attachment cleanup incomplete; later dispatch blocked",
                 taskId,
               );
             }
@@ -1788,6 +1792,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             reason: page.reason,
             userCount: page.baseline?.userCount ?? 0,
             assistantCount: page.baseline?.assistantCount ?? 0,
+            attachmentPresent: page.composer?.attachmentPresent === true,
+            uploading: page.composer?.uploading === true,
+            sendEnabled: page.composer?.sendEnabled === true,
           } : null,
           offline: sid ? offlineSessions.has(sid) : false,
         };

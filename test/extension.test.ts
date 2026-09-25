@@ -114,10 +114,21 @@ test("dispatch waits for hydrated stable page and verified submission", () => {
 });
 
 test("run-task acknowledgement and late reply capture are bounded", () => {
+  const content = fs.readFileSync(path.join(EXT, "content-script.js"), "utf8");
   const worker = fs.readFileSync(path.join(EXT, "service-worker.js"), "utf8");
   const config = fs.readFileSync(path.join(EXT, "lib", "config.js"), "utf8");
   assert.match(worker, /RUN_TASK_ACK_TIMEOUT_MS/);
-  assert.match(config, /RUN_TASK_ACK_TIMEOUT_MS\s*=\s*120_000/);
+  assert.match(config, /RUN_TASK_ACK_TIMEOUT_MS\s*=\s*240_000/);
+  const duration = (source: string, name: string) => {
+    const value = source.match(new RegExp(`${name}\\s*=\\s*([\\d_]+)`))?.[1];
+    assert.ok(value, `missing ${name}`);
+    return Number(value.replaceAll("_", ""));
+  };
+  const ackMs = duration(config, "RUN_TASK_ACK_TIMEOUT_MS");
+  const pageReadyMs = duration(content, "PAGE_READY_TIMEOUT_MS");
+  const uploadMs = duration(content, "ATTACHMENT_UPLOAD_TIMEOUT_MS");
+  const acceptanceMs = duration(content, "SUBMISSION_ACCEPT_TIMEOUT_MS");
+  assert.ok(ackMs > pageReadyMs + uploadMs + acceptanceMs + 55_000);
   assert.match(worker, /lateReplyDeadlineAt/);
   assert.match(worker, /\/capture/);
 });
@@ -168,6 +179,7 @@ test("composer cleanup is best-effort and prompt injection replaces selected tex
   const worker = fs.readFileSync(path.join(EXT, "service-worker.js"), "utf8");
   assert.match(content, /async function resetComposer/);
   assert.match(content, /continuing after incomplete composer reset/);
+  assert.match(content, /if \(reset\.attachmentObserved\)[\s\S]*attachment_cleanup_incomplete/);
   assert.match(content, /range\.selectNodeContents\(inp\)/);
   assert.doesNotMatch(content, /range\.collapse\(false\)/);
   assert.match(content, /type === "reset-composer"/);

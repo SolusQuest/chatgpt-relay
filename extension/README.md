@@ -36,6 +36,8 @@ ChatGPT web interface.
   user/assistant DOM counts. `script unavailable` means the content script did
   not respond; `conversation-hydrating (u0/a0)` means the existing chat's
   message history has not been detected, so dispatch remains safely queued.
+  An attached payload is shown as `attachment · Send enabled` or `uploading ·
+  Send disabled` without displaying its filename or content.
 - Recent tasks: status and duration for the latest eight tasks.
 - Relay URL: defaults to `http://127.0.0.1:8765`.
 - **Poll now**: requests an immediate poll instead of waiting for the next

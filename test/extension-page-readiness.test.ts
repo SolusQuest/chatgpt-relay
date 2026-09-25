@@ -40,7 +40,7 @@ function element(id: string, text = ""): FakeElement {
   };
 }
 
-function createHarness() {
+function createHarness({ advanceTimers = false } = {}) {
   const state = {
     now: 10_000,
     readyState: "loading",
@@ -147,7 +147,15 @@ function createHarness() {
     JSON,
     Promise,
     console: { log() {}, warn() {}, error() {} },
-    setTimeout: () => 0,
+    setTimeout: (callback: () => void, ms: number) => {
+      if (advanceTimers) {
+        queueMicrotask(() => {
+          state.now += ms;
+          callback();
+        });
+      }
+      return 0;
+    },
     setInterval: (callback: () => void, ms: number) => {
       intervals.push({ callback, ms });
       return 0;
@@ -175,6 +183,13 @@ function createHarness() {
     async pageState() {
       return new Promise<Record<string, unknown>>((resolve) => {
         onMessage?.({ type: "get-page-state" }, {}, (value) => {
+          resolve(value as Record<string, unknown>);
+        });
+      });
+    },
+    async resetComposer() {
+      return new Promise<Record<string, unknown>>((resolve) => {
+        onMessage?.({ type: "reset-composer" }, {}, (value) => {
           resolve(value as Record<string, unknown>);
         });
       });
@@ -417,4 +432,78 @@ test("page state reports an attachment payload as not clean", async () => {
   const page = await harness.pageState();
   assert.equal((page.composer as any).attachmentPresent, true);
   assert.equal(page.composerClean, false);
+});
+
+test("new pasted-text attachment stays occupied with an empty editor and enabled Send", async () => {
+  const harness = createHarness();
+  harness.state.readyState = "complete";
+  harness.state.users = [element("user-1", "existing prompt")];
+  const attachment = element("visible-attachment", "Pasted Text");
+  const submit = element("send");
+  const composerRoot = {
+    querySelectorAll(selector: string) {
+      if (selector === '[data-composer-attachments][data-visible-attachments]') {
+        return [attachment];
+      }
+      if (selector === 'button[type="submit"]') return [submit];
+      return [];
+    },
+  };
+  (harness.state.input as any).closest = () => composerRoot;
+
+  await harness.pageState();
+  harness.state.now += 4_000;
+  const page = await harness.pageState();
+  assert.equal((page.composer as any).attachmentPresent, true);
+  assert.equal((page.composer as any).textLength, 0);
+  assert.equal((page.composer as any).sendEnabled, true);
+  assert.equal(page.composerClean, false);
+});
+
+test("new pasted-text attachment can be removed before another submission", async () => {
+  const harness = createHarness({ advanceTimers: true });
+  const attachment = element("visible-attachment", "Pasted Text");
+  const remove = element("remove-attachment");
+  let attached = true;
+  (remove as any).click = () => { attached = false; };
+  const composerRoot = {
+    querySelectorAll(selector: string) {
+      if (selector === '[data-composer-attachments][data-visible-attachments]') {
+        return attached ? [attachment] : [];
+      }
+      if (selector === '[data-composer-attachments] button[aria-label^="\u79fb\u9664 "]') {
+        return attached ? [remove] : [];
+      }
+      return [];
+    },
+  };
+  (harness.state.input as any).closest = () => composerRoot;
+
+  const result = await harness.resetComposer();
+  assert.equal(result.attachmentObserved, true);
+  assert.equal(result.clean, true);
+  assert.equal(attached, false);
+});
+
+test("an attachment that remains after removal is not reported clean", async () => {
+  const harness = createHarness({ advanceTimers: true });
+  const attachment = element("visible-attachment", "Pasted Text");
+  const remove = element("remove-attachment");
+  (remove as any).click = () => {};
+  const composerRoot = {
+    querySelectorAll(selector: string) {
+      if (selector === '[data-composer-attachments][data-visible-attachments]') {
+        return [attachment];
+      }
+      if (selector === '[data-composer-attachments] button[aria-label^="\u79fb\u9664 "]') {
+        return [remove];
+      }
+      return [];
+    },
+  };
+  (harness.state.input as any).closest = () => composerRoot;
+
+  const result = await harness.resetComposer();
+  assert.equal(result.attachmentObserved, true);
+  assert.equal(result.clean, false);
 });

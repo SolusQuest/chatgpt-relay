@@ -29,6 +29,7 @@
       'button[aria-label*="Send"], button[aria-label*="发送"]',
     ],
     attachment: [
+      '[data-composer-attachments][data-visible-attachments]',
       '[data-testid="composer-file-pill"]',
       '[data-testid="file-pill"]',
       '[data-testid="file-thumbnail"]',
@@ -42,6 +43,8 @@
       'button[aria-label*="删除附件"]',
     ],
     attachmentRemoveButton: [
+      '[data-composer-attachments] button[aria-label^="移除 "]',
+      '[data-composer-attachments] button[aria-label^="Remove "]',
       'button[data-testid*="remove-file" i]',
       'button[data-testid*="remove-attachment" i]',
       'button[aria-label*="Remove file" i]',
@@ -926,6 +929,13 @@
           try {
             const reset = await resetComposer();
             if (!reset.clean) {
+              if (reset.attachmentObserved) {
+                throw makeRelayError(
+                  "attachment_cleanup_incomplete",
+                  "Composer attachment could not be cleared before submission",
+                  { attachmentObserved: true },
+                );
+              }
               console.warn("[relay content] continuing after incomplete composer reset");
             }
             const pasteResult = await pasteIntoInput(msg.text);
@@ -985,7 +995,8 @@
               }).catch(() => {});
             }
             const attachmentFailure = e.code === "attachment_upload_timeout" ||
-              e.code === "attachment_upload_failed";
+              e.code === "attachment_upload_failed" ||
+              e.code === "attachment_cleanup_incomplete";
             const attachmentCleanupConfirmed = attachmentFailure
               ? await cleanupAfterAttachmentFailure(e).catch(() => false)
               : null;

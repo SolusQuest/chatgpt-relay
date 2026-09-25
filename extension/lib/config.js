@@ -34,5 +34,7 @@ export const TASK_OBSERVATION_CHANGE_INTERVAL_MS = 10_000;
 export const TASK_OBSERVATION_HEARTBEAT_INTERVAL_MS = 30_000;
 export const ATTACHMENT_BLOCK_CLEAN_STABLE_MS = 5_000;
 export const POLL_REPLY_SENDMSG_TIMEOUT_MS = 6000;
-export const RUN_TASK_ACK_TIMEOUT_MS = 120_000;
+// Covers the content script's bounded page/composer wait plus a large-paste
+// upload, Send readiness, and submission acceptance.
+export const RUN_TASK_ACK_TIMEOUT_MS = 240_000;
 export const PAGE_STATE_SENDMSG_TIMEOUT_MS = 5000;

@@ -52,9 +52,12 @@ async function refresh() {
       page.session !== tab.session ? "session mismatch" :
       page.ready ? `ready (u${page.userCount}/a${page.assistantCount})` :
       `${page.reason ?? "not ready"} (u${page.userCount}/a${page.assistantCount})`;
+    const attachmentView = page?.session === tab.session && page.attachmentPresent
+      ? ` · ${page.uploading ? "uploading" : "attachment"} · Send ${page.sendEnabled ? "enabled" : "disabled"}`
+      : "";
     tr.innerHTML = `
       <td class="mono" title="${tab.session ?? ''}">${(tab.session ?? '?').slice(0, 12)}…</td>
-      <td>${pageView}</td>
+      <td>${pageView}${attachmentView}</td>
       <td>${view}</td>
       <td class="mono">${inflight ? inflight.taskId.slice(0, 8) : ""}</td>
     `;
