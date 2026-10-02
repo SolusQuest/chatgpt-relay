@@ -414,10 +414,11 @@ async function reportSessionSnapshots() {
       const state = await getPageState(tab.id).catch(() => null);
       if (state && state.session !== session) return;
       await httpJson("POST", "/internal/session-snapshots", {
-        owner, tabId: tab.id, session, protocol: 1,
+        owner, tabId: tab.id, session, protocol: state?.controlProtocol ?? null,
         version: chrome.runtime.getManifest?.().version ?? null,
         ready: state?.ready ?? null, generating: state?.generating ?? null,
         composerClean: state?.composerClean ?? null, reason: state?.reason ?? "page_unreachable",
+        capabilities: state?.capabilities,
       });
     }));
   } catch (err) { dlog("session snapshots", err); }

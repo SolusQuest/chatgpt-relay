@@ -1146,7 +1146,10 @@
         } else if (msg.type === "get-inflight") {
           sendResponse({ inflight: readInflight() });
         } else if (msg.type === "get-page-state") {
-          sendResponse({ ...getPageReadiness(), documentId });
+          sendResponse({ ...getPageReadiness(), documentId, controlProtocol: 1,
+            capabilities: { composer: !!findInput(),
+              userMessages: getUserMessages().length > 0 ? true : null,
+              assistantMessages: getAssistantMessages().length > 0 ? true : null } });
         } else if (msg.type === "refresh-page") {
           const state = getPageReadiness();
           if (msg.expectedSession !== state.session || msg.documentId !== documentId) throw new Error("session_identity_changed");

@@ -26,5 +26,11 @@ test("diagnostics distinguish missing, ambiguous and stale pages without leaking
     diagnostics.report({ ...report, tabId: 2, session: "other" });
     assert.equal(diagnostics.inspect("diag")!.pageStatus, "observed");
     assert.throws(() => diagnostics.report({ ...report, tabId: "1" }));
+    assert.equal(diagnostics.doctor("diag").checks[0]!.code, "composer_unavailable");
+    diagnostics.report({ ...report, capabilities: { composer: true }, protocol: null });
+    assert.equal(diagnostics.doctor("diag").checks[0]!.code, "reload_extension_and_page");
+    diagnostics.report({ ...report, capabilities: { composer: true } });
+    assert.equal(diagnostics.doctor("diag").status, "ok");
+    assert.equal(diagnostics.doctor("diag").checks[0]!.capabilities.assistantMessages, null);
   } finally { db.close(); }
 });

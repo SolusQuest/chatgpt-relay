@@ -448,6 +448,13 @@ async function main(): Promise<number> {
         return await cmdStart(rest);
       case "health":
         return await cmdHealth();
+      case "doctor": {
+        const i = rest.findIndex(x => x === "--session" || x === "--session-ref");
+        if (i >= 0 && !rest[i + 1]) throw new Error("missing session");
+        const result = await http.get<{ status: string }>(`/v1/doctor${i < 0 ? "" : `?session=${encodeURIComponent(rest[i + 1]!)}`}`, { baseUrl: BASE });
+        console.log(JSON.stringify(result));
+        return result.status === "ok" ? 0 : 2;
+      }
       case "sessions":
         return await cmdSessions(rest);
       case "projects":

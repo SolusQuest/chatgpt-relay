@@ -1,6 +1,9 @@
 import { Router } from "express";
 import type { Db } from "./db.js";
 import type { TaskStore } from "./task-store.js";
+import { createRequire } from "node:module";
+
+const serverVersion: string = createRequire(import.meta.url)("../package.json").version;
 
 export const SNAPSHOT_TTL_MS = 30_000;
 export class SessionDiagnostics {
@@ -18,6 +21,8 @@ export class SessionDiagnostics {
     const payload = { owner: body.owner, tabId: body.tabId,
       version: typeof body.version === "string" ? body.version.slice(0, 80) : null,
       protocol: body.protocol === 1 ? 1 : null,
+      capabilities: { composer: bool(body.capabilities?.composer),
+        userMessages: bool(body.capabilities?.userMessages), assistantMessages: bool(body.capabilities?.assistantMessages) },
       ready: bool(body.ready), generating: bool(body.generating), composerClean: bool(body.composerClean),
       reason: typeof body.reason === "string" ? body.reason.slice(0, 100) : null };
     this.db.prepare(`INSERT INTO session_snapshots VALUES (?, ?, ?, ?, ?)
@@ -40,10 +45,27 @@ export class SessionDiagnostics {
       pageStatus: live.length === 1 ? "observed" : live.length > 1 ? "ambiguous" : "unknown",
       page: live.length === 1 ? live[0] : null, pages };
   }
+  doctor(id?: string) {
+    const sessions = id ? [this.inspect(id)].filter(s => s !== null) :
+      this.store.listSessions().map(s => this.inspect(s.id)).filter(s => s !== null);
+    const checks = sessions.map(s => ({ session: s.session, pageStatus: s.pageStatus,
+      extensionVersion: s.page?.version ?? null, protocolCompatible: s.page ? s.page.protocol === 1 : null,
+      capabilities: s.page?.capabilities ?? null,
+      code: s.pageStatus !== "observed" ? `page_${s.pageStatus}` : s.page.protocol !== 1 ? "reload_extension_and_page" :
+        s.page.capabilities?.composer !== true ? "composer_unavailable" : "ok" }));
+    return { server: { reachable: true, version: serverVersion, controlProtocol: 1 },
+      status: checks.length > 0 && checks.every(c => c.code === "ok") ? "ok" : "attention",
+      checks, note: "Null capabilities are unobserved, not proof of a broken selector." };
+  }
 }
 
 export function diagnosticsRouter(diagnostics: SessionDiagnostics) {
   const router = Router();
+  router.get("/v1/doctor", (req, res) => {
+    const id = typeof req.query.session === "string" ? req.query.session : undefined;
+    if (id && !diagnostics.inspect(id)) return res.status(404).json({ error: "session_not_found" });
+    res.json(diagnostics.doctor(id));
+  });
   router.post("/internal/session-snapshots", (req, res) => {
     try { diagnostics.report(req.body); res.json({ status: "ok" }); }
     catch { res.status(400).json({ error: "invalid_snapshot" }); }
