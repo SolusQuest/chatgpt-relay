@@ -337,8 +337,12 @@ async function markInflight(session, taskId, details = {}) {
   };
   });
 }
-async function clearInflight(session) {
-  return mutateStorageMap(STORAGE_KEYS.INFLIGHT, inflight => { delete inflight[session]; });
+async function clearInflight(session, expectedTaskId) {
+  return mutateStorageMap(STORAGE_KEYS.INFLIGHT, inflight => {
+    if (!expectedTaskId || inflight[session]?.taskId !== expectedTaskId) return false;
+    delete inflight[session];
+    return true;
+  });
 }
 async function getInflight(session) {
   const inflight = (await getStorage(STORAGE_KEYS.INFLIGHT, {}));
@@ -350,13 +354,13 @@ const offlineSessions = new Set();
 
 // Tell the content script to clear sessionStorage in-flight state and reset its
 // banner after completion, definitive failure, or late-reply-window expiry.
-async function notifyTabCleared(tabId) {
-  if (!tabId) return;
+async function notifyTabCleared(tabId, session, taskId) {
+  if (!tabId || !session || !taskId) return;
   // The clear-inflight handler also resets the banner to "Relay: <session>...".
   try {
     await sendTabMessage(
       tabId,
-      { type: "clear-inflight" },
+      { type: "clear-inflight", expectedSession: session, taskId },
       PAGE_STATE_SENDMSG_TIMEOUT_MS,
       "clear-inflight",
     );
@@ -812,15 +816,13 @@ async function startDispatchLoop(session, tabId) {
           pageState = await getPageState(tabId);
         } catch (e) {
           await httpJson("POST", `/internal/tasks/${taskId}/defer`, {}).catch(() => {});
-          await clearInflight(session);
-          await notifyTabCleared(tabId);
+          await clearRecoveredTask(taskId, session, tabId);
           await delay(DISPATCH_LOOP_RETRY_MS);
           continue;
         }
         if (pageState.session !== session || !pageState.ready || pageState.generating) {
           await httpJson("POST", `/internal/tasks/${taskId}/defer`, {}).catch(() => {});
-          await clearInflight(session);
-          await notifyTabCleared(tabId);
+          await clearRecoveredTask(taskId, session, tabId);
           await delay(DISPATCH_LOOP_RETRY_MS);
           continue;
         }
@@ -873,8 +875,7 @@ async function startDispatchLoop(session, tabId) {
             await httpJson("POST", `/internal/tasks/${taskId}/complete`, {
               error: errorCode,
             }).catch(() => {});
-            await clearInflight(session);
-            await notifyTabCleared(tabId);
+            await clearRecoveredTask(taskId, session, tabId);
             await setStorage(STORAGE_KEYS.LAST_ERROR, {
               taskId,
               session,
@@ -892,8 +893,7 @@ async function startDispatchLoop(session, tabId) {
           }
           if (runRes.submissionState === "not-submitted" && /waitForPageReady/.test(runRes.error)) {
             await httpJson("POST", `/internal/tasks/${taskId}/defer`, {}).catch(() => {});
-            await clearInflight(session);
-            await notifyTabCleared(tabId);
+            await clearRecoveredTask(taskId, session, tabId);
             await delay(DISPATCH_LOOP_RETRY_MS);
             continue;
           }
@@ -918,7 +918,7 @@ async function startDispatchLoop(session, tabId) {
           // Compatibility with older content-script versions.
           if (typeof runRes?.reply === "string") {
             await httpJson("POST", `/internal/tasks/${taskId}/complete`, { text: runRes.reply });
-            await clearInflight(session);
+            await clearRecoveredTask(taskId, session, tabId);
             console.log("[relay sw] task completed inline", taskId.slice(0, 8), "completionAt", Date.now());
             continue;
           }
@@ -950,8 +950,7 @@ async function startDispatchLoop(session, tabId) {
       } catch (e) {
         console.warn("[relay sw] task failed", taskId.slice(0, 8), e.message);
         await httpJson("POST", `/internal/tasks/${taskId}/complete`, { error: e.message }).catch(() => {});
-        await clearInflight(session);
-        await notifyTabCleared(tabId);
+        await clearRecoveredTask(taskId, session, tabId);
       } finally {
         activeDispatchTasks.delete(taskId);
       }
@@ -1221,9 +1220,7 @@ async function pollOnePending(taskId, rec) {
         await setPendingReply(taskId, rec);
         return;
       }
-      await deletePendingReply(taskId);
-      await clearInflight(rec.session);
-      await notifyTabCleared(rec.tabId);
+      await clearRecoveredTask(taskId, rec.session, rec.tabId);
       return;
     }
     await setPendingReply(taskId, rec);
@@ -1377,9 +1374,7 @@ async function failPending(taskId, rec, reason, options = {}) {
     await setPendingReply(taskId, rec);
     return false;
   }
-  await deletePendingReply(taskId);
-  await clearInflight(rec.session);
-  await notifyTabCleared(rec.tabId);
+  await clearRecoveredTask(taskId, rec.session, rec.tabId);
   await setStorage(STORAGE_KEYS.LAST_ERROR, {
     taskId, session: rec.session, error: reason, at: Date.now(),
   });
@@ -1392,9 +1387,7 @@ async function failUnobservedPending(taskId, rec) {
 }
 
 async function abandonPending(taskId, rec, reason) {
-  await deletePendingReply(taskId);
-  await clearInflight(rec.session);
-  await notifyTabCleared(rec.tabId);
+  await clearRecoveredTask(taskId, rec.session, rec.tabId);
   await setStorage(STORAGE_KEYS.LAST_ERROR, {
     taskId, session: rec.session, error: reason, at: Date.now(),
   });
@@ -1406,9 +1399,7 @@ async function cancelPending(taskId, rec, reason) {
   } catch (e) {
     console.warn("[relay sw] cancelPending POST failed", taskId, e.message);
   }
-  await deletePendingReply(taskId);
-  await clearInflight(rec.session);
-  await notifyTabCleared(rec.tabId);
+  await clearRecoveredTask(taskId, rec.session, rec.tabId);
   await setStorage(STORAGE_KEYS.LAST_ERROR, {
     taskId, session: rec.session, error: reason, at: Date.now(),
   });
@@ -1557,9 +1548,7 @@ async function reconcileInflight() {
             if (sid === session) { tabId = tid; break; }
           }
         }
-       await clearInflight(session);
-       await deletePendingReply(entry.taskId);
-       await notifyTabCleared(tabId);
+       await clearRecoveredTask(entry.taskId, session, tabId);
       }
     } catch (e) {
       // Ignore relay unavailability and retry during the next cycle.
@@ -1568,9 +1557,10 @@ async function reconcileInflight() {
 }
 
 async function clearRecoveredTask(taskId, session, tabId) {
+  await clearInflight(session, taskId);
+  await notifyTabCleared(tabId, session, taskId);
+  // Removing pending state wakes the successor. Finish all scoped cleanup first.
   await deletePendingReply(taskId);
-  await clearInflight(session);
-  await notifyTabCleared(tabId);
 }
 
 async function recoverInflightForTab(msg, tabId) {
@@ -1928,7 +1918,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         // Find the session and clear its in-flight state.
         if (sender.tab?.id) {
           const sid = await getTabSession(sender.tab.id);
-          if (sid) await clearInflight(sid);
+          if (sid) await clearRecoveredTask(msg.taskId, sid, sender.tab.id);
         }
         await deletePendingReply(msg.taskId);
         sendResponse({ recovered: r?.recovered ?? false, status: r?.status });

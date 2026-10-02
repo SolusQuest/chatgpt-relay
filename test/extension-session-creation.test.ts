@@ -90,7 +90,7 @@ test("concurrent tab and inflight updates retain all session identities and send
   assert.equal(w.storage.tab_session_map[12], "session-B");
   assert.equal(w.storage.inflight["session-A"].deliveryPhase, "send-fenced");
   assert.equal(w.storage.inflight["session-B"].taskId, "task-B");
-  await vm.runInContext(`Promise.all([clearInflight('session-A'), markInflight('session-B', 'task-B', {deliveryPhase:'accepted'})])`, w.context);
+  await vm.runInContext(`Promise.all([clearInflight('session-A', 'task-A'), markInflight('session-B', 'task-B', {deliveryPhase:'accepted'})])`, w.context);
   assert.equal(w.storage.inflight["session-A"], undefined);
   assert.equal(w.storage.inflight["session-B"].deliveryPhase, "accepted");
 });
@@ -166,3 +166,54 @@ for (const stopLoop of [false, true]) {
     assert.equal(w.storage.inflight.session, undefined);
   });
 }
+test('review: delayed terminal reconciliation must not erase a successor task', async () => {
+  const w = await worker('opening',true);
+  w.context.events = [];
+  await vm.runInContext(`
+    tabSessionCache.set(7,'session');
+    let releaseTaskRead;
+    const taskRead = new Promise(resolve => {releaseTaskRead=resolve;});
+    httpJson = async (method,path) => {events.push(path); return taskRead;};
+    sendTabMessage = async (_id,msg) => {events.push(msg); return {};};
+  `,w.context);
+  await vm.runInContext("markInflight('session','old-task',{tabId:7,deliveryPhase:'accepted'})",w.context);
+  vm.runInContext("const reconciliation = reconcileInflight();",w.context);
+  for(let i=0; i<20 && !w.context.events.includes('/v1/tasks/old-task');i++) await new Promise<void>(r=>setImmediate(r));
+  assert.ok(w.context.events.includes('/v1/tasks/old-task'));
+  await vm.runInContext("markInflight('session','new-task',{tabId:7,deliveryPhase:'send-fenced'})",w.context);
+  await vm.runInContext("releaseTaskRead({taskId:'old-task',status:'done'}); reconciliation;",w.context);
+  assert.equal(w.storage.inflight.session?.taskId,'new-task');
+  const cleared = w.context.events.find((e:any)=>e.type==='clear-inflight');
+  assert.equal(cleared.taskId,'old-task');
+  assert.equal(cleared.expectedSession,'session');
+});
+
+test('task cleanup finishes on the page before releasing the next dispatch', async () => {
+  const w=await worker('opening',true);
+  await vm.runInContext(`
+    let releasePage;
+    const pageGate=new Promise(resolve=>{releasePage=resolve;});
+    sendTabMessage=async()=>pageGate;
+    let woken=false;
+  `,w.context);
+  await vm.runInContext("markInflight('session','old-task',{tabId:7})",w.context);
+  await vm.runInContext("setPendingReply('old-task',{session:'session',tabId:7})",w.context);
+  vm.runInContext("pendingCompletion.get('old-task').promise.then(()=>{woken=true;}); const clearing=clearRecoveredTask('old-task','session',7);",w.context);
+  for(let i=0;i<10;i++) await new Promise<void>(r=>setImmediate(r));
+  assert.equal(vm.runInContext('woken',w.context),false);
+  assert.ok(w.storage.pending_replies['old-task']);
+  await vm.runInContext('releasePage({}); clearing;',w.context);
+  assert.equal(vm.runInContext('woken',w.context),true);
+  assert.equal(w.storage.pending_replies['old-task'],undefined);
+});
+
+test('conditional inflight cleanup preserves another task under concurrent storage writes',async()=>{
+  const w=await worker();
+  await vm.runInContext(`Promise.all([
+    markInflight('session','new-task',{deliveryPhase:'send-fenced'}),
+    clearInflight('session','old-task')
+  ])`,w.context);
+  assert.equal(w.storage.inflight.session.taskId,'new-task');
+  assert.equal(await vm.runInContext("clearInflight('session')",w.context),false);
+  assert.equal(await vm.runInContext("clearInflight('session','new-task')",w.context),true);
+});

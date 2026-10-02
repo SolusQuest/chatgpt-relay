@@ -690,6 +690,13 @@ for (const scenario of ["unchanged", "attachment-unchanged", "wrong-session", "n
     if (scenario === "unchanged" || scenario === "attachment-unchanged") {
       assert.deepEqual(clicks, ["A"]);
       assert.equal(result.status, "submitted");
+      for (const stale of [{}, {taskId:'old-task',expectedSession:await h.sessionId()},
+          {taskId:'task-A',expectedSession:'old-session'}]) {
+        assert.equal((await h.message({type:'clear-inflight',...stale})).cleared,false);
+        assert.equal((await h.message({type:'get-inflight'}) as any).inflight.taskId,'task-A');
+      }
+      assert.equal((await h.message({type:'clear-inflight',taskId:'task-A',expectedSession:await h.sessionId()})).cleared,true);
+      assert.equal((await h.message({type:'get-inflight'})).inflight,null);
     } else {
       assert.deepEqual(clicks, []);
       assert.match(String(result.errorCode), /^submission_(target|payload)_changed$/);

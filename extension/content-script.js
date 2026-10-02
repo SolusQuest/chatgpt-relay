@@ -580,8 +580,11 @@
   function writeInflight(rec) {
     sessionStorage.setItem(INFLIGHT_KEY, JSON.stringify(rec));
   }
-  function clearInflight() {
+  function clearInflight(taskId, session) {
+    const rec = readInflight();
+    if (!taskId || !session || rec?.taskId !== taskId || rec?.session !== session) return false;
     sessionStorage.removeItem(INFLIGHT_KEY);
+    return true;
   }
 
   // A Stop click records intent; later DOM sampling confirms actual cancellation.
@@ -914,7 +917,7 @@
       });
       if (result?.error) throw new Error(result.error);
       if (result?.action === "clear" || result?.action === "deferred") {
-        clearInflight();
+        clearInflight(rec.taskId, rec.session);
         return;
       }
       if (result?.action === "reattached") {
@@ -1072,9 +1075,11 @@
           return;
         }
         if (msg.type === "clear-inflight") {
-          clearInflight();
-          try { updateBanner(`Relay: ${getSessionId().slice(0, 8)}…`, "#10a37f"); } catch {}
-          sendResponse({ status: "ok" });
+          const cleared = clearInflight(msg.taskId, msg.expectedSession);
+          if (cleared) {
+            try { updateBanner(`Relay: ${getSessionId().slice(0, 8)}…`, "#10a37f"); } catch {}
+          }
+          sendResponse({ status: "ok", cleared });
         } else if (msg.type === "reset-composer") {
           const rec = readInflight();
           if (msg.expectedSession && (msg.expectedSession !== getSessionId() ||
