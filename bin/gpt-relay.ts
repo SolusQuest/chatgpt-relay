@@ -14,7 +14,7 @@ import {
   resumePending,
   review,
 } from "../client/agent-client.js";
-import { http } from "../client/http.js";
+import { http, HttpError } from "../client/http.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
@@ -485,7 +485,14 @@ async function main(): Promise<number> {
         return 64;
     }
   } catch (err) {
-    console.error(`error: ${(err as Error).message}`);
+    if (rest.includes("--json") || ["doctor", "operations"].includes(cmd ?? "") ||
+        cmd === "sessions" && ["inspect", "suspend", "continue", "refresh"].includes(rest[0] ?? "") ||
+        cmd === "tasks" && ["trace", "recover", "stop"].includes(rest[0] ?? "")) {
+      console.error(JSON.stringify({ error: err instanceof HttpError ? err.code : "client_error",
+        errorInfo: err instanceof HttpError && err.errorInfo ? err.errorInfo : {
+          code: "client_error", message: (err as Error).message, deliveryState: "unknown",
+          safeToResubmit: null, nextAction: "inspect_operation_or_existing_task_before_retry" } }));
+    } else console.error(`error: ${(err as Error).message}`);
     return 1;
   }
 }

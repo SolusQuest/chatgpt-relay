@@ -3,6 +3,7 @@ import { Router } from "express";
 import type { Db } from "./db.js";
 import type { TaskStore } from "./task-store.js";
 import type { SessionDiagnostics } from "./session-diagnostics.js";
+import { errorInfo } from "./error-info.js";
 
 export function installControls(db: Db) {
   db.exec(`CREATE TABLE IF NOT EXISTS session_controls (
@@ -29,6 +30,7 @@ export class SessionControls {
   view(row: ControlRow) {
     return { operationId: row.id, session: row.session, kind: row.kind, taskId: row.task_id,
       state: row.state, createdAt: row.created_at, expiresAt: row.expires_at, error: row.error,
+      errorInfo: row.error ? errorInfo(row.error, row.task_id ? this.store.getTask(row.task_id) ?? undefined : undefined) : null,
       result: row.result ? JSON.parse(row.result) : null };
   }
   create(body: any) {

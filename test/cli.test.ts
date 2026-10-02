@@ -243,3 +243,10 @@ test("sessions inspect resolves a session and reports unknown page state", async
   assert.equal(JSON.parse(r.stdout).pageStatus, "unknown");
   assert.equal(JSON.parse(r.stdout).activeTaskId, null);
 });
+
+test("agent commands return structured errors for missing sessions", async () => {
+  const r = await runCli(["sessions", "inspect", "--session", "nonexistent-session"]);
+  assert.equal(r.code, 1);
+  assert.equal(JSON.parse(r.stderr).errorInfo.code, "session_not_found");
+  assert.equal(JSON.parse(r.stderr).errorInfo.safeToResubmit, null);
+});

@@ -7,6 +7,7 @@ import { TaskStoreError, TERMINAL_STATUSES } from "../task-store.js";
 import { longPollTask } from "../long-poll.js";
 import { asPositiveInt, isValidSessionId } from "../util.js";
 import { tryFixEncoding } from "../encoding-fix.js";
+import { errorInfo } from "../error-info.js";
 
 const VALID_STATUSES: readonly TaskStatus[] = [
   "queued",
@@ -39,6 +40,7 @@ export interface TaskView {
   reply: string | null;
   lateReply: string | null;
   error: string | null;
+  errorInfo: ReturnType<typeof errorInfo> | null;
   timeoutMs: number;
   submittedAt: number;
   dispatchedAt: number | null;
@@ -86,6 +88,7 @@ export function toTaskView(store: TaskStore, t: Task, includeText = false): Task
     reply: t.reply,
     lateReply: t.lateReply,
     error: t.error,
+    errorInfo: t.error ? errorInfo(t.error, t) : null,
     timeoutMs: t.timeoutMs,
     submittedAt: t.submittedAt,
     dispatchedAt: t.dispatchedAt,

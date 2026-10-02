@@ -28,11 +28,12 @@ async function request<T>(
     const text = await res.text();
     const json = text ? (JSON.parse(text) as unknown) : null;
     if (!res.ok) {
-      const err = json as { error?: string; message?: string } | null;
+      const err = json as { error?: string; message?: string; errorInfo?: unknown } | null;
       throw new HttpError(
         err?.message ?? err?.error ?? `HTTP ${res.status}`,
         res.status,
         err?.error ?? null,
+        err?.errorInfo ?? null,
       );
     }
     return json as T;
@@ -46,6 +47,7 @@ export class HttpError extends Error {
     message: string,
     public readonly status: number,
     public readonly code: string | null,
+    public readonly errorInfo: unknown = null,
   ) {
     super(message);
   }

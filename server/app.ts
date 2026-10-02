@@ -12,6 +12,7 @@ import { RegistryError } from "./session-registry.js";
 import { createProjectDiscoveryRouter } from "./project-discovery.js";
 import { SessionDiagnostics, diagnosticsRouter } from "./session-diagnostics.js";
 import { SessionControls, controlsRouter } from "./session-controls.js";
+import { errorInfo } from "./error-info.js";
 
 export interface AppHandle {
   app: express.Express;
@@ -24,6 +25,15 @@ export function createApp(config: Config): AppHandle {
   const store = new TaskStore(db, config);
 
   const app = express();
+  app.use((_req, res, next) => {
+    const json = res.json.bind(res);
+    res.json = ((body: any) => {
+      if (res.statusCode >= 400 && typeof body?.error === "string")
+        body = { ...body, errorInfo: errorInfo(body.error) };
+      return json(body);
+    }) as typeof res.json;
+    next();
+  });
   app.use(express.json({ limit: "2mb" }));
   const diagnostics = new SessionDiagnostics(db, store);
   app.use(diagnosticsRouter(diagnostics));
