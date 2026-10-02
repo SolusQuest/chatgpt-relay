@@ -352,12 +352,126 @@ test('review: delayed terminal reconciliation must not erase a successor task', 
   vm.runInContext("const reconciliation = reconcileInflight();",w.context);
   for(let i=0; i<20 && !w.context.events.includes('/v1/tasks/old-task');i++) await new Promise<void>(r=>setImmediate(r));
   assert.ok(w.context.events.includes('/v1/tasks/old-task'));
-  await vm.runInContext("markInflight('session','new-task',{tabId:7,deliveryPhase:'send-fenced'})",w.context);
+  await vm.runInContext("markInflight('session','new-task',{tabId:7,deliveryPhase:'preparing'})",w.context);
   await vm.runInContext("releaseTaskRead({taskId:'old-task',status:'done'}); reconciliation;",w.context);
   assert.equal(w.storage.inflight.session?.taskId,'new-task');
   const cleared = w.context.events.find((e:any)=>e.type==='clear-inflight');
   assert.equal(cleared.taskId,'old-task');
   assert.equal(cleared.expectedSession,'session');
+});
+
+for (const source of ['page', 'reconcile', 'control', 'send-fence']) {
+  for (const replacement of ['cleared', 'successor', 'same-task-reclaimed']) {
+    test(`late ${source} cannot resurrect ownership after ${replacement}`, async () => {
+      const w = await worker('opening', true);
+      w.context.recoverySource = source;
+      w.context.replacement = replacement;
+      const result = await vm.runInContext(`(async () => {
+        tabSessionCache.set(7,'session');
+        getTabSession=async()=> 'session';
+        startDispatchLoop=async()=>{}; pollPendingReplies=async()=>{}; sendTabMessage=async()=>({});
+        const old={taskId:'old',session:'session',status:'in_progress',sendAttemptedAt:1,submitAcknowledgedAt:2};
+        const record={tabId:7,baseline:{lastUserId:'before-old'},deliveryPhase:'accepted',submittedUserMessageId:'old-user'};
+        await markInflight('session','old',record);
+        await setPendingReply('old',{...record,session:'session',taskId:'old'});
+        let release, started;
+        const read=new Promise(resolve=>release=resolve), reading=new Promise(resolve=>started=resolve);
+        let reads=0;
+        httpJson=async(method,url)=>{
+          if (method==='GET' && url==='/v1/tasks/old') {
+            reads++;
+            if (recoverySource!=='send-fence' || reads===2) {started(); return read;}
+            return old;
+          }
+          return {};
+        };
+        const operation = recoverySource==='page'?recoverInflightForTab({...record,taskId:'old'},7):
+          recoverySource==='reconcile'?reconcileInflight():
+          recoverySource==='control'?executeSessionControl({kind:'recover',session:'session',taskId:'old',tabId:7}):
+          null; // The message bridge is started by the test host below.
+        if (recoverySource==='send-fence') return {started,reading,release,old};
+        const outcome=operation.catch(e=>({error:e.message}));
+        await reading;
+        await clearRecoveredTask('old','session',7);
+        if (replacement!=='cleared') {
+          const id=replacement==='successor'?'successor':'old';
+          await markInflight('session',id,{tabId:7,deliveryPhase:'preparing'});
+          await markInflight('session',id,{deliveryPhase:'send-attempted',sendAttemptedAt:123,submittedUserMessageId:'new-user'});
+        }
+        const before=await getInflight('session');
+        release(old);
+        return {before,after:await outcome,final:await getInflight('session'),pending:await listPendingReplies()};
+      })()`, w.context);
+      let checked = result;
+      if (source === 'send-fence') {
+        const operation = w.message({type:'send-attempted',taskId:'old',baseline:{lastUserId:'before-old'}});
+        await result.reading;
+        await vm.runInContext(`(async()=>{
+          await clearRecoveredTask('old','session',7);
+          if(replacement!=='cleared') {
+            const id=replacement==='successor'?'successor':'old';
+            await markInflight('session',id,{tabId:7,deliveryPhase:'preparing'});
+            await markInflight('session',id,{deliveryPhase:'send-attempted',sendAttemptedAt:123,submittedUserMessageId:'new-user'});
+          }
+        })()`,w.context);
+        const before = await vm.runInContext("getInflight('session')", w.context);
+        result.release(result.old);
+        checked = {before, after:await operation, final:await vm.runInContext("getInflight('session')",w.context),
+          pending:await vm.runInContext('listPendingReplies()',w.context)};
+      }
+      assert.deepEqual(checked.final, checked.before);
+      assert.equal(Object.keys(checked.pending).length, 0);
+      assert.notEqual(checked.after?.action, 'reattached');
+      assert.notEqual(checked.after?.action, 'observation_attached');
+      assert.notEqual(checked.after?.status, 'fenced');
+      if (replacement !== 'cleared') assert.equal(checked.final.sendAttemptedAt,123);
+    });
+  }
+}
+
+test('recovery commits both records atomically, preserves evidence, and ignores unrelated sessions', async () => {
+  const w = await worker();
+  const result = await vm.runInContext(`(async()=>{
+    const task={taskId:'task',session:'session',status:'in_progress',sendAttemptedAt:1};
+    await markInflight('session','task',{deliveryPhase:'accepted',sendAttemptedAt:123,submittedUserMessageId:'sent-user'});
+    await setPendingReply('task',{session:'session',tabId:7,baseline:{lastUserId:'baseline'},
+      deliveryPhase:'accepted',submittedUserMessageId:'sent-user',stopRequestedAt:50});
+    const epochs=await captureTaskEpochs();
+    await markInflight('other-session','other-task',{deliveryPhase:'preparing'});
+    const writes=[]; const originalSet=chrome.storage.local.set;
+    chrome.storage.local.set=async values=>{writes.push(Object.keys(values)); return originalSet(values);};
+    const attached=await attachPendingFromTask(task,'session',7,{deliveryPhase:'send-attempted',baseline:{}},epochs);
+    return {attached,writes,inflight:await getInflight('session'),pending:await getPendingReply('task')};
+  })()`,w.context);
+  assert.equal(result.attached,true);
+  assert.equal(result.writes.length,1);
+  assert.deepEqual(Array.from(result.writes[0]).sort(),['inflight','pending_replies']);
+  assert.equal(result.inflight.sendAttemptedAt,123);
+  assert.equal(result.inflight.deliveryPhase,'accepted');
+  assert.equal(result.inflight.submittedUserMessageId,'sent-user');
+  assert.equal(result.pending.stopRequestedAt,50);
+  assert.equal(result.pending.baseline.lastUserId,'baseline');
+});
+
+test('late sampler writes cannot restore a retired task or displace another owner',async()=>{
+  const w=await worker();
+  const result=await vm.runInContext(`(async()=>{
+    sendTabMessage=async()=>({});
+    await markInflight('session','old',{deliveryPhase:'accepted'});
+    const rec={taskId:'old',session:'session',tabId:7};
+    await setPendingReply('old',rec);
+    await clearRecoveredTask('old','session',7);
+    const retired=await setPendingReply('old',rec);
+    await markInflight('session','new',{deliveryPhase:'preparing'});
+    const displaced=await setPendingReply('unknown',rec);
+    const marked=await markInflight('session','old',{deliveryPhase:'send-attempted'});
+    return {retired,displaced,marked,pending:await listPendingReplies(),inflight:await getInflight('session')};
+  })()`,w.context);
+  assert.equal(result.retired,false);
+  assert.equal(result.displaced,false);
+  assert.equal(result.marked,false);
+  assert.equal(Object.keys(result.pending).length,0);
+  assert.equal(result.inflight.taskId,'new');
 });
 
 test('task cleanup finishes on the page before releasing the next dispatch', async () => {

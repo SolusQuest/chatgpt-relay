@@ -53,13 +53,31 @@ async function setStorage(key, value) {
   await chrome.storage.local.set({ [key]: value });
 }
 const storageMutations = new Map();
+// All writes to task ownership and pending observations share one queue. Epochs
+// fence asynchronous readers in this worker; no old reader survives a restart.
+let taskStorageMutation = Promise.resolve();
+const taskEpochs = new Map();
+const retiredTasks = new Set();
+function mutateTaskStorage(mutate) {
+  const operation = taskStorageMutation.then(mutate);
+  taskStorageMutation = operation.catch(() => {});
+  return operation;
+}
+function captureTaskEpochs() {
+  return mutateTaskStorage(() => new Map(taskEpochs));
+}
+function bumpTaskEpoch(session) {
+  taskEpochs.set(session, (taskEpochs.get(session) ?? 0) + 1);
+}
 function mutateStorageMap(key, mutate) {
-  const operation = (storageMutations.get(key) ?? Promise.resolve()).then(async () => {
+  const run = async () => {
     const map = await getStorage(key, {});
     const result = mutate(map);
     await setStorage(key, map);
     return result;
-  });
+  };
+  if (key === STORAGE_KEYS.INFLIGHT || key === STORAGE_KEYS.PENDING_REPLIES) return mutateTaskStorage(run);
+  const operation = (storageMutations.get(key) ?? Promise.resolve()).then(run);
   storageMutations.set(key, operation.catch(() => {}));
   return operation;
 }
@@ -328,8 +346,13 @@ async function forgetTabSession(tabId) {
 }
 
 // ── inflight tracking ──
-async function markInflight(session, taskId, details = {}) {
+async function markInflight(session, taskId, details = {}, epochs = null) {
   return mutateStorageMap(STORAGE_KEYS.INFLIGHT, inflight => {
+  if (epochs && (epochs.get(session) ?? 0) !== (taskEpochs.get(session) ?? 0)) return false;
+  const acquiring = details.deliveryPhase === "preparing";
+  if (!acquiring && (retiredTasks.has(taskId) || (inflight[session] && inflight[session].taskId !== taskId))) return false;
+  if (acquiring) retiredTasks.delete(taskId);
+  bumpTaskEpoch(session);
   const existing = inflight[session]?.taskId === taskId ? inflight[session] : {};
   inflight[session] = {
     ...existing,
@@ -337,11 +360,16 @@ async function markInflight(session, taskId, details = {}) {
     submittedAt: existing.submittedAt ?? Date.now(),
     ...details,
   };
+  return true;
   });
 }
 async function clearInflight(session, expectedTaskId) {
   return mutateStorageMap(STORAGE_KEYS.INFLIGHT, inflight => {
-    if (!expectedTaskId || inflight[session]?.taskId !== expectedTaskId) return false;
+    if (!expectedTaskId) return false;
+    retiredTasks.add(expectedTaskId);
+    if (inflight[session] && inflight[session].taskId !== expectedTaskId) return false;
+    bumpTaskEpoch(session);
+    if (!inflight[session]) return false;
     delete inflight[session];
     return true;
   });
@@ -432,6 +460,7 @@ async function executeSessionControl(command) {
   if (command.kind === "stop") return executeStopControl(command);
   if (command.kind !== "recover") throw new Error("unsupported_control");
   const { tabId, session, taskId } = command;
+  const epochs = await captureTaskEpochs();
   if (await getTabSession(tabId, { forceFresh: true }) !== session) throw new Error("session_identity_changed");
   const task = await httpJson("GET", `/v1/tasks/${encodeURIComponent(taskId)}`);
   if (task.session !== session || task.sendAttemptedAt == null || !["in_progress", "recovering"].includes(task.status))
@@ -441,7 +470,7 @@ async function executeSessionControl(command) {
   const record = pending ?? (inflight?.taskId === taskId ? inflight : null);
   if (!record?.baseline || record.tabId !== tabId || record.stopRequestedAt) throw new Error("recovery_evidence_unavailable");
   // Observe the original send only. Never call run-task or a requeue endpoint.
-  await attachPendingFromTask(task, session, tabId, record);
+  if (!await attachPendingFromTask(task, session, tabId, record, epochs)) throw new Error("recovery_superseded");
   void pollPendingReplies();
   return { action: "observation_attached", taskId };
 }
@@ -680,9 +709,16 @@ function inferDeliveryPhase(task, record = {}) {
   return record.deliveryPhase ?? record.phase ?? record.ackState ?? "unknown";
 }
 
-async function attachPendingFromTask(task, session, tabId, record = {}) {
-  const existing = await getPendingReply(task.taskId);
-  const baseline = record.baseline ?? existing?.baseline ?? {
+async function attachPendingFromTask(task, session, tabId, record, epochs) {
+  return mutateTaskStorage(async () => {
+  const inflight = await getStorage(STORAGE_KEYS.INFLIGHT, {});
+  const pending = await listPendingReplies();
+  if (!epochs || (epochs.get(session) ?? 0) !== (taskEpochs.get(session) ?? 0) ||
+      retiredTasks.has(task.taskId) || task.session !== session ||
+      (inflight[session] && inflight[session].taskId !== task.taskId) ||
+      Object.entries(pending).some(([id, rec]) => rec.session === session && id !== task.taskId)) return false;
+  const existing = pending[task.taskId];
+  const baseline = existing?.baseline ?? record.baseline ?? {
     assistantCount: 0,
     lastAssistantText: "",
     lastAssistantId: null,
@@ -690,13 +726,13 @@ async function attachPendingFromTask(task, session, tabId, record = {}) {
     userCount: 0,
   };
   const deliveryPhase = inferDeliveryPhase(task, {
-    ...existing,
     ...record,
+    ...existing,
   });
   const sendAttemptedAt = existing?.sendAttemptedAt ??
-    task.sendAttemptedAt ?? record.sendAttemptedAt ??
+    inflight[session]?.sendAttemptedAt ?? task.sendAttemptedAt ?? record.sendAttemptedAt ??
     (deliveryPhase === "preparing" ? null : Date.now());
-  await setPendingReply(task.taskId, {
+  const rec = {
     ...(existing ?? {}),
     session,
     tabId,
@@ -732,7 +768,7 @@ async function attachPendingFromTask(task, session, tabId, record = {}) {
       existing?.composerPayloadObservedAfterFailure === true ||
       record.composerPayloadObservedAfterFailure === true,
     submittedUserMessageId:
-      record.submittedUserMessageId ?? existing?.submittedUserMessageId ?? null,
+      existing?.submittedUserMessageId ?? record.submittedUserMessageId ?? inflight[session]?.submittedUserMessageId ?? null,
     hardTimedOutAt:
       existing?.hardTimedOutAt ??
       (task.status === "recovering"
@@ -748,17 +784,28 @@ async function attachPendingFromTask(task, session, tabId, record = {}) {
       existing?.replyProgressReported ?? task.replyDetectedAt != null,
     lastObservationSignature: existing?.lastObservationSignature ?? null,
     lastObservationReportedAt: existing?.lastObservationReportedAt ?? 0,
-  });
-  await markInflight(session, task.taskId, {
+  };
+  observeStopRequest(task.taskId, rec);
+  pending[task.taskId] = rec;
+  inflight[session] = {
+    ...inflight[session],
+    taskId: task.taskId,
+    submittedAt: inflight[session]?.submittedAt ?? rec.submittedAt,
+    sendAttemptedAt,
     tabId,
     baseline,
     deliveryPhase,
-    submittedUserMessageId:
-      record.submittedUserMessageId ?? existing?.submittedUserMessageId ?? null,
+    submittedUserMessageId: rec.submittedUserMessageId,
     expiresAt: task.expiresAt,
     completionDeadlineAt: task.completionDeadlineAt,
     recoveryDeadlineAt: task.recoveryDeadlineAt,
     lateReplyDeadlineAt: task.lateReplyDeadlineAt,
+  };
+  // Publish ownership and its observer together, before waking any sampler.
+  await chrome.storage.local.set({ [STORAGE_KEYS.INFLIGHT]: inflight, [STORAGE_KEYS.PENDING_REPLIES]: pending });
+  bumpTaskEpoch(session);
+  activatePendingReply(task.taskId);
+  return true;
   });
 }
 
@@ -811,6 +858,7 @@ async function startDispatchLoop(session, tabId) {
             await delay(DISPATCH_LOOP_RETRY_MS);
             continue;
           }
+          if (recovered.action === "superseded") continue;
         } catch (e) {
           console.warn(
             "[relay sw] durable inflight recovery failed",
@@ -1188,11 +1236,19 @@ async function listPendingReplies() {
   return await getStorage(STORAGE_KEYS.PENDING_REPLIES, {});
 }
 async function setPendingReply(taskId, rec) {
-  await mutateStorageMap(STORAGE_KEYS.PENDING_REPLIES, map => {
+  return mutateTaskStorage(async () => {
+    const inflight = await getInflight(rec.session);
+    if (retiredTasks.has(taskId) || (inflight && inflight.taskId !== taskId)) return false;
+    const map = await listPendingReplies();
     rec.stopRequestedAt = map[taskId]?.stopRequestedAt ?? rec.stopRequestedAt ?? null;
     observeStopRequest(taskId, rec);
     map[taskId] = rec;
+    await setStorage(STORAGE_KEYS.PENDING_REPLIES, map);
+    activatePendingReply(taskId);
+    return true;
   });
+}
+function activatePendingReply(taskId) {
   // Ensure a completion deferred exists for the dispatch loop.
   if (!pendingCompletion.has(taskId)) {
     const deferred = {};
@@ -1667,6 +1723,7 @@ async function heartbeatOnce() {
 
 // Reconcile orphaned in-flight state whenever the service worker wakes.
 async function reconcileInflight() {
+  const epochs = await captureTaskEpochs();
   const inflight = await getStorage(STORAGE_KEYS.INFLIGHT, {});
   if (Object.keys(inflight).length === 0) return;
   const tabs = await listChatGPTTabs();
@@ -1703,7 +1760,7 @@ async function reconcileInflight() {
           }
         }
         if (action === "reattach" && tabId) {
-          await attachPendingFromTask(t, session, tabId, entry);
+          await attachPendingFromTask(t, session, tabId, entry, epochs);
         } else if (action === "defer") {
           await httpJson("POST", `/internal/tasks/${entry.taskId}/defer`, {}).catch(() => {});
           await clearRecoveredTask(entry.taskId, session, tabId);
@@ -1748,7 +1805,7 @@ async function reconcileInflight() {
               ...entry,
               baseline,
               deliveryPhase: entry.deliveryPhase ?? "unknown",
-            });
+            }, epochs);
           }
         }
         continue;
@@ -1781,6 +1838,7 @@ async function clearRecoveredTask(taskId, session, tabId) {
 }
 
 async function recoverInflightForTab(msg, tabId) {
+  const epochs = await captureTaskEpochs();
   const task = await httpJson("GET", `/v1/tasks/${msg.taskId}`);
   const session = task.session;
   const record = {
@@ -1834,10 +1892,11 @@ async function recoverInflightForTab(msg, tabId) {
     }
     const failed = await httpJson("GET", `/v1/tasks/${task.taskId}`);
     if (!msg.conversationChanged && isRecoverableLateReply(failed)) {
-      await attachPendingFromTask(failed, session, tabId, {
+      const attached = await attachPendingFromTask(failed, session, tabId, {
         ...record,
         deliveryPhase: "unknown",
-      });
+      }, epochs);
+      if (!attached) return { action: "superseded" };
       return {
         action: "reattached",
         status: failed.status,
@@ -1853,7 +1912,7 @@ async function recoverInflightForTab(msg, tabId) {
   }
 
   if (action === "reattach") {
-    await attachPendingFromTask(task, session, tabId, record);
+    if (!await attachPendingFromTask(task, session, tabId, record, epochs)) return { action: "superseded" };
     void pollPendingReplies();
     startDispatchLoop(session, tabId).catch(() => {});
     return {
@@ -2016,6 +2075,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sendResponse({ error: "no session for send fence" });
           return;
         }
+        const beforeRead = await captureTaskEpochs();
         const task = await httpJson("GET", `/v1/tasks/${msg.taskId}`);
         if (task.session !== sid || task.status !== "in_progress") {
           sendResponse({
@@ -2027,19 +2087,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         // Write the browser-side fence first, then persist the same boundary in
         // SQLite. The content script must not click Send until this round trip
         // succeeds.
-        await markInflight(sid, msg.taskId, {
+        const marked = await markInflight(sid, msg.taskId, {
           tabId: sender.tab.id,
           baseline: msg.baseline,
           deliveryPhase: "send-attempted",
-        });
+        }, beforeRead);
+        if (!marked) throw new Error("send_fence_superseded");
+        const epochs = await captureTaskEpochs();
         await httpJson("POST", `/internal/tasks/${msg.taskId}/progress`, {
           phase: "send_attempted",
         });
         const fencedTask = await httpJson("GET", `/v1/tasks/${msg.taskId}`);
-        await attachPendingFromTask(fencedTask, sid, sender.tab.id, {
+        const attached = await attachPendingFromTask(fencedTask, sid, sender.tab.id, {
           baseline: msg.baseline,
           deliveryPhase: "send-attempted",
-        });
+        }, epochs);
+        if (!attached) throw new Error("send_fence_superseded");
         sendResponse({ status: "fenced", taskId: msg.taskId });
       } catch (e) {
         sendResponse({ error: e.message });
