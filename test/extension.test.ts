@@ -162,7 +162,7 @@ test("durable send fence precedes Send and post-attempt polling cannot requeue",
   const content = fs.readFileSync(path.join(EXT, "content-script.js"), "utf8");
   const worker = fs.readFileSync(path.join(EXT, "service-worker.js"), "utf8");
   const fence = content.indexOf('type: "send-attempted"');
-  const click = content.indexOf("await clickSend()", fence);
+  const click = content.indexOf("await clickSend(target)", fence);
   assert.ok(fence >= 0, "missing content-script send fence");
   assert.ok(click > fence, "Send must occur only after the durable fence");
   assert.match(worker, /snap\.status === "not-started"[\s\S]*hasSendFence\(rec\)/);

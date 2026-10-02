@@ -236,6 +236,22 @@
     return error;
   }
 
+  function assertSubmissionTarget(target, checkPayload = false) {
+    if (!target || getSessionId() !== target.session || location.pathname !== target.path ||
+        !target.input?.isConnected || findInput() !== target.input ||
+        getComposerRoot(target.input) !== target.root || !isVisible(target.input)) {
+      throw makeRelayError("submission_target_changed", "Submission conversation or composer changed");
+    }
+    if (checkPayload) {
+      const attachments = queryComposerAll(target.root, SELECTORS.attachment);
+      if (target.input.textContent !== target.text || attachments.length !== target.attachments.length ||
+          attachments.some((node, index) => node !== target.attachments[index].node ||
+            node.textContent !== target.attachments[index].text)) {
+        throw makeRelayError("submission_payload_changed", "Composer payload changed before Send");
+      }
+    }
+  }
+
   function isGenerating() {
     return SELECTORS.stopButton.some((sel) =>
       Array.from(document.querySelectorAll(sel)).some((button) => isVisible(button)),
@@ -497,19 +513,21 @@
   }
 
   async function waitForInput()      { return waitForCondition(() => { const i = findInput(); return i && isVisible(i) ? i : null; }, 15000, 200, "waitForInput"); }
-  async function waitForPageReady()  {
+  async function waitForPageReady(target)  {
     return waitForCondition(() => {
+      if (target) assertSubmissionTarget(target);
       const state = getPageReadiness();
       return state.ready && !state.generating ? state : null;
     }, PAGE_READY_TIMEOUT_MS, 250, "waitForPageReady");
   }
-  async function waitForSendReady()  { return waitForCondition(() => {
+  async function waitForSendReady(target)  { return waitForCondition(() => {
+    if (target) assertSubmissionTarget(target, true);
     const b = findSendButton();
     if (b && isVisible(b) && !b.disabled && b.getAttribute("aria-disabled") !== "true") return b;
     return null;
   }, 10000, 200, "waitForSendReady"); }
 
-  async function waitForSendEnabledAfterPaste(inp, text) {
+  async function waitForSendEnabledAfterPaste(inp, text, target) {
     const startedAt = Date.now();
     const textDeadline = startedAt + TEXT_SEND_READY_TIMEOUT_MS;
     const attachmentDeadline = startedAt + ATTACHMENT_UPLOAD_TIMEOUT_MS;
@@ -521,6 +539,7 @@
     let attachmentObserved = state.attachmentPresent || state.uploading;
 
     while (true) {
+      assertSubmissionTarget(target);
       const block = findSafetyBlock();
       if (block) throw new Error(`check-send-enabled: safety block: ${block.reason}`);
       state = getComposerPayloadState(inp);
@@ -577,7 +596,9 @@
   async function resetComposer(
     timeoutMs = COMPOSER_RESET_TIMEOUT_MS,
     stableMs = COMPOSER_RESET_STABLE_MS,
+    target = null,
   ) {
+    if (target) assertSubmissionTarget(target);
     const inp = findInput();
     if (!inp) return { clean: false, attachmentObserved: false };
     const root = getComposerRoot(inp);
@@ -593,6 +614,7 @@
 
     let cleanSince = null;
     const cleared = await waitForCondition(() => {
+      if (target) assertSubmissionTarget(target);
       const state = getComposerPayloadState(inp);
       if (!state.clean) {
         cleanSince = null;
@@ -605,10 +627,11 @@
     return { clean: !!cleared, attachmentObserved };
   }
 
-  async function cleanupAfterAttachmentFailure(error) {
+  async function cleanupAfterAttachmentFailure(error, target) {
     const result = await resetComposer(
       ATTACHMENT_CLEANUP_TIMEOUT_MS,
       ATTACHMENT_CLEAN_STABLE_MS,
+      target,
     );
     // If no attachment/upload DOM was ever observed, an empty composer is not
     // enough to prove that an asynchronous large-paste upload cannot reappear.
@@ -626,17 +649,20 @@
   //
   // Dispatch change/input events after injection. If Send remains disabled,
   // state did not synchronize and the caller should retry or fail explicitly.
-  async function pasteIntoInput(text) {
-    await waitForPageReady();
+  async function pasteIntoInput(text, target) {
+    await waitForPageReady(target);
     const inp = await waitForInput();
+    assertSubmissionTarget(target);
 
     if (!document.hidden) {
       inp.scrollIntoView({ block: "center", inline: "nearest" });
       await pacedDelay(120, 300);
+      assertSubmissionTarget(target);
       inp.click();
     }
     try { inp.focus({ preventScroll: true }); } catch { /* ignore */ }
     await pacedDelay(50, 150);
+    assertSubmissionTarget(target);
 
     // Keep the selection inside the composer for the Lexical paste handler.
     try {
@@ -706,7 +732,7 @@
     const injected = (inp.textContent || inp.innerText || "").trim();
     // Large pastes may become attachments and leave the composer empty. Keep
     // the normal text budget short, but allow an attachment-aware upload window.
-    const sendReady = await waitForSendEnabledAfterPaste(inp, text);
+    const sendReady = await waitForSendEnabledAfterPaste(inp, text, target);
 
     if (!sendReady) {
       const suffix = injected.length === 0
@@ -721,12 +747,21 @@
       `[relay content] injected via ${method}, DOM len=${injected.length}` +
         (asAttachment ? " (likely converted to attachment)" : ""),
     );
+    target.text = inp.textContent;
+    target.attachments = queryComposerAll(target.root, SELECTORS.attachment)
+      .map(node => ({ node, text: node.textContent }));
     return { asAttachment };
   }
-  async function clickSend() {
-    const b = await waitForSendReady();
+  async function clickSend(target) {
+    const b = await waitForSendReady(target);
     if (!document.hidden) b.scrollIntoView({ block: "center", inline: "nearest" });
     await pacedDelay(200, 500);
+    // No await between this check and the click: SPA navigation, editor remounts,
+    // user edits and button replacement during the fence/delay must fail closed.
+    assertSubmissionTarget(target, true);
+    if (findSendButton() !== b || !isSendEnabled()) {
+      throw makeRelayError("submission_target_changed", "Send button changed before submission");
+    }
     b.click();
     return true;
   }
@@ -951,7 +986,17 @@
           try { updateBanner(`Relay: ${getSessionId().slice(0, 8)}…`, "#10a37f"); } catch {}
           sendResponse({ status: "ok" });
         } else if (msg.type === "reset-composer") {
-          sendResponse(await resetComposer());
+          const rec = readInflight();
+          if (msg.expectedSession && (msg.expectedSession !== getSessionId() ||
+              rec?.taskId !== msg.taskId || rec?.preserveComposer)) {
+            sendResponse({ clean: false, attachmentObserved: false });
+          } else {
+            const input = findInput();
+            const target = msg.expectedSession ? {
+              session: msg.expectedSession, path: location.pathname, input, root: getComposerRoot(input),
+            } : null;
+            sendResponse(await resetComposer(COMPOSER_RESET_TIMEOUT_MS, COMPOSER_RESET_STABLE_MS, target));
+          }
         } else if (msg.type === "configure-session") {
           configureManagedSession(msg.managed);
           sendResponse(sessionMetadata());
@@ -995,6 +1040,12 @@
 
           // Save the baseline and in-flight state for refresh recovery.
           const baseline = msg.baseline ?? captureBaseline();
+          const target = {
+            session: msg.expectedSession ?? getSessionId(),
+            path: location.pathname,
+            input: findInput(),
+          };
+          target.root = getComposerRoot(target.input);
           const inflight = {
             taskId: msg.taskId,
             session: getSessionId(),
@@ -1005,7 +1056,8 @@
           writeInflight(inflight);
 
           try {
-            const reset = await resetComposer();
+            assertSubmissionTarget(target);
+            const reset = await resetComposer(COMPOSER_RESET_TIMEOUT_MS, COMPOSER_RESET_STABLE_MS, target);
             if (!reset.clean) {
               if (reset.attachmentObserved) {
                 throw makeRelayError(
@@ -1016,10 +1068,11 @@
               }
               console.warn("[relay content] continuing after incomplete composer reset");
             }
-            const pasteResult = await pasteIntoInput(msg.text);
+            const pasteResult = await pasteIntoInput(msg.text, target);
             inflight.attachmentMode = pasteResult?.asAttachment === true;
             writeInflight(inflight);
             await pacedDelay(500, 1200);
+            assertSubmissionTarget(target, true);
             inflight.phase = "send-attempted";
             inflight.sendAttemptedAt = Date.now();
             writeInflight(inflight);
@@ -1034,7 +1087,7 @@
             inflight.phase = "send-fenced";
             inflight.sendFencedAt = Date.now();
             writeInflight(inflight);
-            await clickSend();
+            await clickSend(target);
             inflight.phase = "send-clicked";
             inflight.sendClickedAt = Date.now();
             writeInflight(inflight);
@@ -1060,11 +1113,14 @@
             console.warn("[relay content] run-task failed", e);
             updateBanner(`Error: ${e.message.slice(0, 40)}`, "#e74c3c");
             const failedComposer = (() => {
+              try { assertSubmissionTarget(target); } catch { return null; }
               const input = findInput();
               return input ? getComposerPayloadState(input) : null;
             })();
             const composerPayloadObserved = failedComposer?.clean === false;
             inflight.composerPayloadObservedAfterFailure = composerPayloadObserved;
+            inflight.preserveComposer = e.code === "submission_target_changed" ||
+              e.code === "submission_payload_changed";
             writeInflight(inflight);
             if (inflight.phase !== "preparing") {
               await chrome.runtime.sendMessage({
@@ -1077,10 +1133,11 @@
               e.code === "attachment_upload_failed" ||
               e.code === "attachment_cleanup_incomplete";
             const attachmentCleanupConfirmed = attachmentFailure
-              ? await cleanupAfterAttachmentFailure(e).catch(() => false)
+              ? await cleanupAfterAttachmentFailure(e, target).catch(() => false)
               : null;
-            if (!attachmentFailure) {
-              const reset = await resetComposer().catch(() => ({ clean: false }));
+            if (!attachmentFailure && e.code !== "submission_payload_changed") {
+              const reset = await resetComposer(COMPOSER_RESET_TIMEOUT_MS, COMPOSER_RESET_STABLE_MS, target)
+                .catch(() => ({ clean: false }));
               if (!reset.clean) {
                 console.warn("[relay content] post-failure composer reset incomplete");
               }

@@ -57,6 +57,8 @@ function createHarness({ advanceTimers = false, managed = null as null | Record<
     hash: managed ? `#relay-create=${encodeURIComponent(JSON.stringify(managed))}` : "",
     helloConversationId: null as string | null,
     helloAcknowledged: true,
+    onSendMessage: null as null | ((message: any) => any),
+    onTimer: null as null | ((ms: number) => void),
   };
   const storage = new Map<string, string>();
   const sentMessages: unknown[] = [];
@@ -131,6 +133,8 @@ function createHarness({ advanceTimers = false, managed = null as null | Record<
     runtime: {
       sendMessage: async (message: unknown) => {
         sentMessages.push(message);
+        const override = state.onSendMessage?.(message);
+        if (override) return override;
         return state.helloAcknowledged ? { status: "ok", conversationId: state.helloConversationId } : { error: "worker unavailable" };
       },
       onMessage: {
@@ -154,11 +158,20 @@ function createHarness({ advanceTimers = false, managed = null as null | Record<
     Math,
     JSON,
     Promise,
+    DataTransfer: class {
+      value = "";
+      setData(_type: string, value: string) { this.value = value; }
+    },
+    ClipboardEvent: class {
+      type: string; clipboardData: any;
+      constructor(type: string, options: any) { this.type = type; this.clipboardData = options.clipboardData; }
+    },
     console: { log() {}, warn() {}, error() {} },
     setTimeout: (callback: () => void, ms: number) => {
       if (advanceTimers) {
         queueMicrotask(() => {
           state.now += ms;
+          state.onTimer?.(ms);
           callback();
         });
       }
@@ -592,3 +605,73 @@ test("discovery supports modern sidebar rows with matching visible labels", asyn
   row.querySelector = () => element("label", "Other name");
   assert.deepEqual(JSON.parse(JSON.stringify((await h.message({ type: "discover-projects" })).projects)), []);
 });
+
+for (const scenario of ["unchanged", "attachment-unchanged", "wrong-session", "navigation", "remount", "edit", "attachment", "delayed-navigation", "disabled-send", "replaced-send"] as const) {
+  test(`submission stays bound to its session, composer and payload: ${scenario}`, async () => {
+    const h = createHarness({ advanceTimers: true });
+    h.state.readyState = "complete";
+    h.state.users = [element("user-A", "old prompt")];
+    h.state.assistants = [element("assistant-A", "old answer")];
+    const input = h.state.input as any;
+    input.isConnected = true;
+    input.focus = () => {};
+    const attachment = element("attachment", "Pasted text");
+    let attachments: FakeElement[] = [];
+    input.dispatchEvent = (event: any) => {
+      if (event.type === "paste") {
+        input.textContent = scenario.startsWith("attachment") ? "" : event.clipboardData.value;
+        if (scenario.startsWith("attachment")) attachments = [attachment];
+      }
+    };
+    const clicks: string[] = [];
+    let send = element("send-A") as any;
+    send.click = () => { clicks.push("A"); h.state.users.push(element("user-new", "prompt")); };
+    const root = { querySelectorAll: (selector: string) => {
+      if (selector === 'button[type="submit"]' && (input.textContent || attachments.length)) return [send];
+      if (selector === '[data-composer-attachments][data-visible-attachments]') return attachments;
+      return [];
+    } };
+    input.closest = () => root;
+    const replacement = element("input-B", "private draft") as any;
+    replacement.isConnected = true;
+    const otherSend = element("send-B") as any;
+    otherSend.click = () => clicks.push("B");
+    const otherRoot = { querySelectorAll: (selector: string) => selector === 'button[type="submit"]' ? [otherSend] : [] };
+    replacement.closest = () => otherRoot;
+    const navigate = () => {
+      h.state.pathname = "/c/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+      h.state.input = replacement;
+    };
+    h.state.onSendMessage = message => {
+      if (message.type !== "send-attempted") return null;
+      if (scenario === "navigation") navigate();
+      if (scenario === "remount") h.state.input = replacement;
+      if (scenario === "edit") input.textContent = "edited by user";
+      if (scenario === "attachment") attachments = [element("replacement-attachment", "Other file")];
+      if (["delayed-navigation", "disabled-send", "replaced-send"].includes(scenario)) {
+        h.state.onTimer = () => {
+          h.state.onTimer = null;
+          if (scenario === "delayed-navigation") navigate();
+          if (scenario === "disabled-send") send.disabled = true;
+          if (scenario === "replaced-send") send = otherSend;
+        };
+      }
+      return { status: "fenced" };
+    };
+    const result = await h.message({ type: "run-task", taskId: "task-A", text: "intended prompt",
+      expectedSession: scenario === "wrong-session" ? "different-session" : await h.sessionId() });
+    if (scenario === "unchanged" || scenario === "attachment-unchanged") {
+      assert.deepEqual(clicks, ["A"]);
+      assert.equal(result.status, "submitted");
+    } else {
+      assert.deepEqual(clicks, []);
+      assert.match(String(result.errorCode), /^submission_(target|payload)_changed$/);
+      const lateCleanup = await h.message({ type: "reset-composer", expectedSession: await h.sessionId(), taskId: "task-A" });
+      assert.equal(lateCleanup.clean, false, "delayed worker cleanup must preserve a changed composer");
+      assert.equal(replacement.textContent, "private draft", "failure cleanup must not touch a foreign composer");
+      if (scenario === "edit") assert.equal(input.textContent, "edited by user");
+      if (scenario === "attachment") assert.equal(attachments[0]?.textContent, "Other file");
+      if (scenario === "wrong-session") assert.equal(input.textContent, "", "reject before injection");
+    }
+  });
+}

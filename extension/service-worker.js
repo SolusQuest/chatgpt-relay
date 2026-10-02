@@ -836,7 +836,7 @@ async function startDispatchLoop(session, tabId) {
         try {
           runRes = await sendTabMessage(
             tabId,
-            { type: "run-task", taskId, text, baseline: pageState?.baseline },
+            { type: "run-task", taskId, text, baseline: pageState?.baseline, expectedSession: session },
             RUN_TASK_ACK_TIMEOUT_MS,
             "run-task acknowledgement",
           );
@@ -1325,11 +1325,11 @@ async function pollOnePending(taskId, rec) {
   await setPendingReply(taskId, rec);
 }
 
-async function resetComposerBestEffort(tabId) {
+async function resetComposerBestEffort(tabId, session, taskId) {
   if (!tabId) return false;
   const result = await sendTabMessage(
     tabId,
-    { type: "reset-composer" },
+    { type: "reset-composer", expectedSession: session, taskId },
     PAGE_STATE_SENDMSG_TIMEOUT_MS,
     "reset-composer",
   ).catch((e) => {
@@ -1354,7 +1354,7 @@ async function failPending(taskId, rec, reason, options = {}) {
     reason === "submission_not_observed" ||
     reason === "submission_outcome_unknown";
   if (shouldResetComposer) {
-    const clean = await resetComposerBestEffort(rec.tabId);
+    const clean = await resetComposerBestEffort(rec.tabId, rec.session, taskId);
     if (!clean) {
       console.warn("[relay sw] continuing after incomplete composer reset", taskId);
     }
