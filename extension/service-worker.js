@@ -41,6 +41,8 @@ const dispatchLoops = new Map(); // session -> { tabId, controller }
 const activeDispatchTasks = new Set();
 // taskId to deferred completion waiter.
 const pendingCompletion = new Map();
+const stopRequests = new Map(); // Immediate intent while its storage write is pending.
+const pendingPolls = new Map(); // Alarm, fast sampler and Stop may overlap.
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function getStorage(key, fallback) {
@@ -1018,7 +1020,11 @@ async function listPendingReplies() {
   return await getStorage(STORAGE_KEYS.PENDING_REPLIES, {});
 }
 async function setPendingReply(taskId, rec) {
-  await mutateStorageMap(STORAGE_KEYS.PENDING_REPLIES, map => { map[taskId] = rec; });
+  await mutateStorageMap(STORAGE_KEYS.PENDING_REPLIES, map => {
+    rec.stopRequestedAt = map[taskId]?.stopRequestedAt ?? rec.stopRequestedAt ?? null;
+    observeStopRequest(taskId, rec);
+    map[taskId] = rec;
+  });
   // Ensure a completion deferred exists for the dispatch loop.
   if (!pendingCompletion.has(taskId)) {
     const deferred = {};
@@ -1062,6 +1068,27 @@ async function pollPendingReplies() {
 }
 
 async function pollOnePending(taskId, rec) {
+  if (pendingPolls.has(taskId)) return pendingPolls.get(taskId);
+  const running = pollOnePendingSnapshot(taskId, rec);
+  pendingPolls.set(taskId, running);
+  try { return await running; }
+  finally { if (pendingPolls.get(taskId) === running) pendingPolls.delete(taskId); }
+}
+
+function observeStopRequest(taskId, rec, snap = {}) {
+  const request = stopRequests.get(taskId);
+  if (request && request.tabId === rec.tabId && request.session === rec.session &&
+      (!rec.submittedUserMessageId || request.userId === rec.submittedUserMessageId)) {
+    rec.stopRequestedAt ??= request.at;
+  }
+  if (snap?.taskId === taskId && snap.stopRequestedAt &&
+      (!rec.submittedUserMessageId || snap.submittedUserMessageId === rec.submittedUserMessageId)) {
+    rec.stopRequestedAt ??= snap.stopRequestedAt;
+  }
+  return !!rec.stopRequestedAt;
+}
+
+async function pollOnePendingSnapshot(taskId, rec) {
   const now = Date.now();
   dlog("[relay sw] pollOnePending", taskId.slice(0,8), "tab=", rec.tabId, "session=", rec.session?.slice?.(0,8), "notStarted=", rec.notStartedCount, "stable=", rec.stableSampleCount);
   // The task lifetime is a soft deadline. After it passes, the server exposes
@@ -1106,6 +1133,7 @@ async function pollOnePending(taskId, rec) {
       rec.tabId,
       {
         type: "poll-reply",
+        taskId,
         baseline: rec.baseline,
         submittedUserMessageId: rec.submittedUserMessageId ?? null,
         expectedSession: rec.session,
@@ -1128,6 +1156,11 @@ async function pollOnePending(taskId, rec) {
     return;
   }
   rec.lastPollAt = now;
+  observeStopRequest(taskId, rec, snap);
+  if (rec.stopRequestedAt && ['reply-ready', 'posted-no-reply-yet', 'not-started'].includes(snap?.status)) {
+    await cancelPending(taskId, rec, 'user stopped before reply');
+    return;
+  }
 
   dlog("[relay sw] poll-reply snap", taskId.slice(0,8), "status=", snap?.status, "err=", snap?.error, "text=", (snap?.reply ?? snap?.lastText ?? "").slice(0,40));
   if (!snap || snap.error) {
@@ -1209,6 +1242,11 @@ async function pollOnePending(taskId, rec) {
         rec.replyProgressReported = true;
       }
       try {
+        // Stop can arrive while the progress request above is in flight.
+        if (observeStopRequest(taskId, rec, snap)) {
+          await cancelPending(taskId, rec, 'user stopped before reply');
+          return;
+        }
         const captured = await httpJson("POST", `/internal/tasks/${taskId}/capture`, { text });
         console.log(
           "[relay sw] reply captured",
@@ -1394,15 +1432,24 @@ async function abandonPending(taskId, rec, reason) {
 }
 
 async function cancelPending(taskId, rec, reason) {
+  let terminal;
   try {
-    await httpJson("POST", `/internal/tasks/${taskId}/user-stop`, { reason });
+    terminal = await httpJson("POST", `/internal/tasks/${taskId}/user-stop`, { reason });
   } catch (e) {
     console.warn("[relay sw] cancelPending POST failed", taskId, e.message);
+    terminal = await httpJson('GET', `/v1/tasks/${taskId}`).catch(() => null);
+  }
+  if (!['done', 'failed', 'cancelled', 'expired'].includes(terminal?.status)) {
+    await setPendingReply(taskId, rec);
+    return false;
   }
   await clearRecoveredTask(taskId, rec.session, rec.tabId);
-  await setStorage(STORAGE_KEYS.LAST_ERROR, {
-    taskId, session: rec.session, error: reason, at: Date.now(),
-  });
+  if (terminal.status === 'cancelled') {
+    await setStorage(STORAGE_KEYS.LAST_ERROR, {
+      taskId, session: rec.session, error: reason, at: Date.now(),
+    });
+  }
+  return true;
 }
 
 // Fast sampling scheduler. Chrome alarms have a one-minute minimum, which is
@@ -1561,6 +1608,7 @@ async function clearRecoveredTask(taskId, session, tabId) {
   await notifyTabCleared(tabId, session, taskId);
   // Removing pending state wakes the successor. Finish all scoped cleanup first.
   await deletePendingReply(taskId);
+  stopRequests.delete(taskId);
 }
 
 async function recoverInflightForTab(msg, tabId) {
@@ -1889,17 +1937,31 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (type === "user-stop-requested") {
+    if (!sender.tab?.id || !msg.taskId || !msg.expectedSession || !msg.submittedUserMessageId) {
+      sendResponse({error:'missing Stop task identity'});
+      return false;
+    }
+    const request = {tabId:sender.tab.id, session:msg.expectedSession,
+      userId:msg.submittedUserMessageId, at:Date.now()};
+    stopRequests.set(msg.taskId, request);
     (async () => {
       try {
         const rec = await getPendingReply(msg.taskId);
-        if (!rec) {
-          await httpJson("POST", `/internal/tasks/${msg.taskId}/user-stop`, {
-            reason: "user stopped before reply",
-          }).catch(() => {});
-          sendResponse({ status: "cancelled" });
+        const owner = rec ?? await getInflight(msg.expectedSession);
+        if (!owner || owner.tabId !== sender.tab.id ||
+            (owner.taskId && owner.taskId !== msg.taskId) ||
+            (rec && rec.session !== msg.expectedSession) ||
+            (owner.submittedUserMessageId && owner.submittedUserMessageId !== msg.submittedUserMessageId)) {
+          if (stopRequests.get(msg.taskId) === request) stopRequests.delete(msg.taskId);
+          sendResponse({error:'Stop task identity mismatch'});
           return;
         }
-        rec.stopRequestedAt = Date.now();
+        if (!rec) {
+          await markInflight(msg.expectedSession, msg.taskId, {stopRequestedAt:request.at});
+          sendResponse({ status: "stop-requested" });
+          return;
+        }
+        rec.stopRequestedAt ??= request.at;
         rec.stoppedNoReplyCount = 0;
         await setPendingReply(msg.taskId, rec);
         setTimeout(() => { void pollPendingReplies(); }, 400);

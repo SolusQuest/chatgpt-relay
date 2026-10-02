@@ -578,6 +578,13 @@
     catch { return null; }
   }
   function writeInflight(rec) {
+    const previous = readInflight();
+    if (previous?.taskId === rec.taskId && previous?.session === rec.session) {
+      // A Stop click can arrive while run-task is awaiting acceptance.
+      rec.stopRequestedAt ??= previous.stopRequestedAt;
+      rec.submittedUserMessageId ??= previous.submittedUserMessageId;
+      rec.preserveComposer ||= previous.preserveComposer === true;
+    }
     sessionStorage.setItem(INFLIGHT_KEY, JSON.stringify(rec));
   }
   function clearInflight(taskId, session) {
@@ -593,12 +600,19 @@
       ? event.target.closest(SELECTORS.stopButton.join(","))
       : null;
     const rec = readInflight();
-    if (!target || !rec?.taskId) return;
+    if (!target || !rec?.taskId || rec.phase === 'preparing' || rec.session !== getSessionId()) return;
+    const users = getUserMessages();
+    const submittedUser = findSubmittedUser(users, rec.baseline ?? {}, rec.submittedUserMessageId);
+    const userId = getMessageId(submittedUser);
+    if (!userId || getLastUserId(users) !== userId) return;
+    rec.submittedUserMessageId = userId;
     rec.stopRequestedAt = Date.now();
     writeInflight(rec);
     chrome.runtime.sendMessage({
       type: "user-stop-requested",
       taskId: rec.taskId,
+      expectedSession: rec.session,
+      submittedUserMessageId: userId,
     }).catch(() => {});
   }, true);
 
@@ -995,9 +1009,18 @@
     (async () => {
       try {
         if (msg.type === "poll-reply") {
+          const sendSnapshot = snapshot => {
+            const rec = readInflight();
+            sendResponse({ ...snapshot, taskId: msg.taskId,
+              ...(rec?.taskId === msg.taskId && rec?.session === getSessionId() && rec?.stopRequestedAt ? {
+                stopRequestedAt: rec.stopRequestedAt,
+                submittedUserMessageId: rec.submittedUserMessageId,
+              } : {}),
+            });
+          };
           try {
             if (msg.expectedSession && msg.expectedSession !== getSessionId()) {
-              sendResponse({
+              sendSnapshot({
                 status: "session-mismatch",
                 expectedSession: msg.expectedSession,
                 currentSession: getSessionId(),
@@ -1006,12 +1029,12 @@
             }
             const block = findSafetyBlock();
             if (block) {
-              sendResponse({ status: "safety", reason: block.reason });
+              sendSnapshot({ status: "safety", reason: block.reason });
               return;
             }
             const readiness = getPageReadiness();
             if (!readiness.ready && !readiness.generating) {
-              sendResponse({
+              sendSnapshot({
                 status: "page-unready",
                 reason: readiness.reason,
                 stableForMs: readiness.stableForMs,
@@ -1038,7 +1061,7 @@
               const outputChars = hasNewAssistant
                 ? Math.max(0, lastText.length - (activity?.length ?? 0))
                 : 0;
-              sendResponse({
+              sendSnapshot({
                 status: "generating",
                 lastText: lastText,
                 activity,
@@ -1049,7 +1072,7 @@
               return;
             }
             if (!hasNewUser && !hasNewAssistant) {
-              sendResponse({
+              sendSnapshot({
                 status: "not-started",
                 lastText: lastText,
                 assistantCount: msgs.length,
@@ -1059,18 +1082,18 @@
               return;
             }
             if (hasNewAssistant) {
-              sendResponse({ status: "reply-ready", reply: lastText, assistantCount: msgs.length,
+              sendSnapshot({ status: "reply-ready", reply: lastText, assistantCount: msgs.length,
                 assistantMessageId: lastId, submittedUserMessageId: currentUserId });
               return;
             }
-            sendResponse({
+            sendSnapshot({
               status: "posted-no-reply-yet",
               lastText: lastText,
               assistantCount: msgs.length,
               submittedUserMessageId: currentUserId ?? expectedUserId,
             });
           } catch (e) {
-            sendResponse({ error: e.message });
+            sendSnapshot({ error: e.message });
           }
           return;
         }

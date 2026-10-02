@@ -169,7 +169,7 @@ function createHarness({ advanceTimers = false, managed = null as null | Record<
     chrome,
     crypto: { randomUUID: () => "fallback-session" },
     URL,
-    Element: class {},
+    Element: class { static [Symbol.hasInstance](value:any) {return typeof value?.closest==='function';} },
     getComputedStyle: () => ({ visibility: "visible", display: "block" }),
     Date: FakeDate,
     Math,
@@ -690,6 +690,16 @@ for (const scenario of ["unchanged", "attachment-unchanged", "wrong-session", "n
     if (scenario === "unchanged" || scenario === "attachment-unchanged") {
       assert.deepEqual(clicks, ["A"]);
       assert.equal(result.status, "submitted");
+      const stop = element('stop') as any;
+      stop.closest = (selector:string)=>selector.includes('stop-button')?stop:null;
+      h.userEvent('click',stop);
+      const stopped = (await h.message({type:'get-inflight'}) as any).inflight;
+      assert.ok(stopped.stopRequestedAt);
+      assert.equal(stopped.submittedUserMessageId,'user-new');
+      const snapshot=await h.message({type:'poll-reply',taskId:'task-A',baseline:result.baseline,
+        expectedSession:await h.sessionId(),submittedUserMessageId:'user-new'});
+      assert.equal(snapshot.stopRequestedAt,stopped.stopRequestedAt);
+      assert.equal((await h.message({type:'poll-reply',taskId:'other-task',baseline:result.baseline})).stopRequestedAt,undefined);
       for (const stale of [{}, {taskId:'old-task',expectedSession:await h.sessionId()},
           {taskId:'task-A',expectedSession:'old-session'}]) {
         assert.equal((await h.message({type:'clear-inflight',...stale})).cleared,false);

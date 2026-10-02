@@ -12,6 +12,7 @@ async function worker(commandState = "claimed", existing = false, discovery = fa
   const tabs: any[] = existing ? [{ id: 7, url: "https://chatgpt.com/" + marker }] : [];
   const timers: Array<{ fn: () => void; ms: number }> = [];
   let claimed = false;
+  let bridge: any;
   const event = () => ({ addListener() {} });
   const chrome = {
     storage: { local: {
@@ -28,7 +29,7 @@ async function worker(commandState = "claimed", existing = false, discovery = fa
       onRemoved: event(), onUpdated: event(),
     },
     alarms: { getAll: async () => [], create: async () => {}, onAlarm: event() },
-    runtime: { onInstalled: event(), onStartup: event(), onMessage: event() },
+    runtime: { onInstalled: event(), onStartup: event(), onMessage: {addListener(fn:any){bridge=fn;}} },
   };
   const context = vm.createContext({ chrome, crypto: webcrypto, AbortController, URL,
     console: { log() {}, warn() {} },
@@ -45,6 +46,7 @@ async function worker(commandState = "claimed", existing = false, discovery = fa
         claimed = true;
       }
       if (route.endsWith("/fail")) response.request = JSON.parse(options.body);
+      if (route.endsWith('/user-stop')) response = {status:'cancelled'};
       return { ok: true, status: 200, text: async () => JSON.stringify(response) };
     },
   });
@@ -55,7 +57,8 @@ async function worker(commandState = "claimed", existing = false, discovery = fa
     vm.runInContext(source, context, { filename: file });
   }
   for (let i = 0; i < 15; i++) await new Promise<void>(resolve => setImmediate(resolve));
-  return { operations, tabs, context, timers, storage };
+  return { operations, tabs, context, timers, storage,
+    message:(msg:any,tabId=7)=>new Promise<any>(resolve=>bridge(msg,{tab:{id:tabId}},resolve)) };
 }
 
 test("worker persists the creation open fence before opening one tab", async () => {
@@ -217,3 +220,113 @@ test('conditional inflight cleanup preserves another task under concurrent stora
   assert.equal(await vm.runInContext("clearInflight('session')",w.context),false);
   assert.equal(await vm.runInContext("clearInflight('session','new-task')",w.context),true);
 });
+test('review: Stop with partial assistant text must not complete successfully', async () => {
+  const w = await worker('opening',true);
+  w.context.partial = {status:'reply-ready',reply:'unfinished review...',submittedUserMessageId:'u2',assistantMessageId:'a2'};
+  w.context.pending = {session:'session',tabId:7,taskId:'stopped-task',submittedAt:Date.now(),
+    baseline:{},submittedUserMessageId:'u2',wasGenerating:true,deliveryPhase:'accepted',
+    submissionAcknowledged:true,stopRequestedAt:Date.now(),completionDeadlineAt:Date.now()+60000};
+  await vm.runInContext('chrome.tabs.sendMessage = async () => partial',w.context);
+  await vm.runInContext("pollOnePending('stopped-task',pending)",w.context);
+  await vm.runInContext("pollOnePending('stopped-task',pending)",w.context);
+  assert.equal(w.operations.includes('/internal/tasks/stopped-task/capture'),false);
+  assert.ok(w.operations.includes('/internal/tasks/stopped-task/user-stop'));
+});
+
+for (const status of ['reply-ready','posted-no-reply-yet','not-started','generating']) {
+  test(`Stop waits for generation to end: ${status}`,async()=>{
+    const w=await worker('opening',true);
+    w.context.rec={taskId:'task',session:'session',tabId:7,baseline:{},submittedAt:Date.now(),
+      completionDeadlineAt:Date.now()+60000,stopRequestedAt:Date.now(),submittedUserMessageId:'u2'};
+    w.context.snap={status,reply:'partial',submittedUserMessageId:'u2',assistantMessageId:'a2'};
+    await vm.runInContext('chrome.tabs.sendMessage=async()=>snap',w.context);
+    await vm.runInContext("pollOnePending('task',rec)",w.context);
+    assert.equal(w.operations.includes('/internal/tasks/task/user-stop'),status!=='generating');
+    assert.equal(w.operations.includes('/internal/tasks/task/capture'),false);
+  });
+}
+
+test('Stop arriving during completion progress beats partial reply capture',async()=>{
+  const w=await worker('opening',true);
+  w.context.rec={taskId:'task',session:'session',tabId:7,baseline:{},submittedAt:Date.now(),
+    completionDeadlineAt:Date.now()+60000,submittedUserMessageId:'u2',submissionAcknowledged:true,
+    submitAcknowledgedProgressReported:true,lastSampleKey:JSON.stringify(['u2','a2']),lastSampleText:'partial',stableSampleCount:1};
+  w.context.snap={status:'reply-ready',reply:'partial',submittedUserMessageId:'u2',assistantMessageId:'a2'};
+  w.context.events=[];
+  await vm.runInContext(`
+    chrome.tabs.sendMessage=async()=>snap;
+    let releaseProgress;
+    const progressGate=new Promise(r=>{releaseProgress=r;});
+    httpJson=async(method,path)=>{
+      events.push(path);
+      if(path.endsWith('/progress')) return progressGate;
+      return {status:'cancelled'};
+    };
+  `,w.context);
+  await vm.runInContext("setPendingReply('task',rec)",w.context);
+  vm.runInContext("const sampling=pollOnePending('task',rec)",w.context);
+  for(let i=0;i<10&&!w.context.events.includes('/internal/tasks/task/progress');i++) await new Promise<void>(r=>setImmediate(r));
+  assert.ok(w.context.events.includes('/internal/tasks/task/progress'));
+  assert.equal((await w.message({type:'user-stop-requested',taskId:'task',expectedSession:'session',submittedUserMessageId:'u2'})).status,'stop-requested');
+  await vm.runInContext('releaseProgress({}); sampling;',w.context);
+  assert.equal(w.context.events.includes('/internal/tasks/task/capture'),false);
+  assert.ok(w.context.events.includes('/internal/tasks/task/user-stop'));
+});
+
+test('failed cancellation retains intent and pending state for retry',async()=>{
+  const w=await worker('opening',true);
+  w.context.rec={taskId:'task',session:'session',tabId:7,stopRequestedAt:Date.now(),submittedUserMessageId:'u2'};
+  await vm.runInContext(`httpJson=async()=>{throw new Error('offline');}`,w.context);
+  assert.equal(await vm.runInContext("cancelPending('task',rec,'user stopped')",w.context),false);
+  assert.ok(w.storage.pending_replies.task.stopRequestedAt);
+  await vm.runInContext("setPendingReply('task',{...rec,stopRequestedAt:null})",w.context);
+  assert.ok(w.storage.pending_replies.task.stopRequestedAt,'stale sampler cannot erase intent');
+  await vm.runInContext("httpJson=async()=>({status:'cancelled'})",w.context);
+  assert.equal(await vm.runInContext("cancelPending('task',rec,'user stopped')",w.context),true);
+  assert.equal(w.storage.pending_replies.task,undefined);
+});
+
+test('Stop cannot bind a different tab or submitted user',async()=>{
+  const w=await worker('opening',true);
+  await vm.runInContext("setPendingReply('task',{taskId:'task',session:'session',tabId:7,submittedUserMessageId:'u2'})",w.context);
+  for (const [tabId,user] of [[8,'u2'],[7,'other-user']] as const) {
+    assert.ok((await w.message({type:'user-stop-requested',taskId:'task',expectedSession:'session',submittedUserMessageId:user},tabId)).error);
+    assert.equal(w.storage.pending_replies.task.stopRequestedAt,null);
+  }
+});
+
+test('a late Stop preserves an already completed result',async()=>{
+  const w=await worker('opening',true);
+  await vm.runInContext("httpJson=async()=>({status:'done'})",w.context);
+  await vm.runInContext("cancelPending('task',{session:'session',tabId:7},'user stopped')",w.context);
+  assert.equal(w.storage.last_error,undefined);
+});
+
+test('overlapping samplers share one task snapshot',async()=>{
+  const w=await worker('opening',true);
+  w.context.rec={taskId:'task',session:'session',tabId:7,baseline:{},submittedAt:Date.now(),completionDeadlineAt:Date.now()+60000};
+  await vm.runInContext(`let reads=0; let releaseSnapshot;
+    const gate=new Promise(r=>{releaseSnapshot=r;});
+    chrome.tabs.sendMessage=async()=>{reads++; return gate;};
+    const first=pollOnePending('task',rec);
+    const second=pollOnePending('task',{...rec});
+  `,w.context);
+  for(let i=0;i<10;i++) await new Promise<void>(r=>setImmediate(r));
+  assert.equal(vm.runInContext('reads',w.context),1);
+  await vm.runInContext("releaseSnapshot({status:'generating'}); Promise.all([first,second]);",w.context);
+});
+
+for(const status of ['in_progress','done']) {
+  test(`refresh recovery honors Stop without changing terminal success: ${status}`,async()=>{
+    const w=await worker('opening',true);
+    w.context.events=[]; w.context.taskStatus=status;
+    await vm.runInContext(`httpJson=async(method,path)=>{
+      events.push(path);
+      return {taskId:'task',session:'session',status:taskStatus};
+    };`,w.context);
+    const result=await vm.runInContext("recoverInflightForTab({taskId:'task',phase:'accepted',stopRequestedAt:123,submittedUserMessageId:'u2'},7)",w.context);
+    assert.equal(result.status,status==='done'?'done':'cancelled');
+    assert.equal(w.context.events.includes('/internal/tasks/task/user-stop'),status==='in_progress');
+    assert.equal(w.context.events.includes('/internal/tasks/task/capture'),false);
+  });
+}
