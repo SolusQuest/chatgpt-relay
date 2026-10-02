@@ -4,6 +4,7 @@
 
 - Relay mechanics: [`agent-instructions.md`](../agent-instructions.md)
 - Execution modes: [`workflows/README.md`](./README.md#execution-modes)
+- Session selection: [`workflows/README.md`](./README.md#relay-session-selection)
 - Review protocol: [`review-convergence.md`](./review-convergence.md)
 - Rough-issue refinement: [`issue-to-pr.md`](./issue-to-pr.md)
 
@@ -23,7 +24,7 @@ Before implementation starts, `auto` may use the one-time [readiness fallback](#
 
 - The authoritative issue is available by URL or complete text.
 - Repository instructions, design contracts, and declared dependencies are accessible.
-- Relay is reachable and the user supplied a non-paused, task-specific session.
+- Resolve the task-specific session at invocation preflight using the shared session-selection rule. Relay must be reachable and the selected or newly created session usable before each required submission.
 - The user authorized implementation, branch publication, a draft PR, relay review, and the final gate's initial draft-to-ready transition.
 - Record or inherit the execution mode; pin the same mode and session through plan and PR review.
 

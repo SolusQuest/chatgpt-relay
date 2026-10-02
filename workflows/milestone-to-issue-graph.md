@@ -4,6 +4,7 @@
 
 - Relay mechanics: [`agent-instructions.md`](../agent-instructions.md)
 - Execution modes and authority boundaries: [`workflows/README.md`](./README.md#execution-modes)
+- Session selection: [`workflows/README.md`](./README.md#relay-session-selection)
 - Review budget, finding rules, and continuation: [`review-convergence.md`](./review-convergence.md)
 - Downstream implementation: [`agent-ready-issue-to-pr.md`](./agent-ready-issue-to-pr.md)
 
@@ -25,13 +26,14 @@ Mode: default | auto
 Milestone: <existing open milestone URL or owner/repo milestone number>
 Refinement parent: <issue URL>
 Design authority: <document or merged PR URL>@<exact commit SHA>
-Relay session: <one task-specific session id reused across the entire workflow>
+Relay session: <optional existing session ID or sessionRef>
+Relay Project: <optional Project ID/name, or no-project, for a new session>
 Close refinement parent: yes | no
 ```
 
 If mode is omitted, use `default`. If `Close refinement parent` is omitted, use `no`. The target milestone must already exist and be open. Milestone creation is outside this workflow; a missing or closed target milestone yields the selected mode's checkpoint or `BLOCKED_HANDOFF`.
 
-Pin the repository, milestone, refinement parent, design authority, mode, Relay session, and closure permission for the entire workflow. Use that one Relay session for every tracker review, leaf-batch review, final-graph review, and convergence round. Never allocate or select a separate session per review unit. A later authority change is a material workflow change, not an editorial correction.
+Resolve the Relay session at invocation preflight using the shared session-selection rule. Pin the repository, milestone, refinement parent, design authority, mode, Relay session, and closure permission for the entire workflow. Use that one Relay session for every tracker review, leaf-batch review, final-graph review, and convergence round. Never allocate or select a separate session per review unit. A later authority change is a material workflow change, not an editorial correction.
 
 ## Graph contract
 
@@ -150,7 +152,7 @@ Before drafting or mutating GitHub:
 5. Read the repository's supported native issue types and confirm every manifest type is available.
 6. Confirm that the required sub-issue and dependency operations are available for the repository. Check documented platform relationship limits when the manifest approaches a known limit; absence of discoverable limit metadata alone is not a blocker.
 7. Inspect the current authenticated identity and available repository permission metadata through read-only evidence. Do not perform a probe write. In `auto`, inability to prove every fine-grained permission in advance is not itself a blocker when the intended mutation is authorized, idempotent, and recoverable; an explicit denial or unsupported required operation blocks the affected publication phase and joins the consolidated handoff.
-8. Follow `agent-instructions.md` for Relay preflight and pin the user-supplied session.
+8. Apply the shared session-selection rule early, pin the selected ID/ref, and follow `agent-instructions.md` for Relay preflight and any new session's first-message context.
 9. Snapshot existing managed issues, stable-marker matches, milestone membership, parent-child relationships, dependencies, and state before the first write using complete reads where an exact set is required. Snapshot comments only when resuming or reconciling a previously attempted completion record.
 
 ## Phase 1 — Complete graph draft and local audit

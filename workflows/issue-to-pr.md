@@ -4,6 +4,7 @@
 
 - Relay mechanics: [`agent-instructions.md`](../agent-instructions.md)
 - Execution modes: [`workflows/README.md`](./README.md#execution-modes)
+- Session selection: [`workflows/README.md`](./README.md#relay-session-selection)
 - Review protocol: [`review-convergence.md`](./review-convergence.md)
 - Downstream implementation: [`agent-ready-issue-to-pr.md`](./agent-ready-issue-to-pr.md)
 
@@ -21,7 +22,7 @@ Route from the actual issue and repository context, not labels.
 
 - The full issue is available by URL or complete text.
 - Repository instructions and relevant product, architecture, and contract sources are accessible.
-- Relay is reachable and the user supplied a non-paused, task-specific session.
+- Resolve the task-specific session at invocation preflight using the shared session-selection rule. Relay must be reachable and the selected or newly created session usable before each required submission.
 - The user authorized refinement, publication under the selected mode, implementation, and relay review.
 - Record `default` when no mode is specified; pin the session and mode through the downstream workflow.
 

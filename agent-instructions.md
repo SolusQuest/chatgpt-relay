@@ -6,7 +6,7 @@ Use this guide for relay mechanics. Multi-stage orchestration lives in [`workflo
 
 gpt-relay is a local SQLite-backed queue between an agent and the user's signed-in ChatGPT web session. Prefer the root `gpt-relay` CLI at `http://127.0.0.1:8765`; call the HTTP API only for implementation, debugging, or behavior the CLI does not expose.
 
-- Use the task-specific session supplied by the user, or create a new session when the task calls for one. Never choose an idle, recent, or previous-task session.
+- Use the task-specific session supplied by the user or already established for this execution chain. When none exists, follow the workflow's [mode-aware session selection](./workflows/README.md#relay-session-selection): ask early in `default`, create and notify without a confirmation checkpoint in `auto`. An explicit request for a new session already authorizes creation. Never choose an idle, recent, or previous-task session.
 - Reuse that session across every relay phase and round in the task.
 - Review remote PRs only after commit, push, and draft-PR publication. The final verdict must apply to the exact pushed head.
 - User authorization owns product decisions and final merge. Agent-relay agreement cannot replace it.
@@ -21,11 +21,11 @@ gpt-relay health
 gpt-relay sessions
 ```
 
-For an existing conversation, confirm that relay is reachable, the supplied session exists and is not paused, and no unexpected task is in flight for it. If neither an existing session nor new-session mode applies, request the intended session; do not infer it from the session list.
+Resolve session selection at invocation preflight using the shared workflow rule. For an existing conversation, confirm that relay is reachable, the selected session exists and is not paused, and no unexpected task is in flight for it. When no task-specific session is supplied or already established, `default` asks whether to create or use a supplied session while continuing independent safe work; `auto` proceeds to creation without an approval question. A missing or paused supplied session is an execution blocker, not permission to substitute another session.
 
 ### New-session mode
 
-Query the local Project catalog, choose an appropriate `projectId`, generate and retain an agent-owned `sessionRef` such as `sr_<uuid>`, and submit the first message as part of creation:
+Honor an explicit Project selection; otherwise query the local catalog and choose an appropriate `projectId` from task context, names and descriptions. With no appropriate Project, explicitly use `--no-project` unless the user requires a particular Project. Resolve Project names to IDs for the CLI. Generate and persist an agent-owned `sessionRef` such as `sr_<uuid>` before submission, and submit the first substantive workflow prompt as part of creation:
 
 ```bash
 gpt-relay projects --json
@@ -36,6 +36,8 @@ gpt-relay review --session-ref <ref> --file <follow-up-file> --no-wait
 ```
 
 Use `--no-project` instead of `--project-id` to explicitly create an ordinary chat. Creation requires a ref, a nonempty first message and exactly one Project choice. `--text`, `--stdin`, wait options and task deadlines work as for existing conversations. Old `--session <id>` calls remain supported; do not provide both selectors.
+
+After acceptance, retain the first task ID and tell the user that creation was requested, identifying the ref and Project choice. Report successful creation only after `creationStatus` is `created` and the conversation ID is bound. In `auto`, neither notification is a permission checkpoint: continue independent work during creation and use the same ref for subsequent Relay phases. Required Relay results still gate dependent work. Do not create another session on workflow composition, fallback or resume, or use an initialization placeholder that bypasses the independent-discussion barriers.
 
 A Project supplies its configured basic context. The first message must add the current goal, scope, repository/material URLs, relevant revision and necessary evidence. When instructions call for reading repository `AGENTS.md`, identify its source and supply relevant content if it cannot be accessed. Do not assume a new chat inherits all messages from an earlier chat.
 
@@ -131,7 +133,7 @@ Prefer bounded long waits over frequent status checks. Choose the next observati
 
 The client waits 10 minutes by default and the normal task lifetime is 30 minutes by default. A page-submitted task that crosses that lifetime plus active-task grace becomes non-terminal `recovering`; the extension can maintain it with strong page evidence until its bounded recovery deadline. `--wait-timeout` changes only the current CLI wait; `--task-timeout` changes the normal server lifetime. Pending records under `~/.gpt-relay/pending/` let `resume` recover without duplicate submission. Retriable calls should use `--cri <stable-key>` for same-session idempotency.
 
-Different user-supplied sessions may run concurrently; one session processes at most one in-flight task. Never switch sessions merely because another is idle.
+Different task-specific sessions may run concurrently; one session processes at most one in-flight task. Never switch sessions merely because another is idle.
 
 ## Failure handling
 
