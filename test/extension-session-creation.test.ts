@@ -41,6 +41,8 @@ async function worker(commandState = "claimed", existing = false, discovery = fa
       let response: any = { status: "ok", tasks: [], sessions: [], task: null };
       if (route === "/internal/project-discoveries/claim") {
         response = { command: discovery ? { discoveryId: "scan", token: "scan-token" } : null };
+      } else if (route === "/internal/session-controls/claim") {
+        response = { command: null };
       } else if (route.endsWith("/claim")) {
         response = { command: claimed ? null : { ...meta, state: commandState, initialTaskId: "task" } };
         claimed = true;
@@ -68,6 +70,25 @@ test("worker persists the creation open fence before opening one tab", async () 
   assert.ok(w.operations.indexOf("/internal/session-creations/sr_new/attach") > w.operations.indexOf("open-tab"));
   assert.equal(w.tabs[0].active, false);
   assert.match(w.tabs[0].url, /#relay-create=/);
+});
+
+test("explicit recovery attaches original evidence without submitting or requeueing", async () => {
+  const w = await worker();
+  const result = await vm.runInContext(`(async()=>{
+    const calls=[];
+    getTabSession=async()=> 'session';
+    httpJson=async(method,url)=> {calls.push(url); return {taskId:'task',session:'session',status:'recovering',sendAttemptedAt:1};};
+    getPendingReply=async()=>({taskId:'task',tabId:7,baseline:{lastUserId:'old'},submittedUserMessageId:'new'});
+    getInflight=async()=>null;
+    attachPendingFromTask=async(task,session,tab,record)=>calls.push(record.submittedUserMessageId);
+    pollPendingReplies=async()=>{};
+    const result=await executeSessionControl({kind:'recover',session:'session',tabId:7,taskId:'task'});
+    return {result,calls};
+  })()`, w.context);
+  assert.equal(result.result.action, "observation_attached");
+  assert.deepEqual(Array.from(result.calls), ["/v1/tasks/task", "new"]);
+  await vm.runInContext("getPendingReply=async()=>null", w.context);
+  await assert.rejects(vm.runInContext("executeSessionControl({kind:'recover',session:'session',tabId:7,taskId:'task'})", w.context), /recovery_evidence_unavailable/);
 });
 
 test("worker restart finds the previously opened marked tab instead of creating another", async () => {

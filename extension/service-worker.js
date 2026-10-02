@@ -425,6 +425,42 @@ async function reportSessionSnapshots() {
 }
 void reportSessionSnapshots();
 
+async function executeSessionControl(command) {
+  const { tabId, session, taskId } = command;
+  if (await getTabSession(tabId, { forceFresh: true }) !== session) throw new Error("session_identity_changed");
+  const task = await httpJson("GET", `/v1/tasks/${encodeURIComponent(taskId)}`);
+  if (task.session !== session || task.sendAttemptedAt == null || !["in_progress", "recovering"].includes(task.status))
+    throw new Error("task_not_recoverable");
+  const pending = await getPendingReply(taskId);
+  const inflight = await getInflight(session);
+  const record = pending ?? (inflight?.taskId === taskId ? inflight : null);
+  if (!record?.baseline || record.tabId !== tabId || record.stopRequestedAt) throw new Error("recovery_evidence_unavailable");
+  // Observe the original send only. Never call run-task or a requeue endpoint.
+  await attachPendingFromTask(task, session, tabId, record);
+  void pollPendingReplies();
+  return { action: "observation_attached", taskId };
+}
+let controlPollRunning = false;
+async function processSessionControls() {
+  if (controlPollRunning) return;
+  controlPollRunning = true;
+  try {
+    const owner = await creationOwner();
+    const { command } = await httpJson("POST", "/internal/session-controls/claim", { owner });
+    if (!command) return;
+    let outcome;
+    try { outcome = { state: "succeeded", result: await executeSessionControl(command) }; }
+    catch (e) { outcome = { state: "blocked", error: e.message }; }
+    await httpJson("POST", `/internal/session-controls/${encodeURIComponent(command.operationId)}/finish`,
+      { owner, token: command.token, ...outcome });
+  } catch (err) { dlog("session controls", err); }
+  finally {
+    controlPollRunning = false;
+    setTimeout(() => void processSessionControls(), 5000);
+  }
+}
+void processSessionControls();
+
 async function reportTaskProgress(taskId, phase) {
   return httpJson("POST", `/internal/tasks/${taskId}/progress`, { phase }).then(() => true).catch((e) => {
     dlog("[relay sw] progress report failed", taskId.slice(0, 8), phase, e.message);

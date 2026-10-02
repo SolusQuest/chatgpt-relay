@@ -6,6 +6,7 @@ import type { Db } from "./db.js";
 import type { Config } from "./config.js";
 import { SessionRegistry } from "./session-registry.js";
 import { installTaskTrace, readTaskTrace } from "./task-trace.js";
+import { installControls } from "./session-controls.js";
 
 export type TaskStatus =
   | "queued"
@@ -217,6 +218,7 @@ export class TaskStore {
   ) {
     this.registry = new SessionRegistry(db);
     installTaskTrace(db);
+    installControls(db);
     db.exec(`CREATE TABLE IF NOT EXISTS session_dispatch_gate (
       session TEXT PRIMARY KEY, suspended INTEGER NOT NULL DEFAULT 0);`);
     this.emitter.setMaxListeners(0);
@@ -428,6 +430,8 @@ export class TaskStore {
   claimNextTask(sessionId: string, now = Date.now()): Task | null {
     sessionId = this.registry.resolve(sessionId);
     if (this.isSuspended(sessionId) || this.getSession(sessionId)?.paused) return null;
+    if (this.db.prepare(`SELECT id FROM session_controls WHERE session = ?
+      AND state IN ('queued','claimed','executing') AND expires_at > ?`).get(sessionId, now)) return null;
     const ref = this.registry.get(sessionId);
     if (ref?.initial_task && !["attached", "finished"].includes(ref.command_state)) return null;
     // Use a transaction to preserve atomicity.

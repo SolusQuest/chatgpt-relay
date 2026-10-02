@@ -2,6 +2,7 @@
 // bin/gpt-relay.ts
 // gpt-relay CLI: start/health/tasks/show/cancel/sessions/resume/review。
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -98,6 +99,10 @@ interface CliTask {
 }
 
 async function cmdTasks(args: string[]): Promise<number> {
+  if (args[0] === "recover") {
+    if (!args[1]) throw new Error("usage: tasks recover TASK_ID [--operation-id ID]");
+    return submitControl({ kind: "recover", taskId: args[1] }, args);
+  }
   if (args[0] === "trace") {
     if (!args[1]) throw new Error("usage: tasks trace TASK_ID");
     console.log(JSON.stringify(await http.get(`/v1/tasks/${encodeURIComponent(args[1])}/trace`, { baseUrl: BASE })));
@@ -137,6 +142,16 @@ async function cmdTasks(args: string[]): Promise<number> {
       ].join("\t"),
     );
   }
+  return 0;
+}
+
+async function submitControl(body: Record<string, unknown>, args: string[]): Promise<number> {
+  const index = args.indexOf("--operation-id");
+  const operationId = index < 0 ? randomUUID() : args[index + 1];
+  if (!operationId) throw new Error("missing operation ID");
+  // Keep the identifier even when the HTTP response is lost: retry with the same ID.
+  console.error(JSON.stringify({ operationId }));
+  console.log(JSON.stringify(await http.post("/v1/session-controls", { ...body, operationId }, { baseUrl: BASE })));
   return 0;
 }
 
@@ -434,6 +449,10 @@ async function main(): Promise<number> {
         return await cmdProjects(rest);
       case "tasks":
         return await cmdTasks(rest);
+      case "operations":
+        if (!rest[0]) throw new Error("usage: operations OPERATION_ID");
+        console.log(JSON.stringify(await http.get(`/v1/operations/${encodeURIComponent(rest[0])}`, { baseUrl: BASE })));
+        return 0;
       case "show":
         return await cmdShow(rest);
       case "cancel":
