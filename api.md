@@ -133,6 +133,47 @@ error values rather than rejecting them.
 
 ## Public API
 
+### Stable references and creation
+
+`sessionRef` is an agent-owned stable reference matching `sr_` followed by 1 to 120 ASCII letters, digits, underscores or hyphens. `conversationId` is ChatGPT's actual conversation ID and may initially be null. Existing `session` selectors retain support. For message submission, provide exactly one selector; for listings, `sessionRef` is also supported. Both selectors resolve to the same task queue, active slot and idempotency scope. Task and session views add `sessionRef` and `conversationId` without removing existing fields.
+
+`POST /v1/sessions` requires `sessionRef`, nonempty `text` and an explicit `projectId` (a Project ID or null for an ordinary chat). It also accepts the existing `timeout` and optional `clientRequestId` options. Creation atomically stores the reference, browser command and first task.
+
+```jsonc
+{
+  "sessionRef": "sr_<agent-generated-reference>",
+  "projectId": null,
+  "text": "First task with its necessary context"
+}
+```
+
+The response contains `taskId`, task `status`, `sessionRef`, nullable `conversationId`, `projectId`, `creationStatus`, `initialTaskId`, `initialTaskStatus` and `creationError`. Repeating the same ref with the same effective Project, text and timeout returns the original first task, even after failure. Different parameters conflict with `409`. Recreating a definitively failed attempt requires a fresh ref.
+
+`GET /v1/sessions/:ref` returns creation and binding metadata, including `initialTaskId` for recovery after a lost response. It remains available even when the browser heartbeat has expired. `GET /v1/sessions` continues listing active sessions and adds the reference metadata. Existing pause/resume routes resolve either identity.
+
+Creation status is independent of first-task status:
+
+| Status | Meaning |
+|---|---|
+| `pending` | Creation or binding is still underway |
+| `created` | The owned page's conversation ID has been bound, even if the first task failed |
+| `failed` | Creation terminated without an ID or uncertain browser open/Send evidence |
+| `unknown` | The page may have opened or the message may have been submitted, but binding is unresolved |
+
+An existing ID does not imply the page is ready, unpaused or finished generating. An unknown result must be observed rather than automatically recreated and replayed. Late binding can establish `created`; task failure and late replies remain independent. Messages into failed or unknown creations are rejected, while queued successors to a pending creation cannot execute before binding.
+
+### Local Project catalog
+
+`GET /v1/projects` returns `{ "projects": [...] }`, with `projectId`, `name`, nullable `description` and `updatedAt` on each entry. Project IDs use `g-p-` followed by 32 hexadecimal digits; an optional name slug is accepted and normalized away. Names are display metadata, not a creation selector.
+
+`PUT /v1/projects/:projectId` upserts local metadata with a required nonempty `name` (at most 200 characters) and optional `description` (at most 4000 characters). Omitting description preserves its old value; null clears it. `DELETE /v1/projects/:projectId` removes the local entry. These operations do not mutate ChatGPT Projects. The catalog is not an allowlist: a syntactically valid directly supplied ID can be used without registration, with page identity checked before sending. There is no default Project or fallback to ordinary chat on a Project mismatch.
+
+### Browser creation control
+
+Creation commands are independent of any existing session. The extension polls `POST /internal/session-creations/claim` using its persisted owner identity. Commands include the ref, Project ID, attempt token and open state. It fences `opening` before opening a marked tab, then records `attach` and validates `bind`. The owned token and tab must match; an unrelated tab cannot bind the ref. An uncertain open is reported unknown instead of opening another page. After browser restoration changes tab IDs, reassociation requires the extension to verify the old tab no longer exists and present the prior ownership through `reattach`. The ownership token provides local execution correlation, not an authentication boundary.
+
+The internal endpoints are implementation details, not agent integration APIs. Automatic Project discovery is deferred until live page enumeration is verified.
+
 ### `POST /v1/tasks`
 
 Submit a task.
@@ -150,7 +191,8 @@ Request:
 
 Fields:
 
-- `session`: required, non-empty, at most 128 characters.
+- `session`: legacy session selector, non-empty, at most 128 characters; provide either this or `sessionRef`.
+- `sessionRef`: stable registered reference; mutually exclusive with `session`.
 - `text`: required, non-empty, 512 KiB by default.
 - `timeout`: optional server-side task lifetime before active-task grace; 30
   minutes by default and capped at 60 minutes. A page-submitted task can remain
@@ -423,7 +465,7 @@ polling. An HTTP long-poll timeout is not a task timeout.
 
 ## Idempotency
 
-`clientRequestId` is unique within one session:
+`clientRequestId` is unique within one canonical execution session. A legacy ID and its ref share this scope:
 
 ```text
 (session, clientRequestId)
@@ -433,10 +475,14 @@ Network retries, agent restarts, and calls that may run more than once should
 reuse a stable key. The same key in a different session creates a different
 task.
 
+Reusing a key with different effective text or task timeout returns `409`. CLI/client message calls generate keys by default; REST callers may omit the field for compatibility. A new CLI invocation generates a new key, so recovery should use `resume` or explicitly reuse `--cri`.
+
 ## Pending recovery
 
 `client/agent-client.ts` and the root CLI write pending task records to
 `GPT_RELAY_PENDING_DIR`.
+
+The client first persists a request identity before HTTP submission, then replaces it with the acknowledged task record. `resume` queries an unacknowledged message by its session selector and `clientRequestId`, including requests accepted before a lost response. Creation recovery instead queries the ref's original `initialTaskId`, since creation retries can carry a different message key. An unmatched record remains `UNCONFIRMED`; recovery does not resubmit it. Records with an explicit base URL are recovered only against that same relay.
 
 After a CLI interruption:
 

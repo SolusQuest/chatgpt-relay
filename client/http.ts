@@ -52,6 +52,7 @@ export class HttpError extends Error {
 }
 
 export const http = {
+  put: <T>(url: string, body: unknown, opts: HttpOptions) => request<T>("PUT", url, body, opts),
   get: <T>(url: string, opts: HttpOptions) => request<T>("GET", url, undefined, opts),
   post: <T>(url: string, body: unknown, opts: HttpOptions) =>
     request<T>("POST", url, body, opts),

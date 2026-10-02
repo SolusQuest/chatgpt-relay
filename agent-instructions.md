@@ -6,7 +6,7 @@ Use this guide for relay mechanics. Multi-stage orchestration lives in [`workflo
 
 gpt-relay is a local SQLite-backed queue between an agent and the user's signed-in ChatGPT web session. Prefer the root `gpt-relay` CLI at `http://127.0.0.1:8765`; call the HTTP API only for implementation, debugging, or behavior the CLI does not expose.
 
-- Use the task-specific session supplied by the user. Never choose an idle, recent, or previous-task session.
+- Use the task-specific session supplied by the user, or create a new session when the task calls for one. Never choose an idle, recent, or previous-task session.
 - Reuse that session across every relay phase and round in the task.
 - Review remote PRs only after commit, push, and draft-PR publication. The final verdict must apply to the exact pushed head.
 - User authorization owns product decisions and final merge. Agent-relay agreement cannot replace it.
@@ -21,9 +21,38 @@ gpt-relay health
 gpt-relay sessions
 ```
 
-Confirm that relay is reachable, the supplied session exists and is not paused, and no unexpected task is in flight for it. If the user did not supply a current-task session ID, request one; do not infer it from the session list.
+For an existing conversation, confirm that relay is reachable, the supplied session exists and is not paused, and no unexpected task is in flight for it. If neither an existing session nor new-session mode applies, request the intended session; do not infer it from the session list.
 
-Assume the session can access user-authorized GitHub URLs and retains the project context already placed in that conversation. Do not resend the README, full repository background, or complete diff every round unless relay cannot access the artifact or clearly misunderstands it. Add complete relevant material when the agent already has it; treat missing authorization, session selection, or sensitive context as a mode-aware blocker.
+### New-session mode
+
+Query the local Project catalog, choose an appropriate `projectId`, generate and retain an agent-owned `sessionRef` such as `sr_<uuid>`, and submit the first message as part of creation:
+
+```bash
+gpt-relay projects --json
+gpt-relay review --new-session --session-ref <ref> --project-id <project-id> --file <prompt-file> --no-wait
+gpt-relay sessions --session-ref <ref> --json
+gpt-relay show <task-id>
+gpt-relay review --session-ref <ref> --file <follow-up-file> --no-wait
+```
+
+Use `--no-project` instead of `--project-id` to explicitly create an ordinary chat. Creation requires a ref, a nonempty first message and exactly one Project choice. `--text`, `--stdin`, wait options and task deadlines work as for existing conversations. Old `--session <id>` calls remain supported; do not provide both selectors.
+
+A Project supplies its configured basic context. The first message must add the current goal, scope, repository/material URLs, relevant revision and necessary evidence. When instructions call for reading repository `AGENTS.md`, identify its source and supply relevant content if it cannot be accessed. Do not assume a new chat inherits all messages from an earlier chat.
+
+Creation retries with the same ref and effective parameters return the original first task. Changed parameters conflict. Use the same ref throughout the task; after a confirmed creation failure, a fresh creation needs a fresh ref. `created` means the conversation ID was bound, even if the first task failed. `pending` or `unknown` without an ID is not permission to open another page and replay the prompt. Wait for recovery evidence. A created session may still be paused, generating or temporarily unavailable.
+
+The CLI/client generates a `clientRequestId` for each message and saves its identity before submission. Use `resume` to find an accepted task after a lost response; an unconfirmed record is retained without resubmission. An independently repeated CLI command generates a new key, so it is a new message unless the original `--cri` is explicitly reused. The request key protects server acceptance; the browser Send fence separately prevents prompt replay.
+
+Maintain the local catalog with:
+
+```bash
+gpt-relay projects set --project-id <project-id> --name "Project name" --description "Purpose and basic context"
+gpt-relay projects remove --project-id <project-id>
+```
+
+Catalog writes affect local metadata only. Omitted descriptions are preserved; an empty description clears its text. Names help selection, but creation uses the ID. The catalog is not an access guarantee or an allowlist: a valid directly supplied ID is accepted and the extension verifies the page before sending. Automatic webpage discovery is not part of this first version.
+
+Assume an existing session can access user-authorized GitHub URLs and retains the project context already placed in that conversation. Do not resend the README, full repository background, or complete diff every round unless relay cannot access the artifact or clearly misunderstands it. Add complete relevant material when the agent already has it; treat missing authorization, session selection, or sensitive context as a mode-aware blocker.
 
 ## Artifact review
 

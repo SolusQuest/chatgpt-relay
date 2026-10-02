@@ -14,6 +14,7 @@ export function createV1SessionsRouter(store: TaskStore): Router {
         status: ["in_progress", "recovering"],
       })[0] ?? null;
       return {
+        ...store.registry.view(store.registry.legacy(s.id)),
         session: s.id,
         lastSeen: s.lastSeen,
         lastStatusAt: s.lastStatusAt,

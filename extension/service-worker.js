@@ -47,6 +47,17 @@ async function getStorage(key, fallback) {
 async function setStorage(key, value) {
   await chrome.storage.local.set({ [key]: value });
 }
+const storageMutations = new Map();
+function mutateStorageMap(key, mutate) {
+  const operation = (storageMutations.get(key) ?? Promise.resolve()).then(async () => {
+    const map = await getStorage(key, {});
+    const result = mutate(map);
+    await setStorage(key, map);
+    return result;
+  });
+  storageMutations.set(key, operation.catch(() => {}));
+  return operation;
+}
 
 async function listAttachmentBlocks() {
   return getStorage(STORAGE_KEYS.ATTACHMENT_BLOCKS, {});
@@ -148,6 +159,7 @@ async function getTabSession(tabId, opts = {}) {
       new Promise((_, rej) => setTimeout(() => rej(new Error("sendMessage timeout")), 3000)),
     ]);
     if (r?.session) {
+      if (r.managed) await registerManagedPage(tabId, r);
       await rememberTabSession(tabId, r.session);
       return r.session;
     }
@@ -161,32 +173,133 @@ async function getTabSession(tabId, opts = {}) {
 // session-hello periodically so the next alarm can rebuild the mapping.
 const tabSessionCache = new Map();
 
+let ownerPromise;
+function creationOwner() {
+  ownerPromise ??= (async () => {
+    const saved = await getStorage("creation_owner", null);
+    if (saved) return saved;
+    const owner = crypto.randomUUID();
+    await setStorage("creation_owner", owner);
+    return owner;
+  })();
+  return ownerPromise;
+}
+async function creationAction(meta, action, extra = {}) {
+  return httpJson("POST", `/internal/session-creations/${encodeURIComponent(meta.sessionRef)}/${action}`,
+    { owner: await creationOwner(), token: meta.token, ...extra });
+}
+async function registerManagedPage(tabId, page) {
+  const m = page.managed;
+  if (m.owner !== await creationOwner()) {
+    throw new Error("creation page identity mismatch");
+  }
+  let attached;
+  try { attached = await creationAction(m, "attach", { tabId }); }
+  catch (e) {
+    if (e.status !== 409) throw e;
+    const saved = await creationAction(m, "inspect");
+    if (saved.tabId == null || saved.tabId === tabId) throw e;
+    let oldPresent = false;
+    try { await chrome.tabs.get(saved.tabId); oldPresent = true; } catch { /* A restored tab can receive a new browser ID. */ }
+    if (oldPresent) throw e;
+    await creationAction(m, "reattach", { tabId, previousTabId: saved.tabId, previousTabMissing: true });
+    attached = await creationAction(m, "attach", { tabId });
+  }
+  if (page.session !== m.sessionRef || page.projectId !== m.projectId) {
+    if (attached.creationStatus !== "created") await creationAction(m, "fail", { error: "creation_route_mismatch" });
+    throw new Error("creation page identity mismatch");
+  }
+  if (page.conversationId) {
+    if (attached.creationStatus !== "created" && page.hasHistory && !page.postSend) {
+      await creationAction(m, "fail", { error: "unexpected_existing_conversation" });
+      throw new Error("creation navigated into existing history before Send");
+    }
+    const bound = await creationAction(m, "bind", { tabId, conversationId: page.conversationId, projectId: page.projectId });
+    const config = { ...m, boundConversation: bound.conversationId };
+    await mutateStorageMap("creation_tabs", map => { map[tabId] = config; });
+    try { await chrome.tabs.sendMessage(tabId, { type: "configure-session", managed: config }); }
+    catch { /* The next page registration can restore this binding. */ }
+    return bound;
+  }
+  return { status: "ok" };
+}
+let creationPolling = false;
+async function processSessionCreations() {
+  if (creationPolling) return;
+  creationPolling = true;
+  try {
+    const owner = await creationOwner();
+    const { command } = await httpJson("POST", "/internal/session-creations/claim", { owner });
+    if (!command) return;
+    const meta = { sessionRef: command.sessionRef, projectId: command.projectId, token: command.token, owner,
+      initialTaskId: command.initialTaskId };
+    const marker = `#relay-create=${encodeURIComponent(JSON.stringify(meta))}`;
+    let tab;
+    if (command.state === "claimed") {
+      // Persist the open fence first. A crash after this point cannot reopen blindly.
+      await creationAction(meta, "opening");
+      const url = meta.projectId ? `https://chatgpt.com/g/${meta.projectId}/project` : "https://chatgpt.com/";
+      tab = await chrome.tabs.create({ url: url + marker, active: false });
+    } else {
+      const tabs = await listChatGPTTabs();
+      tab = tabs.find(t => (t.url ?? "").endsWith(marker));
+      if (!tab) {
+        // The page may have stripped its marker; ask existing content scripts.
+        for (const candidate of tabs) {
+          try {
+            const page = await chrome.tabs.sendMessage(candidate.id, { type: "get-session-id" });
+            if (page.managed?.sessionRef === meta.sessionRef && page.managed?.token === meta.token) {
+              tab = candidate; break;
+            }
+          } catch { /* Keep observing other tabs. */ }
+        }
+      }
+      if (!tab) {
+        await creationAction(meta, "fail", { error: "session_open_outcome_unknown", unknown: true });
+        return;
+      }
+    }
+    await mutateStorageMap("creation_tabs", map => { map[tab.id] = meta; });
+    await creationAction(meta, "attach", { tabId: tab.id });
+    try { await chrome.tabs.sendMessage(tab.id, { type: "configure-session", managed: meta }); }
+    catch { /* The content script also requests its configuration on load. */ }
+    void handleTab(tab.id);
+  } catch (e) {
+    console.warn("[relay sw] session creation observation failed", e.message);
+  } finally {
+    creationPolling = false;
+    setTimeout(() => void processSessionCreations(), 5000);
+  }
+}
+
 async function rememberTabSession(tabId, session) {
-  const saved = (await getStorage("tab_session_map", {}));
+  return mutateStorageMap("tab_session_map", saved => {
   const previous = tabSessionCache.get(tabId) ?? saved[tabId];
   if (previous && previous !== session && dispatchLoops.get(previous)?.tabId === tabId) {
     stopDispatchLoop(previous);
   }
   tabSessionCache.set(tabId, session);
   saved[tabId] = session;
-  await setStorage("tab_session_map", saved);
+  });
 }
 async function loadTabSessionCache() {
   const saved = (await getStorage("tab_session_map", {}));
-  for (const [k, v] of Object.entries(saved)) tabSessionCache.set(Number(k), v);
+  for (const [k, v] of Object.entries(saved)) {
+    if (!tabSessionCache.has(Number(k))) tabSessionCache.set(Number(k), v);
+  }
 }
 async function forgetTabSession(tabId) {
-  const session = tabSessionCache.get(tabId) ?? (await getStorage("tab_session_map", {}))[tabId];
+  return mutateStorageMap("tab_session_map", saved => {
+  const session = tabSessionCache.get(tabId) ?? saved[tabId];
   tabSessionCache.delete(tabId);
-  const saved = (await getStorage("tab_session_map", {}));
   delete saved[tabId];
-  await setStorage("tab_session_map", saved);
   if (session && dispatchLoops.get(session)?.tabId === tabId) stopDispatchLoop(session);
+  });
 }
 
 // ── inflight tracking ──
 async function markInflight(session, taskId, details = {}) {
-  const inflight = (await getStorage(STORAGE_KEYS.INFLIGHT, {}));
+  return mutateStorageMap(STORAGE_KEYS.INFLIGHT, inflight => {
   const existing = inflight[session]?.taskId === taskId ? inflight[session] : {};
   inflight[session] = {
     ...existing,
@@ -194,12 +307,10 @@ async function markInflight(session, taskId, details = {}) {
     submittedAt: existing.submittedAt ?? Date.now(),
     ...details,
   };
-  await setStorage(STORAGE_KEYS.INFLIGHT, inflight);
+  });
 }
 async function clearInflight(session) {
-  const inflight = (await getStorage(STORAGE_KEYS.INFLIGHT, {}));
-  delete inflight[session];
-  await setStorage(STORAGE_KEYS.INFLIGHT, inflight);
+  return mutateStorageMap(STORAGE_KEYS.INFLIGHT, inflight => { delete inflight[session]; });
 }
 async function getInflight(session) {
   const inflight = (await getStorage(STORAGE_KEYS.INFLIGHT, {}));
@@ -717,6 +828,10 @@ async function startDispatchLoop(session, tabId) {
           continue;
         }
 
+        if (runRes?.managed) {
+          try { await registerManagedPage(tabId, runRes); }
+          catch (e) { console.warn("[relay sw] submission binding deferred", e.message); }
+        }
         if (runRes?.error) {
           if (
             runRes.errorCode === "attachment_upload_timeout" ||
@@ -823,7 +938,8 @@ async function restoreDispatchLoops() {
   const tabs = await listChatGPTTabs();
   for (const tab of tabs) {
     if (!tab.id) continue;
-    const session = tabSessionCache.get(tab.id) ?? saved[tab.id];
+    let session = tabSessionCache.get(tab.id) ?? saved[tab.id];
+    if (!session || session.startsWith("sr_")) session = await getTabSession(tab.id, { forceFresh: true });
     if (!session) continue;
     if (offlineSessions.has(session)) continue;
     startDispatchLoop(session, tab.id).catch((e) =>
@@ -873,9 +989,7 @@ async function listPendingReplies() {
   return await getStorage(STORAGE_KEYS.PENDING_REPLIES, {});
 }
 async function setPendingReply(taskId, rec) {
-  const map = await listPendingReplies();
-  map[taskId] = rec;
-  await setStorage(STORAGE_KEYS.PENDING_REPLIES, map);
+  await mutateStorageMap(STORAGE_KEYS.PENDING_REPLIES, map => { map[taskId] = rec; });
   // Ensure a completion deferred exists for the dispatch loop.
   if (!pendingCompletion.has(taskId)) {
     const deferred = {};
@@ -889,9 +1003,7 @@ async function setPendingReply(taskId, rec) {
   void scheduleFastPending();
 }
 async function deletePendingReply(taskId) {
-  const map = await listPendingReplies();
-  delete map[taskId];
-  await setStorage(STORAGE_KEYS.PENDING_REPLIES, map);
+  await mutateStorageMap(STORAGE_KEYS.PENDING_REPLIES, map => { delete map[taskId]; });
   const deferred = pendingCompletion.get(taskId);
   if (deferred) {
     deferred.resolve();
@@ -956,6 +1068,9 @@ async function pollOnePending(taskId, rec) {
   }
 
   // Request one content-script snapshot.
+  if (rec.session.startsWith("sr_") && await getTabSession(rec.tabId, { forceFresh: true }) !== rec.session) {
+    return; // No reply attribution before managed ownership and binding validation.
+  }
   let snap;
   try {
     snap = await sendTabMessage(
@@ -1515,6 +1630,7 @@ async function ensureAlarms() {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === POLL_ALARM_NAME) {
+    void processSessionCreations();
     void reconcileInflight();
     void pollPendingReplies();
     // The alarm is a recovery mechanism that restarts every session dispatch loop.
@@ -1529,6 +1645,15 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 chrome.tabs.onRemoved.addListener((tabId) => { void forgetTabSession(tabId); });
 chrome.tabs.onUpdated.addListener((tabId, info) => {
   if (!info.url) return;
+  // Managed creation keeps its stable ref across the first conversation navigation.
+  const cachedRef = tabSessionCache.get(tabId);
+  if (cachedRef?.startsWith("sr_")) {
+    void getTabSession(tabId, { forceFresh: true }).then(session => {
+      if (!session) return forgetTabSession(tabId);
+      return handleTab(tabId);
+    });
+    return;
+  }
   // Project navigation can change the path without changing the conversation.
   // Keep that dispatch loop; for a different route, query the content script
   // immediately after clearing the old mapping instead of waiting for an alarm.
@@ -1550,19 +1675,28 @@ void loadTabSessionCache();
 void reconcileInflight();
 void pollPendingReplies();
 void restoreDispatchLoops();
+void processSessionCreations();
 
 // Message bridge.
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const type = msg?.type;
 
+  if (type === "get-managed-session") {
+    getStorage("creation_tabs", {}).then(map => sendResponse({ managed: map[sender.tab?.id] ?? null }))
+      .catch(() => sendResponse({ managed: null }));
+    return true;
+  }
+
  if (type === "session-hello") {
    if (sender.tab?.id && msg.session) {
-     rememberTabSession(sender.tab.id, msg.session).then(() => {
+     (async () => {
+       const registered = msg.managed ? await registerManagedPage(sender.tab.id, msg) : { status: "ok" };
+       await rememberTabSession(sender.tab.id, msg.session);
         void startDispatchLoop(msg.session, sender.tab.id).catch((e) =>
           console.warn("[relay sw] hello dispatch loop failed", e),
         );
-        sendResponse({ status: "ok" });
-      }).catch((e) => sendResponse({ error: e.message }));
+        sendResponse({ status: "ok", conversationId: registered.conversationId ?? null });
+      })().catch((e) => sendResponse({ error: e.message }));
    } else {
      sendResponse({ error: "missing session or tab" });
     }

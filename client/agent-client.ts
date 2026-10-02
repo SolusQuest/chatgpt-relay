@@ -3,16 +3,20 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID, createHash } from "node:crypto";
 import { http, HttpError } from "./http.js";
 
 const DEFAULT_BASE = process.env.GPT_RELAY_URL ?? "http://127.0.0.1:8765";
-const PENDING_DIR = process.env.GPT_RELAY_PENDING_DIR ??
+const pendingDir = () => process.env.GPT_RELAY_PENDING_DIR ??
   path.join(os.homedir(), ".gpt-relay", "pending");
 
 const TERMINAL = new Set(["done", "failed", "cancelled", "expired"]);
 
 export interface ReviewOptions {
-  session: string;
+  session?: string;
+  sessionRef?: string;
+  newSession?: boolean;
+  projectId?: string | null;
   /** @deprecated Use waitTimeoutMs. This no longer changes server task lifetime. */
   timeoutMs?: number;
   waitTimeoutMs?: number;
@@ -45,6 +49,9 @@ export interface TaskProgressView {
 }
 
 export interface TaskView {
+  clientRequestId?: string | null;
+  sessionRef?: string | null;
+  conversationId?: string | null;
   taskId: string;
   session: string;
   status: string;
@@ -83,6 +90,9 @@ export interface TaskView {
 }
 
 export interface SessionView {
+  sessionRef?: string;
+  conversationId?: string | null;
+  creationStatus?: string;
   session: string;
   lastSeen: number;
   paused: boolean;
@@ -99,13 +109,18 @@ interface PendingRecord {
   submittedAt: number;
   textPreview: string;
   clientRequestId?: string | null;
+  sessionRef?: string;
+  newSession?: boolean;
+  requestOnly?: boolean;
+  requestHash?: string;
+  baseUrl?: string;
 }
 
 function ensurePendingDir(): void {
-  fs.mkdirSync(PENDING_DIR, { recursive: true });
+  fs.mkdirSync(pendingDir(), { recursive: true });
 }
 function pendingFile(taskId: string): string {
-  return path.join(PENDING_DIR, `${taskId}.json`);
+  return path.join(pendingDir(), `${taskId}.json`);
 }
 export function writePending(rec: PendingRecord): void {
   ensurePendingDir();
@@ -119,13 +134,13 @@ export function clearPending(taskId: string): void {
   }
 }
 export function listPending(): PendingRecord[] {
-  if (!fs.existsSync(PENDING_DIR)) return [];
+  if (!fs.existsSync(pendingDir())) return [];
   return fs
-    .readdirSync(PENDING_DIR)
+    .readdirSync(pendingDir())
     .filter((f) => f.endsWith(".json"))
     .map((f) => {
       try {
-        return JSON.parse(fs.readFileSync(path.join(PENDING_DIR, f), "utf8")) as PendingRecord;
+        return JSON.parse(fs.readFileSync(path.join(pendingDir(), f), "utf8")) as PendingRecord;
       } catch {
         return null;
       }
@@ -139,12 +154,13 @@ async function submitTask(
 ): Promise<{ taskId: string; status: string; encodingWarning?: string; encodingFixed?: string }> {
   const baseUrl = opts.baseUrl ?? DEFAULT_BASE;
   const body: Record<string, unknown> = {
-    session: opts.session,
+    ...(opts.sessionRef ? { sessionRef: opts.sessionRef } : { session: opts.session }),
     text,
   };
+  if (opts.newSession) body.projectId = opts.projectId;
   if (opts.taskTimeoutMs != null) body.timeout = opts.taskTimeoutMs;
   if (opts.clientRequestId) body.clientRequestId = opts.clientRequestId;
-  return http.post<{ taskId: string; status: string; encodingWarning?: string; encodingFixed?: string }>("/v1/tasks", body, {
+  return http.post<{ taskId: string; status: string; encodingWarning?: string; encodingFixed?: string }>(opts.newSession ? "/v1/sessions" : "/v1/tasks", body, {
     baseUrl,
     timeoutMs: 10_000,
     signal: opts.signal,
@@ -175,9 +191,40 @@ export async function waitForTask(
 export async function review(
   text: string,
   opts: ReviewOptions,
-): Promise<ReviewResult | { taskId: string; status: "queued" }> {
+): Promise<ReviewResult | { taskId: string; status: string; sessionRef?: string; clientRequestId: string; reply?: undefined; lateReply?: undefined; error?: undefined }> {
   const started = Date.now();
-  const submitted = await submitTask(text, opts); const { taskId } = submitted;
+  if (Boolean(opts.session) === Boolean(opts.sessionRef)) throw new Error("provide exactly one of session or sessionRef");
+  if (opts.newSession && (!opts.sessionRef || !Object.hasOwn(opts, "projectId"))) {
+    throw new Error("new session requires sessionRef and explicit projectId or null");
+  }
+  if (opts.clientRequestId !== undefined && (!opts.clientRequestId.trim() || opts.clientRequestId.length > 128)) {
+    throw new Error("invalid clientRequestId");
+  }
+  opts = { ...opts, clientRequestId: opts.clientRequestId ?? randomUUID() };
+  const identity = opts.sessionRef ?? opts.session!;
+  const requestHash = createHash("sha256").update(JSON.stringify({ text, project: opts.projectId,
+    newSession: !!opts.newSession, timeout: opts.taskTimeoutMs })).digest("hex");
+  const requestKey = `request_${createHash("sha256").update(JSON.stringify([
+    opts.baseUrl ?? DEFAULT_BASE, identity, opts.clientRequestId])).digest("hex")}`;
+  const old = listPending().find(r => r.taskId === requestKey);
+  if (old?.requestHash && old.requestHash !== requestHash) throw new Error("clientRequestId pending payload conflict");
+  const record: PendingRecord = { taskId: requestKey, session: identity, sessionRef: opts.sessionRef,
+    newSession: opts.newSession, requestOnly: true, requestHash, baseUrl: opts.baseUrl ?? DEFAULT_BASE,
+    submittedAt: started, textPreview: text.slice(0, 80), clientRequestId: opts.clientRequestId };
+  ensurePendingDir();
+  try { fs.writeFileSync(pendingFile(requestKey), JSON.stringify(record), { flag: "wx", flush: true }); }
+  catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+    const reserved = JSON.parse(fs.readFileSync(pendingFile(requestKey), "utf8")) as PendingRecord;
+    if (reserved.requestHash !== requestHash) throw new Error("clientRequestId pending payload conflict");
+  }
+  let submitted: Awaited<ReturnType<typeof submitTask>>;
+  try { submitted = await submitTask(text, opts); }
+  catch (e) {
+    if (e instanceof HttpError && [400, 404, 409, 413].includes(e.status)) clearPending(requestKey);
+    throw e;
+  }
+  const { taskId } = submitted;
   if (submitted.encodingWarning) {
     process.stderr.write(`[gpt-relay] WARNING: server flagged suspicious encoding: ${submitted.encodingWarning}\n`);
     process.stderr.write(`[gpt-relay]   hint (PowerShell): $OutputEncoding = [System.Text.UTF8Encoding]::new()\n`);
@@ -186,14 +233,17 @@ export async function review(
     process.stderr.write(`[gpt-relay] note: server auto-fixed encoding (${submitted.encodingFixed})\n`);
   }
   writePending({
+    ...record,
+    requestOnly: false,
     taskId,
-    session: opts.session,
+    session: identity,
     submittedAt: started,
     textPreview: text.slice(0, 80),
     clientRequestId: opts.clientRequestId ?? null,
   });
+  clearPending(requestKey);
   if (opts.wait === false) {
-    return { taskId, status: "queued" };
+    return { taskId, status: submitted.status, sessionRef: opts.sessionRef, clientRequestId: opts.clientRequestId! };
   }
   try {
     const t = await waitForTask(taskId, {
@@ -269,7 +319,31 @@ export async function resumePending(
 ): Promise<{ record: PendingRecord; task: TaskView | null }[]> {
   const out: { record: PendingRecord; task: TaskView | null }[] = [];
   for (const rec of listPending()) {
-    const t = await getTask(rec.taskId, baseUrl);
+    let t: TaskView | null;
+    if (rec.requestOnly) {
+      if (rec.baseUrl && rec.baseUrl !== baseUrl) { out.push({ record: rec, task: null }); continue; }
+      const query = new URLSearchParams({ clientRequestId: rec.clientRequestId!, limit: "1", include_text: "1" });
+      query.set(rec.sessionRef ? "sessionRef" : "session", rec.session);
+      try {
+        if (rec.newSession && rec.sessionRef) {
+          // The ref identifies creation, including retries with a different message key.
+          const session = await http.get<{ initialTaskId: string | null }>(
+            `/v1/sessions/${encodeURIComponent(rec.sessionRef)}`, { baseUrl, timeoutMs: 5000 });
+          t = session.initialTaskId ? await getTask(session.initialTaskId, baseUrl) : null;
+        } else {
+          const found = await http.get<{ tasks: TaskView[] }>(`/v1/tasks?${query}`, { baseUrl, timeoutMs: 5000 });
+          t = found.tasks[0] ?? null;
+        }
+      } catch (e) {
+        if (!(e instanceof HttpError) || e.status !== 404) throw e;
+        t = null;
+      }
+      if (!t) { out.push({ record: rec, task: null }); continue; }
+      const recovered = { ...rec, taskId: t.taskId, requestOnly: false };
+      writePending(recovered);
+      clearPending(rec.taskId);
+      Object.assign(rec, recovered);
+    } else t = await getTask(rec.taskId, baseUrl);
     if (!t) {
       // The server no longer has the task, for example after moving machines.
       clearPending(rec.taskId);

@@ -7,6 +7,8 @@ HTTP shapes are documented in [`api.md`](./api.md); agent operating rules are in
 
 ## Design invariants
 
+Session creation is independent of the first task's lifecycle. A stable ref is allocated together with a durable creation command and first queued task. The extension records an open fence before opening a tab, correlates that owned page with its ref, and binds its conversation ID without moving the task queue. Once bound, the session remains created even if its first task fails. Before binding, uncertain open or Send evidence is reported as unknown rather than automatically replayed. Pending successor messages cannot execute until binding. Browser-owned refs remain unchanged during the initial URL transition; unrelated Project or conversation navigation blocks dispatch.
+
 1. A prompt is never automatically replayed after the durable `send_attempted`
    fence. Missing or ambiguous page evidence is not proof that submission
    failed.

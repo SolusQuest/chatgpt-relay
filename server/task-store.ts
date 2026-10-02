@@ -4,6 +4,7 @@ import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import type { Db } from "./db.js";
 import type { Config } from "./config.js";
+import { SessionRegistry } from "./session-registry.js";
 
 export type TaskStatus =
   | "queued"
@@ -138,6 +139,7 @@ export interface CreateTaskInput {
 }
 
 export interface ListTasksQuery {
+  clientRequestId?: string;
   session?: string;
   status?: TaskStatus | TaskStatus[];
   since?: number;
@@ -202,6 +204,7 @@ export class TaskStoreError extends Error {
 }
 
 export class TaskStore {
+  readonly registry: SessionRegistry;
   private readonly emitter = new EventEmitter();
   private readonly taskObservations = new Map<string, TaskObservation>();
 
@@ -209,12 +212,14 @@ export class TaskStore {
     private readonly db: Db,
     private readonly config: Config,
   ) {
+    this.registry = new SessionRegistry(db);
     this.emitter.setMaxListeners(0);
   }
 
   // ── Task lifecycle ───────────────────────────────────────────────────────
 
   createTask(input: CreateTaskInput): Task {
+    input = { ...input, session: this.registry.resolve(input.session) };
     const now = input.now ?? Date.now();
     const timeoutMs = normalizeTimeout(
       input.timeoutMs,
@@ -228,14 +233,6 @@ export class TaskStore {
       );
     }
 
-    const session = this.upsertSession(input.session, now);
-    if (session.paused) {
-      throw new TaskStoreError(
-        `session paused: ${session.pauseReason ?? "unknown"}`,
-        "session_paused",
-      );
-    }
-
     // Idempotency.
     if (input.clientRequestId) {
       const existing = this.db
@@ -243,10 +240,21 @@ export class TaskStore {
           `SELECT * FROM tasks WHERE session = ? AND client_request_id = ? LIMIT 1`,
         )
         .get(input.session, input.clientRequestId) as TaskRowRaw | undefined;
-      if (existing) return rowToTask(existing);
+      if (existing) {
+        if (existing.text !== input.text || existing.timeout_ms !== timeoutMs) {
+          throw new TaskStoreError("clientRequestId payload conflict", "duplicate_request");
+        }
+        return rowToTask(existing);
+      }
     }
 
     // Queue capacity.
+    const reference = this.registry.get(input.session);
+    if (reference?.initial_task && ["failed", "unknown"].includes(this.registry.view(reference).creationStatus)) {
+      throw new TaskStoreError("session creation unresolved", "invalid_transition");
+    }
+    const session = this.upsertSession(input.session, now);
+    if (session.paused) throw new TaskStoreError(`session paused: ${session.pauseReason ?? "unknown"}`, "session_paused");
     const queued = this.db
       .prepare(`SELECT COUNT(*) AS c FROM tasks WHERE session = ? AND status = 'queued'`)
       .get(input.session) as { c: number };
@@ -372,11 +380,16 @@ export class TaskStore {
   }
 
   listTasks(query: ListTasksQuery = {}): Task[] {
+    if (query.session) query = { ...query, session: this.registry.resolve(query.session) };
     const clauses: string[] = [];
     const params: unknown[] = [];
     if (query.session) {
       clauses.push(`session = ?`);
       params.push(query.session);
+    }
+    if (query.clientRequestId) {
+      clauses.push(`client_request_id = ?`);
+      params.push(query.clientRequestId);
     }
     if (query.status) {
       const statuses = Array.isArray(query.status) ? query.status : [query.status];
@@ -403,6 +416,9 @@ export class TaskStore {
 
   // Atomically claim the next queued task unless the session already has one in progress.
   claimNextTask(sessionId: string, now = Date.now()): Task | null {
+    sessionId = this.registry.resolve(sessionId);
+    const ref = this.registry.get(sessionId);
+    if (ref?.initial_task && !["attached", "finished"].includes(ref.command_state)) return null;
     // Use a transaction to preserve atomicity.
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -426,6 +442,10 @@ export class TaskStore {
         )
         .get(sessionId, now) as TaskRowRaw | undefined;
       if (!next) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      if (ref?.initial_task && !ref.conversation && next.id !== ref.initial_task) {
         this.db.exec("COMMIT");
         return null;
       }
@@ -732,6 +752,8 @@ export class TaskStore {
   // ── Session state ───────────────────────────────────────────────────────
 
   upsertSession(id: string, now = Date.now()): SessionRow {
+    id = this.registry.resolve(id);
+    this.registry.legacy(id);
     this.db
       .prepare(
         `INSERT INTO sessions (id, last_seen)
@@ -743,6 +765,7 @@ export class TaskStore {
   }
 
   getSession(id: string): SessionRow | null {
+    id = this.registry.resolve(id);
     const row = this.db.prepare(`SELECT * FROM sessions WHERE id = ?`).get(id) as
       | SessionRowRaw
       | undefined;
@@ -763,6 +786,7 @@ export class TaskStore {
     now = Date.now(),
     preserveQueued = false,
   ): SessionRow {
+    id = this.registry.resolve(id);
     this.upsertSession(id, now);
     if (paused) {
       this.db
@@ -812,6 +836,7 @@ export class TaskStore {
   }
 
   onSessionTaskChange(sessionId: string, listener: () => void): () => void {
+    sessionId = this.registry.resolve(sessionId);
     this.emitter.on(`session:${sessionId}`, listener);
     return () => this.emitter.off(`session:${sessionId}`, listener);
   }
@@ -889,7 +914,7 @@ function normalizeObservationOutputChars(value: number | undefined): number {
   return Math.min(Math.floor(value), 10_000_000);
 }
 
-function normalizeTimeout(input: number | undefined, fallback: number, max: number): number {
+export function normalizeTimeout(input: number | undefined, fallback: number, max: number): number {
   const cap = Math.max(1000, Math.floor(max));
   const defaultTimeout = Math.min(cap, Math.max(1000, Math.floor(fallback)));
   const n = Number(input);

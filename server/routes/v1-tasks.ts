@@ -29,6 +29,8 @@ export type SubmissionState =
   | "unknown";
 
 export interface TaskView {
+  sessionRef: string | null;
+  conversationId: string | null;
   taskId: string;
   session: string;
   clientRequestId: string | null;
@@ -75,6 +77,8 @@ function getSubmissionState(t: Task): SubmissionState {
 export function toTaskView(store: TaskStore, t: Task, includeText = false): TaskView {
   const submissionState = getSubmissionState(t);
   const v: TaskView = {
+    sessionRef: store.registry.get(t.session)?.ref ?? null,
+    conversationId: store.registry.get(t.session)?.conversation ?? null,
     taskId: t.id,
     session: t.session,
     clientRequestId: t.clientRequestId,
@@ -119,10 +123,18 @@ export function createV1TasksRouter(store: TaskStore): Router {
   router.post("/tasks", (req: Request, res: Response) => {
     const body = (req.body ?? {}) as {
       session?: unknown;
+      sessionRef?: unknown;
       text?: unknown;
       timeout?: unknown;
       clientRequestId?: unknown;
     };
+    if ((body.session !== undefined) === (body.sessionRef !== undefined)) {
+      return res.status(400).json({ error: "provide exactly one of session or sessionRef" });
+    }
+    if (body.sessionRef !== undefined) {
+      const row = store.registry.requireRef(body.sessionRef);
+      body.session = row.canonical;
+    }
     if (!isValidSessionId(body.session)) {
       return res.status(400).json({ error: "invalid session" });
     }
@@ -130,6 +142,10 @@ export function createV1TasksRouter(store: TaskStore): Router {
       return res.status(400).json({ error: "missing text" });
     }
     const timeoutMs = asPositiveInt(body.timeout) ?? undefined;
+    if (body.clientRequestId !== undefined && (typeof body.clientRequestId !== "string" ||
+      !body.clientRequestId.trim() || body.clientRequestId.length > 128)) {
+      return res.status(400).json({ error: "invalid clientRequestId" });
+    }
     const clientRequestId =
       typeof body.clientRequestId === "string" ? body.clientRequestId : null;
     const fix = tryFixEncoding(body.text);
@@ -195,6 +211,11 @@ export function createV1TasksRouter(store: TaskStore): Router {
   router.get("/tasks", (req: Request, res: Response) => {
     const session =
       typeof req.query.session === "string" ? req.query.session : undefined;
+    if (req.query.session !== undefined && req.query.sessionRef !== undefined) {
+      return res.status(400).json({ error: "provide one session selector" });
+    }
+    const refSession = req.query.sessionRef !== undefined
+      ? store.registry.requireRef(String(req.query.sessionRef)).canonical : undefined;
     const statusRaw = req.query.status;
     let status: TaskStatus | TaskStatus[] | undefined;
     if (typeof statusRaw === "string" && statusRaw.length > 0) {
@@ -209,7 +230,12 @@ export function createV1TasksRouter(store: TaskStore): Router {
     const since = asPositiveInt(req.query.since) ?? undefined;
     const limit = asPositiveInt(req.query.limit) ?? undefined;
     const includeText = req.query.include_text === "1";
-    const rows = store.listTasks({ session, status, since, limit });
+    const requestId = req.query.clientRequestId;
+    if (requestId !== undefined && (typeof requestId !== "string" || !requestId.trim() || requestId.length > 128)) {
+      return res.status(400).json({ error: "invalid clientRequestId" });
+    }
+    const rows = store.listTasks({ session: refSession ?? session, status, since, limit,
+      clientRequestId: typeof requestId === "string" ? requestId : undefined });
     return res.json({ tasks: rows.map((r) => toTaskView(store, r, includeText)) });
   });
 

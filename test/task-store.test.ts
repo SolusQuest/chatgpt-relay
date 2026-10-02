@@ -407,9 +407,10 @@ test("cancelTask is idempotent for terminal task", () => {
 test("idempotent clientRequestId returns same task", () => {
   const store = makeStore();
   const t1 = store.createTask({ session: "s1", text: "hi", clientRequestId: "cri-1" });
-  const t2 = store.createTask({ session: "s1", text: "hi again", clientRequestId: "cri-1" });
+  const t2 = store.createTask({ session: "s1", text: "hi", clientRequestId: "cri-1" });
   assert.equal(t1.id, t2.id);
   assert.equal(t2.text, "hi"); // Preserve the original content.
+  assert.throws(() => store.createTask({ session: "s1", text: "hi again", clientRequestId: "cri-1" }), /payload conflict/);
 });
 
 test("queue full throws", () => {

@@ -141,6 +141,41 @@ test("gpt-relay review separates client wait timeout from task timeout", async (
   }
 });
 
+test("CLI creates a ref with first text, exposes its status, and refuses implicit project defaults", async () => {
+  const pending = fs.mkdtempSync(path.join(os.tmpdir(), "relay-create-cli-"));
+  try {
+    const ref = "sr_cli_created";
+    const args = ["review", "--new-session", "--session-ref", ref, "--no-project", "--text", "bootstrap", "--no-wait"];
+    const first = await runCli(args, { GPT_RELAY_PENDING_DIR: pending });
+    assert.equal(first.code, 0, first.stderr);
+    const accepted = JSON.parse(first.stdout);
+    assert.equal(accepted.sessionRef, ref);
+    assert.ok(accepted.clientRequestId);
+    const duplicate = await runCli(args, { GPT_RELAY_PENDING_DIR: pending });
+    assert.equal(JSON.parse(duplicate.stdout).taskId, accepted.taskId);
+    const queried = await runCli(["sessions", "--session-ref", ref, "--json"]);
+    assert.equal(JSON.parse(queried.stdout).initialTaskId, accepted.taskId);
+    const listed = await runCli(["tasks", "--session-ref", ref]);
+    assert.match(listed.stdout, /queued/);
+    for (const invalid of [
+      ["review", "--new-session", "--session-ref", "sr_missing_project", "--text", "first"],
+      ["review", "--new-session", "--session-ref", "sr_both", "--no-project", "--project-id", "bad", "--text", "first"],
+      ["review", "--session", "legacy", "--session-ref", ref, "--text", "first"],
+    ]) assert.equal((await runCli(invalid, { GPT_RELAY_PENDING_DIR: pending })).code, 64);
+  } finally { fs.rmSync(pending, { recursive: true, force: true }); }
+});
+
+test("CLI project maintenance updates local metadata and preserves descriptions", async () => {
+  const id = "g-p-" + "b".repeat(32);
+  assert.equal((await runCli(["projects", "set", "--project-id", id, "--name", "Test", "--description", "Purpose"])).code, 0);
+  assert.equal((await runCli(["projects", "set", "--project-id", id, "--name", "Renamed"])).code, 0);
+  const result = await runCli(["projects", "--json"]);
+  const row = JSON.parse(result.stdout).projects.find((p: any) => p.projectId === id);
+  assert.equal(row.name, "Renamed");
+  assert.equal(row.description, "Purpose");
+  assert.equal((await runCli(["projects", "remove", "--project-id", id])).code, 0);
+});
+
 test("gpt-relay resume reports no pending when dir empty", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-relay-p-"));
   try {

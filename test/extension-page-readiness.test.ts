@@ -40,7 +40,7 @@ function element(id: string, text = ""): FakeElement {
   };
 }
 
-function createHarness({ advanceTimers = false } = {}) {
+function createHarness({ advanceTimers = false, managed = null as null | Record<string, unknown> } = {}) {
   const state = {
     now: 10_000,
     readyState: "loading",
@@ -52,6 +52,8 @@ function createHarness({ advanceTimers = false } = {}) {
     unrelatedSendButtons: [] as FakeElement[],
     stopButtons: [] as FakeElement[],
     pathname: "/c/6a61e3cc-3160-83ee-9aa7-f79a39d93b3e",
+    hash: managed ? `#relay-create=${encodeURIComponent(JSON.stringify(managed))}` : "",
+    helloConversationId: null as string | null,
     helloAcknowledged: true,
   };
   const storage = new Map<string, string>();
@@ -95,6 +97,7 @@ function createHarness({ advanceTimers = false } = {}) {
     },
   };
   const location = {
+    get hash() { return state.hash; },
     get pathname() {
       return state.pathname;
     },
@@ -124,7 +127,7 @@ function createHarness({ advanceTimers = false } = {}) {
     runtime: {
       sendMessage: async (message: unknown) => {
         sentMessages.push(message);
-        return state.helloAcknowledged ? { status: "ok" } : { error: "worker unavailable" };
+        return state.helloAcknowledged ? { status: "ok", conversationId: state.helloConversationId } : { error: "worker unavailable" };
       },
       onMessage: {
         addListener(listener: typeof onMessage) {
@@ -180,6 +183,11 @@ function createHarness({ advanceTimers = false } = {}) {
         });
       });
     },
+    async message(message: Record<string, unknown>) {
+      return new Promise<Record<string, unknown>>(resolve => {
+        onMessage?.(message, {}, value => resolve(value as Record<string, unknown>));
+      });
+    },
     async pageState() {
       return new Promise<Record<string, unknown>>((resolve) => {
         onMessage?.({ type: "get-page-state" }, {}, (value) => {
@@ -221,6 +229,43 @@ function modernMessage(role: "user" | "assistant", id: string, text: string) {
   }
   return { unit, marker };
 }
+
+test("managed creation retains its ref after first navigation and rejects later conversation changes", async () => {
+  const h = createHarness({ managed: { sessionRef: "sr_test", token: "owner-token", owner: "browser", projectId: null } });
+  h.state.pathname = "/";
+  h.state.readyState = "complete";
+  assert.equal(await h.sessionId(), "sr_test");
+  const id = "6ab53993-e114-83ee-9b06-3859506fe3e2";
+  h.state.pathname = `/c/${id}`;
+  h.state.users = [element("first-user", "first")];
+  h.state.helloConversationId = id;
+  h.tickInterval(3000);
+  await Promise.resolve();
+  assert.equal(await h.sessionId(), "sr_test");
+  h.state.pathname = "/c/6ab53993-e114-83ee-9b06-3859506fe3e3";
+  assert.equal((await h.pageState()).reason, "creation-route-mismatch");
+  assert.notEqual(await h.sessionId(), "sr_test");
+});
+
+test("managed project creation blocks fallback into an ordinary conversation", async () => {
+  const projectId = "g-p-" + "a".repeat(32);
+  const h = createHarness({ managed: { sessionRef: "sr_project", token: "t", owner: "b", projectId } });
+  h.state.readyState = "complete";
+  h.state.pathname = `/g/${projectId}-name/project`;
+  assert.equal(await h.sessionId(), "sr_project");
+  h.state.pathname = "/";
+  assert.equal((await h.pageState()).reason, "creation-route-mismatch");
+});
+
+test("worker configuration restores the stable ref when the initial URL marker was stripped", async () => {
+  const h = createHarness();
+  h.state.pathname = "/";
+  const configured = await h.message({ type: "configure-session", managed: {
+    sessionRef: "sr_configured", token: "token", owner: "browser", projectId: null, initialTaskId: "first-task",
+  } });
+  assert.equal(configured.session, "sr_configured");
+  assert.equal(await h.sessionId(), "sr_configured");
+});
 
 test("project conversation path reports its conversation ID and re-registers on same-ID navigation", async () => {
   const harness = createHarness();

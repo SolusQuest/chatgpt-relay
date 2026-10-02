@@ -204,10 +204,12 @@ test("clientRequestId dedup at HTTP layer", async () => {
   });
   const b = await post("/v1/tasks", {
     session: "sI",
-    text: "twice",
+    text: "once",
     clientRequestId: "cri-42",
   });
   assert.equal(a.json.taskId, b.json.taskId);
+  const conflict = await post("/v1/tasks", { session: "sI", text: "twice", clientRequestId: "cri-42" });
+  assert.equal(conflict.status, 409);
 });
 
 test("recover endpoint completes an in-flight task with DOM-captured reply", async () => {

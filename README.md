@@ -14,6 +14,8 @@ account's plan limits and the applicable OpenAI terms.
   through the normal ChatGPT web interface.
 - **Concurrent sessions**: multiple ChatGPT tabs can process independent review
   tasks in parallel.
+- **Agent-created conversations**: create a chat with its first message, explicitly select a Project or no Project, and reuse a stable `sessionRef` while retaining legacy session IDs.
+- **Local Project catalog**: query and maintain names and descriptions for Project IDs without changing Projects on ChatGPT.
 - **Durable SQLite queue**: tasks survive relay restarts, page refreshes, browser
   restarts, and agent interruptions.
 - **At-most-once browser delivery**: the extension persists a send fence before selecting Send. Refresh and restart recovery observe uncertain work instead of automatically replaying a prompt.
@@ -110,6 +112,17 @@ curl -X POST http://127.0.0.1:8765/v1/tasks \
 ```
 
 Find the session ID with `gpt-relay sessions` or in the extension popup.
+
+To create a new conversation, generate and retain a reference and submit its first message:
+
+```bash
+gpt-relay projects --json
+gpt-relay review --new-session --session-ref <ref> --no-project --file <prompt-file> --no-wait
+gpt-relay sessions --session-ref <ref> --json
+gpt-relay review --session-ref <ref> --file <follow-up-file> --no-wait
+```
+
+Use `--project-id <id>` instead of `--no-project` for a Project chat. Maintain the local catalog with `gpt-relay projects set --project-id <id> --name "Name" --description "Purpose"` and `gpt-relay projects remove --project-id <id>`. See the agent guide for first-message context, creation failure boundaries and request recovery. Webpage discovery is deferred; use the catalog CLI for this version.
 
 ## Common commands
 

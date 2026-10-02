@@ -41,8 +41,17 @@ async function cmdHealth(): Promise<number> {
   return 1;
 }
 
-async function cmdSessions(): Promise<number> {
+async function cmdSessions(args: string[] = []): Promise<number> {
+  const refIndex = args.indexOf("--session-ref");
+  if (refIndex >= 0) {
+    const ref = args[refIndex + 1];
+    if (!ref) throw new Error("missing session ref");
+    const row = await http.get(`/v1/sessions/${encodeURIComponent(ref)}`, { baseUrl: BASE });
+    console.log(JSON.stringify(row));
+    return 0;
+  }
   const sessions = await listSessions(BASE);
+  if (args.includes("--json")) { console.log(JSON.stringify({ sessions })); return 0; }
   if (sessions.length === 0) {
     console.log("(no active sessions)");
     return 0;
@@ -83,6 +92,7 @@ async function cmdTasks(args: string[]): Promise<number> {
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === "--session") q.set("session", args[++i] ?? "");
+    else if (a === "--session-ref") q.set("sessionRef", args[++i] ?? "");
     else if (a === "--status") q.set("status", args[++i] ?? "");
     else if (a === "--last") q.set("limit", args[++i] ?? "20");
   }
@@ -205,6 +215,10 @@ async function cmdResume(): Promise<number> {
   for (const { record, task } of rows) {
     const preview = record.textPreview.replace(/\s+/g, " ");
     if (!task) {
+      if (record.requestOnly) {
+        console.log(`${record.session}\tUNCONFIRMED\t"${preview}"; keep request ID ${record.clientRequestId}`);
+        continue;
+      }
       console.log(`${record.taskId.slice(0, 8)}\tGONE\t"${preview}"`);
       continue;
     }
@@ -243,6 +257,10 @@ async function cmdResume(): Promise<number> {
 
 async function cmdReview(args: string[]): Promise<number> {
   let session = "";
+  let sessionRef = "";
+  let newSession = false;
+  let projectId: string | null | undefined;
+  let projectChoices = 0;
   let text = "";
   let readStdin = false;
   let file: string | null = null;
@@ -253,6 +271,10 @@ async function cmdReview(args: string[]): Promise<number> {
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     if (a === "--session") session = args[++i] ?? "";
+    else if (a === "--session-ref") sessionRef = args[++i] ?? "";
+    else if (a === "--new-session") newSession = true;
+    else if (a === "--project-id") { projectId = args[++i]; projectChoices++; }
+    else if (a === "--no-project") { projectId = null; projectChoices++; }
     else if (a === "--text") text = args[++i] ?? "";
     else if (a === "--stdin") readStdin = true;
     else if (a === "--file") file = args[++i] ?? null;
@@ -263,7 +285,9 @@ async function cmdReview(args: string[]): Promise<number> {
     else if (a === "--task-timeout") taskTimeoutMs = Number(args[++i]);
     else if (a === "--cri") cri = args[++i];
   }
-  if (!session) {
+  if (Boolean(session) === Boolean(sessionRef) ||
+    (newSession && (!sessionRef || projectChoices !== 1 || projectId === "" || projectId === undefined)) ||
+    (!newSession && projectChoices > 0)) {
     console.error("usage: gpt-relay review --session <id> (--text T | --stdin | --file F) [--no-wait] [--wait-timeout ms] [--task-timeout ms] [--cri key]");
     return 64;
   }
@@ -278,14 +302,17 @@ async function cmdReview(args: string[]): Promise<number> {
     return 64;
   }
   const r = await review(text, {
-    session,
+    session: session || undefined,
+    sessionRef: sessionRef || undefined,
+    newSession,
+    ...(newSession ? { projectId } : {}),
     baseUrl: BASE,
     wait,
     ...(waitTimeoutMs !== undefined ? { waitTimeoutMs } : {}),
     ...(taskTimeoutMs !== undefined ? { taskTimeoutMs } : {}),
     ...(cri !== undefined ? { clientRequestId: cri } : {}),
   });
-  if ("reply" in r) {
+  if ("reply" in r && r.reply !== undefined) {
     if (r.status === "done" || r.lateReply) {
       process.stdout.write(r.reply ?? r.lateReply ?? "");
       return 0;
@@ -293,7 +320,7 @@ async function cmdReview(args: string[]): Promise<number> {
     console.error(`task ${r.taskId} ${r.status}: ${r.error ?? "(no error)"}`);
     return 2;
   }
-  console.log(JSON.stringify({ taskId: r.taskId, status: r.status }));
+  console.log(JSON.stringify(r));
   return 0;
 }
 
@@ -303,10 +330,42 @@ async function readAllStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8");
 }
 
+async function cmdProjects(args: string[]): Promise<number> {
+  const action = args[0];
+  if (!action || action === "--json") {
+    const result = await http.get<{ projects: Array<{ projectId: string; name: string; description: string | null }> }>("/v1/projects", { baseUrl: BASE });
+    if (action === "--json") console.log(JSON.stringify(result));
+    else for (const p of result.projects) console.log(`${p.projectId}\t${p.name}\t${p.description ?? ""}`);
+    return 0;
+  }
+  const values: Record<string, string> = {};
+  for (let i = 1; i < args.length; i++) {
+    const flag = args[i]!;
+    if (!["--project-id", "--name", "--description"].includes(flag) || args[i + 1] === undefined || args[i + 1]!.startsWith("--")) {
+      throw new Error("invalid projects option");
+    }
+    values[flag] = args[++i]!;
+  }
+  const id = values["--project-id"];
+  if (!id) throw new Error("projects requires --project-id");
+  const url = `/v1/projects/${encodeURIComponent(id)}`;
+  if (action === "set") {
+    if (!values["--name"]) throw new Error("projects set requires --name");
+    await http.put(url, { name: values["--name"], ...(values["--description"] !== undefined
+      ? { description: values["--description"] } : {}) }, { baseUrl: BASE });
+  } else if (action === "remove") await http.del(url, { baseUrl: BASE });
+  else throw new Error("unknown projects action");
+  console.log(JSON.stringify({ status: "ok" }));
+  return 0;
+}
+
 function usage(): void {
   console.log(`gpt-relay <command>
 
 commands:
+  projects [--json]        list local project metadata
+  projects set --project-id ID --name NAME [--description TEXT]
+  projects remove --project-id ID
   start                    start relay server (foreground)
   health                   check relay at ${BASE}
   sessions                 list active ChatGPT sessions
@@ -316,6 +375,9 @@ commands:
   cancel <taskId>          cancel a task
   resume                   check pending tasks from previous run
   review --session ID (--text T | --stdin)
+  review --session-ref REF (--text T | --stdin | --file F)
+  review --new-session --session-ref REF (--project-id ID | --no-project)
+         (--text T | --stdin | --file F) [--no-wait] [--cri KEY]
          [--wait-timeout ms] [--task-timeout ms]
                            submit a review and wait
 
@@ -335,7 +397,9 @@ async function main(): Promise<number> {
       case "health":
         return await cmdHealth();
       case "sessions":
-        return await cmdSessions();
+        return await cmdSessions(rest);
+      case "projects":
+        return await cmdProjects(rest);
       case "tasks":
         return await cmdTasks(rest);
       case "show":

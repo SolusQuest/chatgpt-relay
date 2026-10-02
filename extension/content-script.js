@@ -312,7 +312,9 @@
     const conversationRoute = location.pathname.match(/\/c\/([a-f0-9-]+)/);
 
     let reason = null;
-    if (document.readyState !== "complete") {
+    if (!managedRouteMatches()) {
+      reason = "creation-route-mismatch";
+    } else if (document.readyState !== "complete") {
       reason = "document-loading";
     } else if (generating) {
       reason = "generating";
@@ -371,7 +373,58 @@
     };
   }
 
+  function routeConversation() {
+    return location.pathname.match(/\/c\/([a-f0-9-]+)/)?.[1] ?? null;
+  }
+  function routeProject() {
+    return location.pathname.match(/\/g\/(g-p-[a-f0-9]{32})(?:-[^/]*)?(?:\/|$)/i)?.[1].toLowerCase() ?? null;
+  }
+  function managedSession() {
+    try {
+      const marker = (location.hash ?? "").match(/^#relay-create=(.+)$/)?.[1];
+      const saved = sessionStorage.getItem("gpt_relay_managed");
+      if (saved) return JSON.parse(saved);
+      if (marker) {
+        const m = JSON.parse(decodeURIComponent(marker));
+        if (/^sr_[A-Za-z0-9_-]{1,120}$/.test(m.sessionRef) && typeof m.token === "string" && typeof m.owner === "string") {
+          sessionStorage.setItem("gpt_relay_managed", JSON.stringify(m));
+          return m;
+        }
+      }
+    } catch { /* An invalid marker must not change the page identity. */ }
+    return null;
+  }
+  function managedRouteMatches() {
+    const m = managedSession();
+    if (!m) return true;
+    const project = routeProject();
+    const conversation = routeConversation();
+    if (project !== m.projectId) return false;
+    if (m.boundConversation && conversation !== m.boundConversation) return false;
+    if (!conversation && !project && location.pathname !== "/") return false;
+    return true;
+  }
+  function sessionMetadata() {
+    const inflight = readInflight();
+    const baseline = captureBaseline();
+    const managed = managedSession();
+    return { session: getSessionId(), managed, conversationId: routeConversation(), projectId: routeProject(),
+      hasHistory: baseline.userCount + baseline.assistantCount > 0,
+      postSend: !!inflight && inflight.session === getSessionId() &&
+        (!managed || inflight.taskId === managed.initialTaskId) && inflight.phase !== "preparing" };
+  }
+  function configureManagedSession(m) {
+    const old = managedSession();
+    if (!m || !/^sr_[A-Za-z0-9_-]{1,120}$/.test(m.sessionRef) || typeof m.token !== "string" ||
+      typeof m.owner !== "string" || (old && (old.sessionRef !== m.sessionRef || old.token !== m.token))) {
+      throw new Error("managed session configuration conflict");
+    }
+    sessionStorage.setItem("gpt_relay_managed", JSON.stringify({ ...m, boundConversation: m.boundConversation ?? old?.boundConversation }));
+    reportSid();
+  }
   function getSessionId() {
+    const managed = managedSession();
+    if (managed && managedRouteMatches()) return managed.sessionRef;
     const m = location.pathname.match(/\/c\/([a-f0-9-]+)/);
     if (m) return m[1];
     let sid = sessionStorage.getItem("gpt_relay_session_id");
@@ -899,8 +952,11 @@
           sendResponse({ status: "ok" });
         } else if (msg.type === "reset-composer") {
           sendResponse(await resetComposer());
+        } else if (msg.type === "configure-session") {
+          configureManagedSession(msg.managed);
+          sendResponse(sessionMetadata());
         } else if (msg.type === "get-session-id") {
-          sendResponse({ session: getSessionId() });
+          sendResponse(sessionMetadata());
         } else if (msg.type === "get-inflight") {
           sendResponse({ inflight: readInflight() });
         } else if (msg.type === "get-page-state") {
@@ -971,6 +1027,7 @@
             // run-task only submits, records the baseline, and returns. The
             // service worker owns all subsequent reply polling.
             sendResponse({
+              ...sessionMetadata(),
               status: "submitted",
               baseline,
               submissionState: "accepted",
@@ -1007,6 +1064,7 @@
               }
             }
             sendResponse({
+              ...sessionMetadata(),
               error: e.message,
               errorCode: typeof e.code === "string" ? e.code : null,
               attachmentCleanupConfirmed,
@@ -1040,8 +1098,13 @@
     if (sid === lastReportedSid && path === lastReportedPath) return;
     lastReportedSid = sid;
     lastReportedPath = path;
-    chrome.runtime.sendMessage({ type: "session-hello", session: sid })
+    chrome.runtime.sendMessage({ type: "session-hello", ...sessionMetadata() })
       .then((response) => {
+        const managed = managedSession();
+        if (managed && response?.conversationId) {
+          managed.boundConversation = response.conversationId;
+          sessionStorage.setItem("gpt_relay_managed", JSON.stringify(managed));
+        }
         if (response?.status !== "ok" &&
           lastReportedSid === sid && lastReportedPath === path) {
           lastReportedSid = "";
@@ -1057,6 +1120,9 @@
     updateBanner(`Relay: ${sid.slice(0, 8)}…`);
   }
   reportSid();
+  chrome.runtime.sendMessage({ type: "get-managed-session" }).then(response => {
+    if (response?.managed) configureManagedSession(response.managed);
+  }).catch(() => {});
   setInterval(reportSid, 3000);
 
   // Attempt in-flight recovery shortly after page load.
