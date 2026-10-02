@@ -281,6 +281,13 @@
   function getUserMessages() {
     return getMessages("user");
   }
+  function isMessageContent(node) {
+    // Modern role headings are siblings of the body. Exclude the containing
+    // message/search unit rather than relying on a role heading as an ancestor.
+    return !!node.closest('[data-message-author-role], [data-user-message-bubble], ' +
+      '[data-conversation-role], [data-content-search-unit-key], ' +
+      '[data-chatgpt-selection-message-id], [data-chatgpt-search-message-ids]');
+  }
   function getMessageId(el) {
     const legacyId = el?.getAttribute("data-message-id");
     if (legacyId) return legacyId;
@@ -1046,7 +1053,7 @@
         } else if (msg.type === "discover-projects") {
           const projects = [];
           for (const link of document.querySelectorAll('a[href]')) {
-            if (!isVisible(link) || link.closest('[data-message-author-role], [data-user-message-bubble], [data-conversation-role="assistant"]')) continue;
+            if (!isVisible(link) || isMessageContent(link)) continue;
             let url;
             try { url = new URL(link.getAttribute("href"), "https://chatgpt.com" + location.pathname); }
             catch { continue; }
@@ -1055,7 +1062,7 @@
             if (id && name && name.length <= 200) projects.push({ projectId: id, name, href: url.origin + url.pathname });
           }
           for (const row of document.querySelectorAll('[data-app-action-sidebar-project-row]')) {
-            if (!isVisible(row) || row.closest('[data-message-author-role], [data-user-message-bubble], [data-conversation-role="assistant"]')) continue;
+            if (!isVisible(row) || isMessageContent(row)) continue;
             const id = row.getAttribute("data-app-action-sidebar-project-id")?.toLowerCase();
             const label = row.getAttribute("data-app-action-sidebar-project-label")?.trim().replace(/\s+/g, " ");
             const name = row.querySelector('[data-marquee-content]')?.innerText?.trim().replace(/\s+/g, " ");

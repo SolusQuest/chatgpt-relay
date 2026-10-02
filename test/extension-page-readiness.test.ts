@@ -769,3 +769,31 @@ test("real UUIDs survive positional rekeys and mixed legacy/modern wrappers", as
   assert.notEqual((await h.pollReply(baseline)).status, "reply-ready");
   assert.equal(((await h.pageState()).baseline as any).lastAssistantId, "answer-uuid");
 });
+
+for (const ancestor of ["data-content-search-unit-key", "data-chatgpt-selection-message-id", "data-chatgpt-search-message-ids", "data-message-author-role", "data-user-message-bubble"]) {
+  test(`project discovery excludes message content under ${ancestor}`, async () => {
+    const h = createHarness(); h.state.readyState = "complete";
+    const id = "g-p-" + "f".repeat(32);
+    const message = element("message");
+    const replyLink = element("reply-link", "Wrong name from a reply");
+    replyLink.getAttribute = name => name === "href" ? `/g/${id}/project` : null;
+    replyLink.closest = selector => selector.includes(`[${ancestor}]`) ? message : null;
+    const replyRow = element("reply-row");
+    replyRow.getAttribute = name => name === "data-app-action-sidebar-project-id" ? id :
+      name === "data-app-action-sidebar-project-label" ? "Wrong name from a reply" : null;
+    replyRow.querySelector = () => element("label", "Wrong name from a reply");
+    replyRow.closest = replyLink.closest;
+    const breadcrumb = element("breadcrumb", "Real Project");
+    breadcrumb.getAttribute = name => name === "href" ? `/g/${id}/project` : null;
+    breadcrumb.closest = () => null;
+    const sidebar = element("sidebar-row");
+    sidebar.getAttribute = name => name === "data-app-action-sidebar-project-id" ? id :
+      name === "data-app-action-sidebar-project-label" ? "Real Project" : null;
+    sidebar.querySelector = () => element("label", "Real Project");
+    sidebar.closest = () => null;
+    h.state.projectLinks = [replyLink, breadcrumb]; h.state.projectRows = [replyRow, sidebar];
+    const projects = (await h.message({ type: "discover-projects" })).projects as any[];
+    assert.equal(projects.length, 2, "keep both real navigation entries");
+    assert.ok(projects.every(project => project.name === "Real Project" && project.projectId === id));
+  });
+}
