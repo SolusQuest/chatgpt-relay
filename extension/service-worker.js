@@ -478,17 +478,21 @@ async function executeSessionControl(command) {
 async function executeStopControl(command) {
   const { tabId, session, taskId } = command;
   let requested = null;
+  let submittedUserMessageId = command.result?.submittedUserMessageId ?? null;
   refreshingTabs.add(tabId);
   try {
     if (pendingPolls.has(taskId)) await pendingPolls.get(taskId);
     if (await getTabSession(tabId, { forceFresh: true }) !== session) throw new Error("session_identity_changed");
     const rec = await getPendingReply(taskId);
-    if (!rec || rec.tabId !== tabId || rec.session !== session || !rec.submittedUserMessageId) throw new Error("stop_identity_mismatch");
+    if (rec && (rec.tabId !== tabId || rec.session !== session || !rec.submittedUserMessageId ||
+        (submittedUserMessageId && rec.submittedUserMessageId !== submittedUserMessageId))) throw new Error("stop_identity_mismatch");
+    submittedUserMessageId ??= rec?.submittedUserMessageId ?? null;
     if (command.state !== "executing") {
+      if (!rec) throw new Error("stop_identity_mismatch");
       const page = await getPageState(tabId);
       command.executionFenced = true; // The server may persist the fence even if its response is lost.
       const fence = await httpJson("POST", `/internal/session-controls/${encodeURIComponent(command.operationId)}/fence`,
-        { owner: command.owner, token: command.token, documentId: page.documentId });
+        { owner: command.owner, token: command.token, documentId: page.documentId, submittedUserMessageId });
       if (fence.execute) {
         const response = await sendTabMessage(tabId, { type: "stop-generation", taskId,
           expectedSession: session, submittedUserMessageId: rec.submittedUserMessageId }, PAGE_STATE_SENDMSG_TIMEOUT_MS, "stop-generation");
@@ -500,22 +504,31 @@ async function executeStopControl(command) {
           await setPendingReply(taskId, rec);
         }
       }
-    } else requested = rec.stopRequestedAt ? true : null;
+    } else requested = rec?.stopRequestedAt ? true : null;
   } finally { refreshingTabs.delete(tabId); }
   // Click acknowledgement, observed page state, and Relay cancellation are
   // separate facts. A stalled Stop button must not masquerade as cancellation.
   const deadline = Math.min(command.expiresAt, Date.now() + 10_000);
-  let page = null, task = null;
+  let page = null, task = null, pageGenerationState = "unknown";
   do {
     page = await getPageState(tabId).catch(() => null);
     const rec = await getPendingReply(taskId);
     if (rec) await pollOnePending(taskId, rec);
     task = await httpJson("GET", `/v1/tasks/${encodeURIComponent(taskId)}`);
-    if (page?.session === session && !page.generating && ["cancelled", "done", "failed"].includes(task.status)) break;
+    if (task?.taskId !== taskId || task.session !== session) throw new Error("stop_task_identity_mismatch");
+    // Pending state may already have been removed before /finish was persisted.
+    // Recover only facts the server retained; cancellation by another mechanism
+    // and natural completion do not prove a Stop request.
+    if (requested == null && task.status === "cancelled" && task.error === "user stopped before reply") requested = true;
+    pageGenerationState = page?.session === session && submittedUserMessageId &&
+      page.baseline?.lastUserId === submittedUserMessageId
+      ? page.generating === true ? "generating" : page.generating === false && page.ready === true ? "stopped" : "unknown"
+      : "unknown";
+    if (pageGenerationState === "stopped" && ["cancelled", "done", "failed", "expired"].includes(task.status)) break;
+    if (Date.now() >= deadline) break;
     await delay(400);
   } while (Date.now() < deadline);
-  return { stopRequested: requested, pageGenerationState: page?.session !== session ? "unknown" :
-    page.generating ? "generating" : "stopped", relayTaskStatus: task?.status ?? "unknown" };
+  return { stopRequested: requested, pageGenerationState, relayTaskStatus: task?.status ?? "unknown" };
 }
 
 const refreshingTabs = new Set();

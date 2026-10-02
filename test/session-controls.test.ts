@@ -6,6 +6,34 @@ import { loadConfig } from "../server/config.js";
 import { SessionDiagnostics } from "../server/session-diagnostics.js";
 import { SessionControls } from "../server/session-controls.js";
 
+test("Stop fence retains original message identity after task cleanup and control restart", () => {
+  const db = openDatabase(":memory:");
+  try {
+    const store = new TaskStore(db, loadConfig());
+    const diagnostics = new SessionDiagnostics(db, store);
+    let controls = new SessionControls(db, store, diagnostics);
+    const task = store.createTask({ session: "stop", text: "prompt" });
+    store.claimNextTask("stop"); store.markTaskProgress(task.id, "send_attempted");
+    diagnostics.report({ session: "stop", owner: "edge", tabId: 7, protocol: 1 });
+    controls.create({ operationId: "stop-restart-1", kind: "stop", taskId: task.id });
+    const command = controls.claim("edge")!;
+    const evidence = { owner: "edge", token: command.token, documentId: "original-document", submittedUserMessageId: "original-user" };
+    for (const invalid of [123, "", "x".repeat(201)]) {
+      assert.throws(() => controls.fence(command.operationId, { ...evidence, submittedUserMessageId: invalid }), /invalid_submitted_user/);
+    }
+    assert.equal(controls.fence(command.operationId, evidence).execute, true);
+    store.cancelTask(task.id, Date.now(), "user stopped before reply");
+    controls = new SessionControls(db, store, diagnostics);
+    const resumed = controls.claim("edge")!;
+    assert.equal(resumed.state, "executing");
+    assert.deepEqual(resumed.result, { beforeDocumentId: "original-document", submittedUserMessageId: "original-user" });
+    assert.equal(controls.fence(command.operationId, { ...evidence, submittedUserMessageId: "different-user" }).execute, false);
+    const result = { stopRequested: true, pageGenerationState: "stopped", relayTaskStatus: "cancelled" };
+    controls.finish(command.operationId, { ...evidence, state: "succeeded", result });
+    assert.deepEqual(controls.finish(command.operationId, { ...evidence, state: "unknown" }).result, result);
+  } finally { db.close(); }
+});
+
 test("recovery controls are idempotent, owned, durable and independent of active task", () => {
   const db = openDatabase(":memory:");
   try {

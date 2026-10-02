@@ -158,6 +158,8 @@ Refresh defaults to an idle page with an empty composer. To reload while observi
 
 `tasks stop` clicks Stop only for the original task's last user turn and reports `stopRequested`, `pageGenerationState`, and `relayTaskStatus` separately. `cancel` only cancels Relay tracking. HTTP and task failures include `errorInfo` with a stable code, delivery state, suggested next action, and conservative `safeToResubmit` (`false` or unknown/null).
 
+After a worker restart, Stop observes the original task without clicking again, even if reply tracking was already cleaned up. A known task result is retained; `stopRequested` stays `null` without Stop evidence, and `pageGenerationState` stays `unknown` if the original user turn cannot be verified or the page is still loading.
+
 Restart the relay server, reload the Edge extension and refresh ChatGPT pages after updating these components. Use `doctor` to verify the page protocol before issuing control commands.
 
 | Method | Path | Purpose |

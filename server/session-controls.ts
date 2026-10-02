@@ -91,10 +91,14 @@ export class SessionControls {
     if (row.state !== "claimed") return { ...this.view(row), execute: false };
     if (!["refresh", "stop"].includes(row.kind)) throw new ControlError("control_has_no_side_effect_fence");
     if (typeof body.documentId !== "string" || body.documentId.length > 100 || !body.documentId) throw new ControlError("invalid_document_id", 400);
+    if (row.kind === "stop" && body.submittedUserMessageId != null &&
+        (typeof body.submittedUserMessageId !== "string" || !body.submittedUserMessageId || body.submittedUserMessageId.length > 200))
+      throw new ControlError("invalid_submitted_user_message_id", 400);
     const active = this.store.listTasks({ session: row.session, status: ["in_progress", "recovering"] })[0];
     if ((active?.id ?? null) !== row.task_id) throw new ControlError("active_task_changed");
     this.db.prepare("UPDATE session_controls SET state='executing', result=? WHERE id=?")
-      .run(JSON.stringify({ beforeDocumentId: body.documentId }), id);
+      .run(JSON.stringify({ beforeDocumentId: body.documentId,
+        ...(row.kind === "stop" && body.submittedUserMessageId ? { submittedUserMessageId: body.submittedUserMessageId } : {}) }), id);
     return { ...this.view(this.row(id)!), execute: true };
   }
 }

@@ -147,11 +147,11 @@ test("Stop reports page and Relay outcomes separately and records original task 
   const result = await vm.runInContext(`(async()=>{
     let clicked=0,record={session:'session',tabId:7,taskId:'task',submittedUserMessageId:'user'};
     getTabSession=async()=> 'session';
-    getPageState=async()=>({session:'session',documentId:'doc',generating:false});
+    getPageState=async()=>({session:'session',documentId:'doc',generating:false,ready:true,baseline:{lastUserId:'user'}});
     getPendingReply=async()=>record;
     setPendingReply=async(id,value)=>{record=value;};
     pollOnePending=async()=>{};
-    httpJson=async(method,url)=>url.endsWith('/fence')?{execute:true}:{status:'cancelled'};
+    httpJson=async(method,url)=>url.endsWith('/fence')?{execute:true}:{taskId:'task',session:'session',status:'cancelled'};
     sendTabMessage=async()=>{clicked++;return {clicked:true,stopRequestedAt:123};};
     const command={kind:'stop',session:'session',tabId:7,taskId:'task',state:'claimed',expiresAt:Date.now()+1000};
     const result=await executeSessionControl(command);
@@ -162,6 +162,94 @@ test("Stop reports page and Relay outcomes separately and records original task 
   assert.equal(result.record.stopRequestedAt, 123);
   assert.equal(result.result.pageGenerationState, "stopped");
   assert.equal(result.result.relayTaskStatus, "cancelled");
+});
+
+for (const status of ['cancelled-stop', 'cancelled-client', 'done', 'failed', 'in_progress']) {
+  for (const pageCase of ['original', 'new-turn', 'generating', 'hydrating', 'other-session', 'unreachable', 'legacy-fence']) {
+    test(`resumed Stop observes durable outcome without pending state: ${status}, ${pageCase}`, async () => {
+      const w = await worker();
+      w.context.taskStatus = status;
+      w.context.pageCase = pageCase;
+      const result = await vm.runInContext(`(async()=>{
+        getTabSession=async()=> 'session';
+        getPageState=async()=>{
+          if(pageCase==='unreachable') throw new Error('page unavailable');
+          return {session:pageCase==='other-session'?'other':'session',documentId:'doc',
+            ready:pageCase!=='hydrating',generating:pageCase==='generating',
+            baseline:{lastUserId:pageCase==='new-turn'?'new-user':'original-user'}};
+        };
+        sendTabMessage=async()=>{throw new Error('must never replay Stop');};
+        httpJson=async(method,url)=>{
+          if(method!=='GET' || url!=='/v1/tasks/task') throw new Error('unexpected mutation');
+          return {taskId:'task',session:'session',status:taskStatus.startsWith('cancelled')?'cancelled':taskStatus,
+            error:taskStatus==='cancelled-stop'?'user stopped before reply':'cancelled by client'};
+        };
+        return executeStopControl({kind:'stop',state:'executing',session:'session',taskId:'task',tabId:7,
+          expiresAt:Date.now()-1,result:{beforeDocumentId:'doc',
+            ...(pageCase==='legacy-fence'?{}:{submittedUserMessageId:'original-user'})}});
+      })()`,w.context);
+      assert.equal(result.stopRequested, status === 'cancelled-stop' ? true : null);
+      assert.equal(result.relayTaskStatus, status.startsWith('cancelled') ? 'cancelled' : status);
+      assert.equal(result.pageGenerationState, pageCase === 'original' ? 'stopped' : pageCase === 'generating' ? 'generating' : 'unknown');
+    });
+  }
+}
+
+test('resumed Stop rejects foreign server task identity',async()=>{
+  const w=await worker();
+  await vm.runInContext(`
+    getTabSession=async()=> 'session';
+    getPageState=async()=>({session:'session',ready:true,generating:false,baseline:{lastUserId:'user'}});
+    httpJson=async()=>({taskId:'task',session:'other',status:'cancelled',error:'user stopped before reply'});
+  `,w.context);
+  await assert.rejects(vm.runInContext(`executeStopControl({state:'executing',session:'session',taskId:'task',tabId:7,
+    expiresAt:Date.now()-1,result:{submittedUserMessageId:'user'}})`,w.context),/stop_task_identity_mismatch/);
+});
+
+test('worker restart after Stop cleanup and lost finish response recovers success without another click',async()=>{
+  const w=await worker();
+  const evidence=await vm.runInContext(`(async()=>{
+    const command={kind:'stop',session:'session',taskId:'task',tabId:7,state:'claimed',operationId:'stop-op',token:'token',expiresAt:Date.now()+60000};
+    let clicks=0, outcome;
+    getTabSession=async()=> 'session';
+    getPageState=async()=>({session:'session',documentId:'doc',ready:true,generating:false,baseline:{lastUserId:'user'}});
+    await markInflight('session','task',{tabId:7,deliveryPhase:'accepted'});
+    await setPendingReply('task',{taskId:'task',session:'session',tabId:7,submittedUserMessageId:'user'});
+    sendTabMessage=async(tab,msg)=>{if(msg.type==='stop-generation'){clicks++;return {clicked:true,stopRequestedAt:123};}return {};};
+    pollOnePending=async()=>{await clearRecoveredTask('task','session',7);};
+    httpJson=async(method,url,body)=>{
+      if(url.endsWith('/claim')) return {command};
+      if(url.endsWith('/fence')) {
+        command.state='executing'; command.result={beforeDocumentId:body.documentId,submittedUserMessageId:body.submittedUserMessageId};
+        return {execute:true,result:command.result};
+      }
+      if(url.endsWith('/finish')) {outcome=body;throw new Error('connection lost before finish persisted');}
+      return {taskId:'task',session:'session',status:'cancelled',error:'user stopped before reply'};
+    };
+    await processSessionControls();
+    return {command,clicks,outcome,pending:await getPendingReply('task')};
+  })()`,w.context);
+  assert.equal(evidence.clicks,1);
+  assert.equal(evidence.pending,null);
+  assert.equal(evidence.outcome.state,'succeeded');
+  const restarted=await worker();
+  restarted.context.command=JSON.parse(JSON.stringify(evidence.command));
+  const result=await vm.runInContext(`(async()=>{
+    let outcome;
+    getTabSession=async()=> 'session';
+    getPageState=async()=>({session:'session',documentId:'doc',ready:true,generating:false,baseline:{lastUserId:'user'}});
+    sendTabMessage=async()=>{throw new Error('must not click Stop again');};
+    httpJson=async(method,url,body)=>{
+      if(url.endsWith('/claim')) return {command};
+      if(url.endsWith('/finish')) {outcome=body;return {};}
+      if(method!=='GET') throw new Error('must not fence again');
+      return {taskId:'task',session:'session',status:'cancelled',error:'user stopped before reply'};
+    };
+    await processSessionControls();
+    return outcome;
+  })()`,restarted.context);
+  assert.equal(result.state,'succeeded');
+  assert.deepEqual(JSON.parse(JSON.stringify(result.result)),JSON.parse(JSON.stringify(evidence.outcome.result)));
 });
 
 test("a lost execution fence response reports unknown instead of a retryable block", async () => {
