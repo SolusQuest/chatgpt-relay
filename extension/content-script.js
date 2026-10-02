@@ -435,8 +435,8 @@
       reason = "generating";
     } else if (!input || !isVisible(input)) {
       reason = "composer-loading";
-    } else if (userOwnedComposer && !composer.clean) {
-      reason = "composer-user-edit";
+    } else if (!composer.clean) {
+      reason = userOwnedComposer ? "composer-user-edit" : "composer-not-clean";
     } else if (
       conversationRoute &&
       baseline.userCount + baseline.assistantCount === 0
@@ -634,6 +634,9 @@
   async function waitForPageReady(target)  {
     return waitForCondition(() => {
       if (target) assertSubmissionTarget(target);
+      if (target && !getComposerPayloadState(target.input).clean) {
+        throw makeRelayError("composer_not_clean", "Composer contains an existing draft");
+      }
       const state = getPageReadiness();
       return state.ready && !state.generating ? state : null;
     }, PAGE_READY_TIMEOUT_MS, 250, "waitForPageReady");
@@ -782,6 +785,11 @@
     try { inp.focus({ preventScroll: true }); } catch { /* ignore */ }
     await pacedDelay(50, 150);
     assertSubmissionTarget(target);
+    // Hydration or another editor can populate a draft without a trusted input
+    // event. Check again immediately before replacing the selection.
+    if (!getComposerPayloadState(inp).clean) {
+      throw makeRelayError("composer_not_clean", "Composer contains an existing draft");
+    }
 
     // Keep the selection inside the composer for the Lexical paste handler.
     try {
@@ -1186,6 +1194,13 @@
         } else if (msg.type === "run-task") {
           const block = findSafetyBlock();
           if (block) throw new Error(`safety: ${block.reason}`);
+          // This check and ownership acquisition are synchronous: never erase a
+          // draft that appeared between the worker's preflight and this message.
+          if (!getComposerPayloadState(findInput()).clean) {
+            sendResponse({ error: "Composer contains an existing draft", errorCode: "composer_not_clean",
+              submissionState: "not-submitted", composerPayloadObserved: true });
+            return;
+          }
           updateBanner(`Submitting: ${msg.taskId?.slice?.(0, 8) ?? ""}…`, "#e67e22");
 
           // Save the baseline and in-flight state for refresh recovery.
@@ -1209,17 +1224,6 @@
 
           try {
             assertSubmissionTarget(target);
-            const reset = await resetComposer(COMPOSER_RESET_TIMEOUT_MS, COMPOSER_RESET_STABLE_MS, target);
-            if (!reset.clean) {
-              if (reset.attachmentObserved) {
-                throw makeRelayError(
-                  "attachment_cleanup_incomplete",
-                  "Composer attachment could not be cleared before submission",
-                  { attachmentObserved: true },
-                );
-              }
-              console.warn("[relay content] continuing after incomplete composer reset");
-            }
             const pasteResult = await pasteIntoInput(msg.text, target);
             inflight.attachmentMode = pasteResult?.asAttachment === true;
             writeInflight(inflight);
@@ -1271,7 +1275,7 @@
             })();
             const composerPayloadObserved = failedComposer?.clean === false;
             inflight.composerPayloadObservedAfterFailure = composerPayloadObserved;
-            inflight.preserveComposer = e.code === "submission_target_changed" ||
+            inflight.preserveComposer = e.code === "composer_not_clean" || e.code === "submission_target_changed" ||
               e.code === "submission_payload_changed" || target.userModified === true;
             if (inflight.preserveComposer) userOwnedComposer = true;
             writeInflight(inflight);

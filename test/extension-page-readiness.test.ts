@@ -290,6 +290,7 @@ test("refresh validates identity and the latest composer before reloading", asyn
   assert.match(String((await h.message(request)).error), /composer_not_clean/);
   assert.equal(h.state.reloads, 0);
   h.state.input!.textContent = "";
+  await h.pageState(); h.state.now += 5000;
   assert.equal((await h.message(request)).reloading, true);
   assert.equal(h.state.reloads, 1);
 });
@@ -675,6 +676,60 @@ test("discovery supports modern sidebar rows with matching visible labels", asyn
   row.querySelector = () => element("label", "Other name");
   assert.deepEqual(JSON.parse(JSON.stringify((await h.message({ type: "discover-projects" })).projects)), []);
 });
+
+for (const payload of ["text", "attachment", "upload"] as const) {
+  for (const timing of ["idle", "after-preflight", "hydration", "before-paste"] as const) {
+    test(`existing draft is preserved: ${payload}, ${timing}`, async () => {
+      const h = createHarness({ advanceTimers: true });
+      h.state.readyState = "complete";
+      h.state.users = [element("old-user", "history")];
+      const input = h.state.input as any;
+      input.isConnected = true;
+      input.focus = () => {};
+      let mutations = 0;
+      let attachments: FakeElement[] = [];
+      let progress: FakeElement[] = [];
+      input.dispatchEvent = () => { mutations++; };
+      input.removeChild = () => { mutations++; input.textContent = ""; };
+      const root = { querySelectorAll: (selector: string) => {
+        if (selector === '[data-composer-attachments][data-visible-attachments]') return attachments;
+        if (selector === '[role="progressbar"]') return progress;
+        return [];
+      } };
+      input.closest = () => root;
+      const populate = () => {
+        if (payload === "text") input.textContent = "EXISTING HUMAN DRAFT";
+        if (payload === "attachment") attachments = [element("private-file", "Private file")];
+        if (payload === "upload") progress = [element("upload", "Uploading")];
+      };
+      if (timing === "idle") populate();
+      await h.pageState(); h.state.now += 5000;
+      const preflight = await h.pageState();
+      assert.equal(preflight.ready, timing !== "idle");
+      if (timing === "after-preflight") populate();
+      if (timing === "hydration") {
+        h.state.readyState = "loading";
+        h.state.onTimer = () => { populate(); h.state.readyState = "complete"; h.state.onTimer = null; };
+      }
+      if (timing === "before-paste") input.focus = populate;
+      const result = await h.message({ type: "run-task", taskId: "new-task", text: "RELAY PROMPT",
+        expectedSession: await h.sessionId() });
+      assert.equal(result.errorCode, "composer_not_clean");
+      assert.equal(result.submissionState, "not-submitted");
+      assert.equal(mutations, 0);
+      if (payload === "text") assert.equal(input.textContent, "EXISTING HUMAN DRAFT");
+      if (payload === "attachment") assert.equal(attachments[0]?.textContent, "Private file");
+      if (payload === "upload") assert.equal(progress.length, 1);
+      assert.equal((await h.pageState()).ready, false);
+      if (timing === "idle" || timing === "after-preflight") {
+        assert.equal((await h.message({ type: "get-inflight" })).inflight, null);
+      }
+      input.textContent = ""; attachments = []; progress = [];
+      await h.pageState(); h.state.now += 5000;
+      assert.equal((await h.pageState()).ready, true);
+    });
+  }
+}
 
 for (const scenario of ["unchanged", "attachment-unchanged", "wrong-session", "navigation", "remount", "edit", "attachment", "delayed-navigation", "disabled-send", "replaced-send"] as const) {
   test(`submission stays bound to its session, composer and payload: ${scenario}`, async () => {

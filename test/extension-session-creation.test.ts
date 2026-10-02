@@ -236,6 +236,34 @@ test("reply completion requires the same user and assistant identities across sa
   await poll(); assert.equal(captured(), 1);
 });
 
+for (const timing of ["preclaim", "postclaim", "run-task"]) {
+  test(`dispatch waits for a dirty composer: ${timing}`, async () => {
+    const w = await worker("opening", true);
+    w.context.draftTiming = timing;
+    const calls = await vm.runInContext(`(async () => {
+      const calls=[]; let pages=0;
+      tabSessionCache.set(7,'session');
+      getPageState=async()=>({session:'session',ready:true,generating:false,baseline:{},
+        composerClean: ++pages !== (draftTiming==='preclaim'?1:draftTiming==='postclaim'?2:0)});
+      httpJson=async(method,path)=>{
+        calls.push(path);
+        return path.startsWith('/internal/next_task')?{task:{taskId:'task',text:'prompt'}}:{};
+      };
+      sendTabMessage=async(tab,msg)=>{
+        calls.push(msg.type);
+        return msg.type==='run-task'?{error:'existing draft',errorCode:'composer_not_clean',submissionState:'not-submitted'}:{};
+      };
+      setTimeout=(fn)=>{stopDispatchLoop('session'); fn(); return 1;};
+      await startDispatchLoop('session',7);
+      return calls;
+    })()`, w.context);
+    assert.equal(calls.some((x: string) => x.startsWith('/internal/next_task')), timing !== 'preclaim');
+    assert.equal(calls.includes('run-task'), timing === 'run-task');
+    assert.equal(calls.includes('/internal/tasks/task/defer'), timing !== 'preclaim');
+    assert.equal(calls.includes('/internal/tasks/task/complete'), false);
+  });
+}
+
 for (const stopLoop of [false, true]) {
   test(`reconciliation does not recover a live preparing dispatch (loop stopped: ${stopLoop})`, async () => {
     const w = await worker("opening", true);

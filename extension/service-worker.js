@@ -917,7 +917,7 @@ async function startDispatchLoop(session, tabId) {
       // including a late reply, because React may overwrite a new prompt.
       try {
         const state = await getPageState(tabId);
-        if (state.session !== session || !state.ready || state.generating) {
+        if (state.session !== session || !state.ready || state.generating || state.composerClean === false) {
           dlog(
             "[relay sw] page not dispatchable",
             session.slice(0, 8),
@@ -981,7 +981,7 @@ async function startDispatchLoop(session, tabId) {
           await delay(DISPATCH_LOOP_RETRY_MS);
           continue;
         }
-        if (pageState.session !== session || !pageState.ready || pageState.generating) {
+        if (pageState.session !== session || !pageState.ready || pageState.generating || pageState.composerClean === false) {
           await httpJson("POST", `/internal/tasks/${taskId}/defer`, {}).catch(() => {});
           await clearRecoveredTask(taskId, session, tabId);
           await delay(DISPATCH_LOOP_RETRY_MS);
@@ -1052,7 +1052,8 @@ async function startDispatchLoop(session, tabId) {
             }
             continue;
           }
-          if (runRes.submissionState === "not-submitted" && /waitForPageReady/.test(runRes.error)) {
+          if (runRes.submissionState === "not-submitted" &&
+              (runRes.errorCode === "composer_not_clean" || /waitForPageReady/.test(runRes.error))) {
             await httpJson("POST", `/internal/tasks/${taskId}/defer`, {}).catch(() => {});
             await clearRecoveredTask(taskId, session, tabId);
             await delay(DISPATCH_LOOP_RETRY_MS);

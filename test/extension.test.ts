@@ -174,12 +174,10 @@ test("durable send fence precedes Send and post-attempt polling cannot requeue",
   assert.doesNotMatch(worker, /requeuePending/);
 });
 
-test("composer cleanup is best-effort and prompt injection replaces selected text", () => {
+test("scoped composer cleanup and prompt injection remain available", () => {
   const content = fs.readFileSync(path.join(EXT, "content-script.js"), "utf8");
   const worker = fs.readFileSync(path.join(EXT, "service-worker.js"), "utf8");
   assert.match(content, /async function resetComposer/);
-  assert.match(content, /continuing after incomplete composer reset/);
-  assert.match(content, /if \(reset\.attachmentObserved\)[\s\S]*attachment_cleanup_incomplete/);
   assert.match(content, /range\.selectNodeContents\(inp\)/);
   assert.doesNotMatch(content, /range\.collapse\(false\)/);
   assert.match(content, /type === "reset-composer"/);
