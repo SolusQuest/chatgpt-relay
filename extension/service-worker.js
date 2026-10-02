@@ -407,7 +407,7 @@ async function reportSessionSnapshots() {
   try {
     const owner = await creationOwner();
     const tabs = await chrome.tabs.query({ url: "https://chatgpt.com/*" });
-    await Promise.all(tabs.map(async tab => {
+    const reports = await Promise.allSettled(tabs.map(async tab => {
       if (tab.id == null) return;
       const session = await getTabSession(tab.id, { forceFresh: true }).catch(() => null);
       if (!session) return;
@@ -419,8 +419,9 @@ async function reportSessionSnapshots() {
         ready: state?.ready ?? null, generating: state?.generating ?? null,
         composerClean: state?.composerClean ?? null, reason: state?.reason ?? "page_unreachable",
         capabilities: state?.capabilities,
-      });
+      }, 5000);
     }));
+    for (const report of reports) if (report.status === "rejected") dlog("page snapshot failed", report.reason);
   } catch (err) { dlog("session snapshots", err); }
   finally { setTimeout(() => void reportSessionSnapshots(), 10000); }
 }
@@ -456,12 +457,13 @@ async function executeStopControl(command) {
     if (!rec || rec.tabId !== tabId || rec.session !== session || !rec.submittedUserMessageId) throw new Error("stop_identity_mismatch");
     if (command.state !== "executing") {
       const page = await getPageState(tabId);
+      command.executionFenced = true; // The server may persist the fence even if its response is lost.
       const fence = await httpJson("POST", `/internal/session-controls/${encodeURIComponent(command.operationId)}/fence`,
         { owner: command.owner, token: command.token, documentId: page.documentId });
       if (fence.execute) {
         const response = await sendTabMessage(tabId, { type: "stop-generation", taskId,
           expectedSession: session, submittedUserMessageId: rec.submittedUserMessageId }, PAGE_STATE_SENDMSG_TIMEOUT_MS, "stop-generation");
-        if (response?.error) throw new Error(response.error);
+        if (response?.error) throw Object.assign(new Error(response.error), { definitelyBlocked: true });
         requested = response?.clicked ?? null;
         if (response?.stopRequestedAt) {
           stopRequests.set(taskId, { tabId, session, userId: rec.submittedUserMessageId, at: response.stopRequestedAt });
@@ -506,13 +508,14 @@ async function executeRefreshControl(command) {
         if (!rec?.baseline || rec.tabId !== tabId || !rec.submittedUserMessageId || rec.stopRequestedAt)
           throw new Error("recovery_evidence_unavailable");
       }
+      command.executionFenced = true;
       const fence = await httpJson("POST", `/internal/session-controls/${encodeURIComponent(command.operationId)}/fence`,
         { owner: command.owner, token: command.token, documentId: state.documentId });
       beforeDocumentId = fence.result?.beforeDocumentId;
       if (fence.execute) {
         const response = await sendTabMessage(tabId, { type: "refresh-page", expectedSession: session,
           taskId, documentId: state.documentId }, PAGE_STATE_SENDMSG_TIMEOUT_MS, "refresh-page").catch(() => null);
-        if (response?.error) throw new Error(response.error);
+        if (response?.error) throw Object.assign(new Error(response.error), { definitelyBlocked: true });
       }
     }
     if (!beforeDocumentId) throw new Error("refresh_outcome_unknown");
@@ -543,7 +546,10 @@ async function processSessionControls() {
     if (!command) return;
     let outcome;
     try { outcome = { state: "succeeded", result: await executeSessionControl(command) }; }
-    catch (e) { outcome = { state: e.message === "refresh_outcome_unknown" ? "unknown" : "blocked", error: e.message }; }
+    catch (e) {
+      const uncertain = !e.definitelyBlocked && (command.executionFenced || command.state === "executing");
+      outcome = { state: uncertain || e.message === "refresh_outcome_unknown" ? "unknown" : "blocked", error: e.message };
+    }
     await httpJson("POST", `/internal/session-controls/${encodeURIComponent(command.operationId)}/finish`,
       { owner, token: command.token, ...outcome });
   } catch (err) { dlog("session controls", err); }

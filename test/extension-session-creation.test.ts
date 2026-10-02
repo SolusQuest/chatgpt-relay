@@ -132,6 +132,25 @@ test("Stop reports page and Relay outcomes separately and records original task 
   assert.equal(result.result.relayTaskStatus, "cancelled");
 });
 
+test("a lost execution fence response reports unknown instead of a retryable block", async () => {
+  const w = await worker();
+  const outcome = await vm.runInContext(`(async()=>{
+    let outcome;
+    getTabSession=async()=> 'session';
+    getPageState=async()=>({session:'session',ready:true,generating:false,composerClean:true,documentId:'doc'});
+    httpJson=async(method,url,body)=>{
+      if(url.endsWith('/claim')) return {command:{kind:'refresh',operationId:'op',session:'session',tabId:7,state:'claimed',expiresAt:Date.now()+1000}};
+      if(url.endsWith('/fence')) throw new Error('connection lost');
+      if(url.endsWith('/finish')) {outcome=body;return {};}
+    };
+    sendTabMessage=async()=>{throw new Error('must not reload');};
+    await processSessionControls();
+    return outcome;
+  })()`, w.context);
+  assert.equal(outcome.state, "unknown");
+  assert.equal(outcome.error, "connection lost");
+});
+
 test("worker restart finds the previously opened marked tab instead of creating another", async () => {
   const w = await worker("opening", true);
   assert.equal(w.operations.includes("open-tab"), false);
