@@ -100,3 +100,22 @@ test("worker scans existing tabs without opening discovery tabs or sending chat 
   assert.equal(w.operations.includes("open-tab"), false);
   assert.ok(w.operations.includes("/internal/project-discoveries/scan/complete"));
 });
+
+test("reply completion requires the same user and assistant identities across samples", async () => {
+  const w = await worker("opening", true);
+  w.context.sample = { status: "reply-ready", reply: "same text" };
+  w.context.pending = { session: "conversation", tabId: 7, submittedAt: Date.now(),
+    submittedUserMessageId: "expected-user", baseline: {}, completionDeadlineAt: Date.now() + 60000 };
+  await vm.runInContext("chrome.tabs.sendMessage = async () => sample", w.context);
+  const poll = () => vm.runInContext("pollOnePending('review-task', pending)", w.context);
+  const captured = () => w.operations.filter(x => x === "/internal/tasks/review-task/capture").length;
+  await poll();
+  assert.equal(captured(), 0, "legacy uncorrelated snapshots cannot complete a task");
+  w.context.sample = { status: "reply-ready", reply: "same text", submittedUserMessageId: "wrong-user", assistantMessageId: "a1" };
+  await poll(); assert.equal(captured(), 0);
+  w.context.sample.submittedUserMessageId = "expected-user";
+  await poll(); assert.equal(captured(), 0);
+  w.context.sample.assistantMessageId = "a2";
+  await poll(); assert.equal(captured(), 0, "equal text on a different message resets stability");
+  await poll(); assert.equal(captured(), 1);
+});

@@ -1183,12 +1183,21 @@ async function pollOnePending(taskId, rec) {
 
   if (snap.status === "reply-ready") {
     const text = snap.reply ?? "";
-    if (text === rec.lastSampleText) {
+    const sampleKey = JSON.stringify([snap.submittedUserMessageId, snap.assistantMessageId]);
+    if (!snap.submittedUserMessageId || !snap.assistantMessageId ||
+        (rec.submittedUserMessageId && rec.submittedUserMessageId !== snap.submittedUserMessageId)) {
+      rec.stableSampleCount = 0;
+      await setPendingReply(taskId, rec);
+      return;
+    }
+    if (text === rec.lastSampleText && sampleKey === rec.lastSampleKey) {
       rec.stableSampleCount = (rec.stableSampleCount ?? 0) + 1;
     } else {
       rec.stableSampleCount = 1;
       rec.lastSampleText = text;
     }
+    rec.lastSampleKey = sampleKey;
+    rec.submittedUserMessageId ??= snap.submittedUserMessageId;
     if (rec.stableSampleCount >= POLL_REPLY_STABLE_SAMPLES && text.length > 0) {
       console.log("[relay sw] pending complete", taskId, "len=", text.length);
       if (!rec.replyProgressReported) {

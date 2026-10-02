@@ -13,20 +13,24 @@ const contentScript = fs.readFileSync(
 
 type FakeElement = {
   id: string;
+  order: number;
   isConnected: boolean;
   style: Record<string, string>;
   textContent: string;
   innerText: string;
   getAttribute(name: string): string | null;
   getBoundingClientRect(): { width: number; height: number };
+  compareDocumentPosition(other: FakeElement): number;
   closest?(selector: string): FakeElement | null;
   querySelector?(selector: string): FakeElement | null;
   querySelectorAll?(selector: string): FakeElement[];
 };
 
+let elementOrder = 0;
 function element(id: string, text = ""): FakeElement {
   return {
     id,
+    order: ++elementOrder,
     isConnected: false,
     style: {},
     textContent: text,
@@ -36,6 +40,9 @@ function element(id: string, text = ""): FakeElement {
     },
     getBoundingClientRect() {
       return { width: 100, height: 30 };
+    },
+    compareDocumentPosition(other: FakeElement) {
+      return this === other ? 0 : this.order < other.order ? 4 : 2;
     },
   };
 }
@@ -233,17 +240,24 @@ function createHarness({ advanceTimers = false, managed = null as null | Record<
   };
 }
 
-function modernMessage(role: "user" | "assistant", id: string, text: string) {
+function modernMessage(role: "user" | "assistant", id: string, text: string, key = `unit-${id}`) {
   const unit = element(id, role === "assistant" ? `Assistant${text}` : text);
   unit.getAttribute = (name: string) =>
-    name === "data-content-search-unit-key" ? id : null;
+    name === "data-content-search-unit-key" ? key : null;
   const marker = element(`${id}-marker`);
   marker.closest = (selector: string) =>
     selector === "[data-content-search-unit-key]" ? unit : null;
   if (role === "assistant") {
     const content = element(`${id}-content`, text);
+    content.getAttribute = name => name === "data-chatgpt-selection-message-id" ? id : null;
     unit.querySelector = (selector: string) =>
       selector === "[data-chatgpt-selection-message-id]" ? content : null;
+    unit.querySelectorAll = selector => selector === "[data-chatgpt-selection-message-id]" ? [content] : [];
+  } else {
+    const source = element(`${id}-search-unit`);
+    source.getAttribute = name => name === "data-chatgpt-search-message-ids" ? id :
+      name === "data-chatgpt-search-unit-key" ? key : null;
+    unit.closest = selector => selector === "[data-chatgpt-search-message-ids]" ? source : null;
   }
   return { unit, marker };
 }
@@ -455,7 +469,7 @@ test("reply polling rejects snapshots from a different conversation", async () =
 test("reply polling exposes bounded provisional generation metadata", async () => {
   const harness = createHarness();
   harness.state.readyState = "complete";
-  harness.state.users = [element("user-2", "new prompt")];
+  harness.state.users = [element("user-1", "old prompt"), element("user-2", "new prompt")];
   harness.state.stopButtons = [element("stop", "Stop")];
   const activity = element("activity", "  Reading\nfiles  ");
   const assistant = element("assistant-2", "Reading filesDraft answer");
@@ -675,3 +689,83 @@ for (const scenario of ["unchanged", "attachment-unchanged", "wrong-session", "n
     }
   });
 }
+
+for (const modern of [false, true]) {
+  for (const scenario of ["normal", "history-only", "user-unmounted", "reply-before-user", "later-turn", "later-turn-user-unmounted", "missing-anchor", "initial-chat", "missing-id"] as const) {
+    test(`reply attribution (${modern ? "modern" : "legacy"}): ${scenario}`, async () => {
+      const h = createHarness(); h.state.readyState = "complete";
+      const make = (role: "user" | "assistant", id: string, text: string, turn: number) => modern
+        ? modernMessage(role, id, text, `fallback-turn-${turn}:${role === "user" ? 0 : 1}:${role}`)
+        : { unit: element(id, text), marker: element("unused") };
+      const oldUser = make("user", "old-user", "old prompt", 0);
+      const oldReply = make("assistant", "old-reply", "OLD ANSWER", 0);
+      const anchorUser = make("user", "anchor-user", "anchor prompt", 1);
+      const anchorReply = make("assistant", "anchor-reply", "anchor answer", 1);
+      const mount = (users: typeof oldUser[], replies: typeof oldReply[]) => {
+        if (modern) { h.state.modernUserBubbles = users.map(x => x.marker); h.state.modernAssistantHeadings = replies.map(x => x.marker); }
+        else { h.state.users = users.map(x => x.unit); h.state.assistants = replies.map(x => x.unit); }
+      };
+      mount([oldUser, anchorUser], [oldReply, anchorReply]);
+      await h.pageState(); h.state.now += 4000;
+      let baseline = (await h.pageState()).baseline;
+      const submitted = make("user", "submitted-user", "new prompt", 2);
+      const answer = make("assistant", "new-reply", "NEW ANSWER", 2);
+      const laterUser = make("user", "later-user", "later prompt", 3);
+      const laterReply = make("assistant", "later-reply", "WRONG LATER ANSWER", 3);
+      let expectedId: string | null = "submitted-user";
+      mount([oldUser, anchorUser, submitted], [oldReply, anchorReply, answer]);
+      if (scenario === "history-only") mount([oldUser], [oldReply]);
+      if (scenario === "user-unmounted") mount([oldUser], [oldReply, answer]);
+      if (scenario === "reply-before-user") { answer.unit.order = submitted.unit.order - 0.5; }
+      if (scenario === "later-turn") mount([oldUser, anchorUser, submitted, laterUser], [oldReply, anchorReply, laterReply]);
+      if (scenario === "later-turn-user-unmounted") {
+        if (!modern) return; // Modern grouping metadata provides this extra evidence.
+        mount([submitted], [laterReply]);
+      }
+      if (scenario === "missing-anchor") { expectedId = null; mount([submitted], [answer]); }
+      if (scenario === "initial-chat") {
+        baseline = { userCount: 0, assistantCount: 0, userIds: [], assistantIds: [] };
+        expectedId = null; mount([submitted], [answer]);
+      }
+      if (scenario === "missing-id") {
+        answer.unit.getAttribute = () => null;
+        answer.unit.querySelectorAll = () => [];
+        answer.unit.closest = () => null;
+      }
+      await h.pageState(); h.state.now += 4000;
+      const result = await h.message({ type: "poll-reply", baseline, submittedUserMessageId: expectedId });
+      if (scenario === "normal" || scenario === "initial-chat") {
+        assert.equal(result.status, "reply-ready"); assert.equal(result.reply, "NEW ANSWER");
+        assert.equal(result.assistantMessageId, "new-reply");
+        assert.equal(result.submittedUserMessageId, "submitted-user");
+      } else {
+        assert.notEqual(result.status, "reply-ready");
+      }
+      if (scenario === "user-unmounted") {
+        mount([submitted], [answer]);
+        await h.pageState(); h.state.now += 4000;
+        assert.equal((await h.message({ type: "poll-reply", baseline, submittedUserMessageId: expectedId })).reply, "NEW ANSWER");
+      }
+    });
+  }
+}
+
+test("real UUIDs survive positional rekeys and mixed legacy/modern wrappers", async () => {
+  const h = createHarness(); h.state.readyState = "complete";
+  const user = modernMessage("user", "user-uuid", "prompt", "fallback-turn-0:0:user");
+  const answer = modernMessage("assistant", "answer-uuid", "answer", "fallback-turn-0:1:assistant");
+  h.state.modernUserBubbles = [user.marker, user.marker];
+  h.state.modernAssistantHeadings = [answer.marker, answer.marker];
+  const legacyAnswer = element("answer-uuid", "answer"); legacyAnswer.order = answer.unit.order;
+  legacyAnswer.closest = selector => selector === '[data-content-search-unit-key]' ? answer.unit : null;
+  h.state.assistants = [legacyAnswer];
+  await h.pageState(); h.state.now += 4000;
+  const baseline = (await h.pageState()).baseline as any;
+  assert.equal(baseline.userCount, 1); assert.equal(baseline.assistantCount, 1);
+  assert.equal(baseline.lastUserId, "user-uuid"); assert.equal(baseline.lastAssistantId, "answer-uuid");
+  answer.unit.getAttribute = name => name === "data-content-search-unit-key" ? "fallback-turn-0:3:assistant" : null;
+  h.state.assistants = [];
+  await h.pageState(); h.state.now += 4000;
+  assert.notEqual((await h.pollReply(baseline)).status, "reply-ready");
+  assert.equal(((await h.pageState()).baseline as any).lastAssistantId, "answer-uuid");
+});

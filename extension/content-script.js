@@ -2,8 +2,8 @@
 // Runs in chatgpt.com for DOM submission, safety detection, status, recovery, and connectivity.
 //
 // This layer performs synchronous DOM operations and one poll-reply snapshot.
-// New replies are detected by message IDs (legacy data-message-id or modern
-// content-unit keys) because virtual scrolling can unmount old messages.
+// Replies are attributed by real message IDs and their order after the submitted
+// user message. Virtual scrolling can unmount either side of that relationship.
 // textContent is used because innerText depends on layout.
 //
 // Long-running reply waits live in the service worker pending-reply state
@@ -258,23 +258,75 @@
     );
   }
 
+  function precedes(a, b) {
+    const position = a?.compareDocumentPosition?.(b) ?? 0;
+    return !(position & 1) && !!(position & 4); // Connected and following.
+  }
+  function getMessages(role) {
+    const legacy = Array.from(document.querySelectorAll(SELECTORS[`${role}Message`]));
+    const marker = role === "assistant" ? '[data-conversation-role="assistant"]' : '[data-user-message-bubble]';
+    const modern = Array.from(document.querySelectorAll(marker))
+      .map(node => node.closest('[data-content-search-unit-key]')).filter(Boolean);
+    const seen = new Set();
+    return [...new Set([...legacy, ...modern])].filter(node => {
+      const id = getMessageId(node);
+      if (id && seen.has(id)) return false;
+      if (id) seen.add(id);
+      return true;
+    }).sort((a, b) => precedes(a, b) ? -1 : precedes(b, a) ? 1 : 0);
+  }
   function getAssistantMessages() {
-    const legacy = Array.from(document.querySelectorAll(SELECTORS.assistantMessage));
-    if (legacy.length) return legacy;
-    return Array.from(document.querySelectorAll('[data-conversation-role="assistant"]'))
-      .map((heading) => heading.closest('[data-content-search-unit-key]'))
-      .filter(Boolean);
+    return getMessages("assistant");
   }
   function getUserMessages() {
-    const legacy = Array.from(document.querySelectorAll(SELECTORS.userMessage));
-    if (legacy.length) return legacy;
-    return Array.from(document.querySelectorAll('[data-user-message-bubble]'))
-      .map((bubble) => bubble.closest('[data-content-search-unit-key]'))
-      .filter(Boolean);
+    return getMessages("user");
   }
   function getMessageId(el) {
-    return el?.getAttribute("data-message-id") ||
-      el?.getAttribute("data-content-search-unit-key") || null;
+    const legacyId = el?.getAttribute("data-message-id");
+    if (legacyId) return legacyId;
+    const selectionIds = Array.from(el?.querySelectorAll?.('[data-chatgpt-selection-message-id]') ?? [])
+      .map(node => node.getAttribute("data-chatgpt-selection-message-id")).filter(Boolean);
+    const ownSelectionId = el?.getAttribute("data-chatgpt-selection-message-id");
+    if (ownSelectionId) selectionIds.push(ownSelectionId);
+    if (selectionIds.length) {
+      const ids = [...new Set(selectionIds)];
+      return ids.length === 1 ? ids[0] : null;
+    }
+    // Modern user UUIDs live on the enclosing search unit, outside the bubble.
+    const source = el?.closest?.('[data-chatgpt-search-message-ids]');
+    if (source && (source === el || source.getAttribute("data-chatgpt-search-unit-key") ===
+        el.getAttribute("data-content-search-unit-key"))) {
+      const ids = [...new Set((source.getAttribute("data-chatgpt-search-message-ids") ?? "").split(/\s+/).filter(Boolean))];
+      if (ids.length === 1) return ids[0];
+    }
+    // Positional fallback-turn keys are presentation identities, not message IDs.
+    return null;
+  }
+  function findSubmittedUser(users, baseline, expectedId = null) {
+    const known = new Set([...(baseline.userIds ?? []), baseline.lastUserId].filter(Boolean));
+    if (expectedId) return known.has(expectedId) ? null : users.find(user => getMessageId(user) === expectedId) ?? null;
+    const anchor = users.find(user => getMessageId(user) === baseline.lastUserId);
+    if (!anchor && (baseline.lastUserId || (baseline.userCount ?? 0) !== 0)) return null;
+    // Bind only an unambiguous new user after the baseline, never merely a
+    // different last mounted user. Once bound, the worker persists its UUID.
+    const candidates = users.filter(user => {
+      const id = getMessageId(user);
+      return id && !known.has(id) && (!anchor || precedes(anchor, user));
+    });
+    return candidates.length === 1 ? candidates[0] : null;
+  }
+  function getReplyMessages(messages, users, submittedUser) {
+    if (!submittedUser) return [];
+    const nextUser = users.find(user => precedes(submittedUser, user));
+    const turnKey = node => (node.getAttribute("data-content-search-unit-key") ??
+      node.closest?.('[data-content-search-unit-key]')?.getAttribute("data-content-search-unit-key"))
+      ?.match(/^(.*):\d+:(?:user|assistant)$/)?.[1] ?? null;
+    const userTurn = turnKey(submittedUser);
+    return messages.filter(message => precedes(submittedUser, message) &&
+      (!nextUser || precedes(message, nextUser)) &&
+      // Grouping keys only corroborate the live relationship; they are never
+      // persisted as message IDs. This also rejects gaps from virtual scrolling.
+      (!userTurn || turnKey(message) === userTurn));
   }
   function getLastText(msgs) {
     if (!msgs.length) return "";
@@ -314,6 +366,8 @@
       lastAssistantId: getLastAssistantId(assistants),
       lastUserId: getLastUserId(users),
       userCount: users.length,
+      assistantIds: assistants.map(getMessageId).filter(Boolean),
+      userIds: users.map(getMessageId).filter(Boolean),
       startedAt: Date.now(),
     };
   }
@@ -769,14 +823,11 @@
   async function waitForSubmissionAccepted(baseline) {
     return waitForCondition(() => {
       const users = getUserMessages();
-      const lastUserId = getLastUserId(users);
-      const hasNewUser = baseline.lastUserId != null
-        ? !!lastUserId && lastUserId !== baseline.lastUserId
-        : users.length > (baseline.userCount ?? 0);
-      if (hasNewUser) {
+      const submittedUser = findSubmittedUser(users, baseline);
+      if (submittedUser) {
         return {
           kind: "user-message",
-          submittedUserMessageId: lastUserId,
+          submittedUserMessageId: getMessageId(submittedUser),
         };
       }
       if (isGenerating()) {
@@ -923,26 +974,17 @@
             const msgs = getAssistantMessages();
             const users = getUserMessages();
             const generating = readiness.generating;
-            const lastId = getLastAssistantId(msgs);
-            // Virtual scrolling makes counts unreliable. Compare message IDs;
-            // a null lastId means the page has not inserted a placeholder.
-            const hasNewAssistant = !!lastId && lastId !== baseline.lastAssistantId;
-            // User messages can also be unmounted. This count only distinguishes
-            // a completely ineffective submission in the most conservative way.
-            const currentUserId = getLastUserId(users);
             const expectedUserId = msg.submittedUserMessageId ?? null;
-            const hasExpectedUser = expectedUserId
-              ? users.some((user) =>
-                  getMessageId(user) === expectedUserId)
-              : false;
-            const hasNewUser = expectedUserId
-              ? hasExpectedUser
-              : baseline.lastUserId != null
-                ? !!currentUserId && currentUserId !== baseline.lastUserId
-                : users.length > (baseline.userCount ?? 0);
-            const lastText = getLastText(msgs);
+            const submittedUser = findSubmittedUser(users, baseline, expectedUserId);
+            const currentUserId = getMessageId(submittedUser);
+            const hasNewUser = !!submittedUser;
+            const replies = getReplyMessages(msgs, users, submittedUser);
+            const lastId = getLastAssistantId(replies);
+            const knownAssistantIds = new Set([...(baseline.assistantIds ?? []), baseline.lastAssistantId].filter(Boolean));
+            const hasNewAssistant = !!lastId && !knownAssistantIds.has(lastId);
+            const lastText = getLastText(replies);
             if (generating) {
-              const activity = getGenerationActivity(msgs);
+              const activity = getGenerationActivity(replies);
               const outputChars = hasNewAssistant
                 ? Math.max(0, lastText.length - (activity?.length ?? 0))
                 : 0;
@@ -967,7 +1009,8 @@
               return;
             }
             if (hasNewAssistant) {
-              sendResponse({ status: "reply-ready", reply: lastText, assistantCount: msgs.length });
+              sendResponse({ status: "reply-ready", reply: lastText, assistantCount: msgs.length,
+                assistantMessageId: lastId, submittedUserMessageId: currentUserId });
               return;
             }
             sendResponse({
