@@ -332,6 +332,21 @@ async function readAllStdin(): Promise<string> {
 
 async function cmdProjects(args: string[]): Promise<number> {
   const action = args[0];
+  if (action === "discover") {
+    if (args.slice(1).some(a => !["--save", "--no-wait", "--json"].includes(a))) throw new Error("invalid discovery option");
+    let result = await http.post<{ discoveryId: string; status: string; error?: string }>(
+      "/v1/projects/discover", { save: args.includes("--save") }, { baseUrl: BASE });
+    if (!args.includes("--no-wait")) {
+      const deadline = Date.now() + 125_000;
+      while (["queued", "claimed"].includes(result.status)) {
+        if (Date.now() >= deadline) throw new Error(`discovery wait expired; query /v1/projects/discover/${result.discoveryId}`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        result = await http.get(`/v1/projects/discover/${result.discoveryId}`, { baseUrl: BASE });
+      }
+    }
+    console.log(JSON.stringify(result));
+    return result.status === "failed" ? 2 : 0;
+  }
   if (!action || action === "--json") {
     const result = await http.get<{ projects: Array<{ projectId: string; name: string; description: string | null }> }>("/v1/projects", { baseUrl: BASE });
     if (action === "--json") console.log(JSON.stringify(result));
@@ -366,6 +381,8 @@ commands:
   projects [--json]        list local project metadata
   projects set --project-id ID --name NAME [--description TEXT]
   projects remove --project-id ID
+  projects discover [--save] [--no-wait]
+                           scan visible Project links in open ChatGPT tabs
   start                    start relay server (foreground)
   health                   check relay at ${BASE}
   sessions                 list active ChatGPT sessions

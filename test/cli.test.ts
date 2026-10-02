@@ -176,6 +176,15 @@ test("CLI project maintenance updates local metadata and preserves descriptions"
   assert.equal((await runCli(["projects", "remove", "--project-id", id])).code, 0);
 });
 
+test("CLI discovery returns an asynchronous ID and rejects unsupported options", async () => {
+  const r = await runCli(["projects", "discover", "--no-wait", "--save"]);
+  assert.equal(r.code, 0, r.stderr);
+  const row = JSON.parse(r.stdout);
+  assert.equal(row.status, "queued"); assert.equal(row.save, true);
+  assert.ok(row.discoveryId);
+  assert.notEqual((await runCli(["projects", "discover", "--all"])).code, 0);
+});
+
 test("gpt-relay resume reports no pending when dir empty", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "gpt-relay-p-"));
   try {

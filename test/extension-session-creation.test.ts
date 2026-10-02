@@ -4,7 +4,7 @@ import fs from "node:fs";
 import vm from "node:vm";
 import { webcrypto } from "node:crypto";
 
-async function worker(commandState = "claimed", existing = false) {
+async function worker(commandState = "claimed", existing = false, discovery = false) {
   const storage: Record<string, any> = { creation_owner: "browser" };
   const operations: string[] = [];
   const meta = { sessionRef: "sr_new", projectId: null, token: "token", owner: "browser", initialTaskId: "task" };
@@ -22,7 +22,9 @@ async function worker(commandState = "claimed", existing = false) {
       query: async () => tabs,
       get: async (id: number) => { const t = tabs.find(t => t.id === id); if (!t) throw new Error("missing"); return t; },
       create: async (options: any) => { operations.push("open-tab"); const tab = { id: 8, ...options }; tabs.push(tab); return tab; },
-      sendMessage: async () => ({ session: null }),
+      sendMessage: async (_id: number, message: any) => message.type === "discover-projects"
+        ? { url: "https://chatgpt.com/", projects: [{ projectId: "g-p-" + "a".repeat(32), name: "Project", href: "/g/g-p-" + "a".repeat(32) + "/project" }] }
+        : { session: null },
       onRemoved: event(), onUpdated: event(),
     },
     alarms: { getAll: async () => [], create: async () => {}, onAlarm: event() },
@@ -36,7 +38,9 @@ async function worker(commandState = "claimed", existing = false) {
       const route = new URL(url).pathname;
       operations.push(route);
       let response: any = { status: "ok", tasks: [], sessions: [], task: null };
-      if (route.endsWith("/claim")) {
+      if (route === "/internal/project-discoveries/claim") {
+        response = { command: discovery ? { discoveryId: "scan", token: "scan-token" } : null };
+      } else if (route.endsWith("/claim")) {
         response = { command: claimed ? null : { ...meta, state: commandState, initialTaskId: "task" } };
         claimed = true;
       }
@@ -89,4 +93,10 @@ test("concurrent tab and inflight updates retain all session identities and send
   await vm.runInContext(`Promise.all([clearInflight('session-A'), markInflight('session-B', 'task-B', {deliveryPhase:'accepted'})])`, w.context);
   assert.equal(w.storage.inflight["session-A"], undefined);
   assert.equal(w.storage.inflight["session-B"].deliveryPhase, "accepted");
+});
+
+test("worker scans existing tabs without opening discovery tabs or sending chat messages", async () => {
+  const w = await worker("opening", true, true);
+  assert.equal(w.operations.includes("open-tab"), false);
+  assert.ok(w.operations.includes("/internal/project-discoveries/scan/complete"));
 });

@@ -172,7 +172,15 @@ An existing ID does not imply the page is ready, unpaused or finished generating
 
 Creation commands are independent of any existing session. The extension polls `POST /internal/session-creations/claim` using its persisted owner identity. Commands include the ref, Project ID, attempt token and open state. It fences `opening` before opening a marked tab, then records `attach` and validates `bind`. The owned token and tab must match; an unrelated tab cannot bind the ref. An uncertain open is reported unknown instead of opening another page. After browser restoration changes tab IDs, reassociation requires the extension to verify the old tab no longer exists and present the prior ownership through `reattach`. The ownership token provides local execution correlation, not an authentication boundary.
 
-The internal endpoints are implementation details, not agent integration APIs. Automatic Project discovery is deferred until live page enumeration is verified.
+The internal endpoints are implementation details, not agent integration APIs.
+
+### Project discovery
+
+`POST /v1/projects/discover` with `{ "save": false }` queues an extension-level DOM scan and returns `202` with `discoveryId`, `status` and `save`. `save` defaults to false. `GET /v1/projects/discover/:id` polls the durable result; jobs expire after two minutes. The CLI equivalent is `gpt-relay projects discover [--save] [--no-wait]`, with JSON output.
+
+The extension scans visible Project entries in already-open ChatGPT tabs. It supports classic Project links and modern sidebar rows exposing `data-app-action-sidebar-project-id` and `data-app-action-sidebar-project-label`, with the latter label checked against displayed name text. It does not limit discovery to the current tab's Project, navigate, expand collapsed sections or fetch private webpage APIs. Results include `projects` (ID and name), `sources` (page URL, observed entry count and errors), `warnings`, `saved`, `scope: "open-chatgpt-tabs-visible-project-links"` and `complete: false`. Link evidence must point to an exact `/g/<project-id>/project` route on chatgpt.com; modern rows supply the canonical Project URL. Conversation, off-site and message-body entries are excluded. With save enabled, observed names update by ID while descriptions and unobserved catalog entries remain intact. Conflicting names for one ID are reported and skipped. Empty readable scans can complete successfully with zero projects; no readable tabs yields `failed` with `no_readable_chatgpt_tabs`.
+
+The worker uses `/internal/project-discoveries/claim` and `/internal/project-discoveries/:id/complete` with a persisted owner and attempt token. Read-only scans can resume after worker restart; catalog merge and result completion commit atomically. Late completion of an expired job is rejected.
 
 ### `POST /v1/tasks`
 

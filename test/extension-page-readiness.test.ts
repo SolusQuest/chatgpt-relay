@@ -50,6 +50,8 @@ function createHarness({ advanceTimers = false, managed = null as null | Record<
     modernUserBubbles: [] as FakeElement[],
     modernAssistantHeadings: [] as FakeElement[],
     unrelatedSendButtons: [] as FakeElement[],
+    projectLinks: [] as FakeElement[],
+    projectRows: [] as FakeElement[],
     stopButtons: [] as FakeElement[],
     pathname: "/c/6a61e3cc-3160-83ee-9aa7-f79a39d93b3e",
     hash: managed ? `#relay-create=${encodeURIComponent(JSON.stringify(managed))}` : "",
@@ -86,6 +88,8 @@ function createHarness({ advanceTimers = false, managed = null as null | Record<
       return this.querySelectorAll(selector)[0] ?? null;
     },
     querySelectorAll(selector: string) {
+      if (selector === 'a[href]') return state.projectLinks;
+      if (selector === '[data-app-action-sidebar-project-row]') return state.projectRows;
       if (selector === '[data-message-author-role="user"]') return state.users;
       if (selector === '[data-message-author-role="assistant"]') return state.assistants;
       if (selector === '[data-user-message-bubble]') return state.modernUserBubbles;
@@ -144,6 +148,7 @@ function createHarness({ advanceTimers = false, managed = null as null | Record<
     sessionStorage,
     chrome,
     crypto: { randomUUID: () => "fallback-session" },
+    URL,
     getComputedStyle: () => ({ visibility: "visible", display: "block" }),
     Date: FakeDate,
     Math,
@@ -551,4 +556,39 @@ test("an attachment that remains after removal is not reported clean", async () 
   const result = await harness.resetComposer();
   assert.equal(result.attachmentObserved, true);
   assert.equal(result.clean, false);
+});
+
+test("discovery extracts visible Project entry IDs and names, excluding chats and off-site links", async () => {
+  const h = createHarness();
+  h.state.readyState = "complete";
+  const id = "g-p-" + "c".repeat(32);
+  const link = (href: string, name: string, hidden = false, message = false) => {
+    const e = element("link", name);
+    e.getAttribute = attr => attr === "href" ? href : null;
+    e.getBoundingClientRect = () => ({ width: hidden ? 0 : 100, height: 30 });
+    e.closest = () => message ? element("chat-message") : null;
+    return e;
+  };
+  h.state.projectLinks = [link(`/g/${id}/project`, " My   Project "),
+    link(`/g/${id}/c/conversation`, "Chat title"), link(`https://evil.test/g/${id}/project`, "Fake"),
+    link(`/g/${id}/project`, "Hidden", true), link(`/g/${id}/project`, "Pasted link", false, true),
+    link(`/g/${id}/project`, "")];
+  const result = await h.message({ type: "discover-projects" });
+  assert.deepEqual(JSON.parse(JSON.stringify(result.projects)), [{ projectId: id, name: "My Project", href: `https://chatgpt.com/g/${id}/project` }]);
+  h.state.readyState = "loading";
+  assert.equal((await h.message({ type: "discover-projects" })).error, "page_not_loaded");
+});
+
+test("discovery supports modern sidebar rows with matching visible labels", async () => {
+  const h = createHarness(); h.state.readyState = "complete";
+  const id = "g-p-" + "e".repeat(32);
+  const row = element("project-row");
+  row.closest = () => null;
+  row.getAttribute = attr => attr === "data-app-action-sidebar-project-id" ? id : attr === "data-app-action-sidebar-project-label" ? "cgcon" : null;
+  row.querySelector = () => element("label", "cgcon");
+  h.state.projectRows = [row];
+  assert.deepEqual(JSON.parse(JSON.stringify((await h.message({ type: "discover-projects" })).projects)),
+    [{ projectId: id, name: "cgcon", href: `https://chatgpt.com/g/${id}/project`, kind: "sidebar-row" }]);
+  row.querySelector = () => element("label", "Other name");
+  assert.deepEqual(JSON.parse(JSON.stringify((await h.message({ type: "discover-projects" })).projects)), []);
 });

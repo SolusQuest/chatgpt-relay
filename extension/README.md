@@ -3,6 +3,8 @@
 This Chrome-compatible Manifest V3 extension executes relay tasks in the
 ChatGPT web interface.
 
+Project discovery uses visible DOM entries in open ChatGPT tabs, including classic Project links and current sidebar rows with Project ID and label attributes. Run `gpt-relay projects discover` to preview or add `--save` to merge names into the local catalog. The scanner never sends messages, navigates or expands sections. Reveal the Projects section before scanning if it is hidden. Results always report partial coverage; unreadable tabs and conflicting names are reported without deleting existing catalog entries.
+
 ## Load the extension
 
 1. Open `edge://extensions/` in Edge or `chrome://extensions/` in Chrome.

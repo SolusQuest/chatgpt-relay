@@ -224,10 +224,35 @@ async function registerManagedPage(tabId, page) {
   return { status: "ok" };
 }
 let creationPolling = false;
+let discoveryPolling = false;
+async function processProjectDiscoveries() {
+  if (discoveryPolling) return;
+  discoveryPolling = true;
+  try {
+    const owner = await creationOwner();
+    const { command } = await httpJson("POST", "/internal/project-discoveries/claim", { owner });
+    if (!command) return;
+    const sources = [];
+    for (const tab of (await listChatGPTTabs()).slice(0, 100)) {
+      try {
+        const scan = await sendTabMessage(tab.id, { type: "discover-projects" }, 5000, "project scan");
+        if (!scan || !Array.isArray(scan.projects) || typeof scan.url !== "string") throw new Error("scanner_unavailable");
+        sources.push(scan);
+      } catch {
+        sources.push({ url: tab.url, projects: [], error: "scanner_unavailable" });
+      }
+    }
+    await httpJson("POST", `/internal/project-discoveries/${command.discoveryId}/complete`, {
+      owner, token: command.token, sources,
+    });
+  } catch (e) { dlog("project discovery deferred", e.message); }
+  finally { discoveryPolling = false; }
+}
 async function processSessionCreations() {
   if (creationPolling) return;
   creationPolling = true;
   try {
+    void processProjectDiscoveries();
     const owner = await creationOwner();
     const { command } = await httpJson("POST", "/internal/session-creations/claim", { owner });
     if (!command) return;

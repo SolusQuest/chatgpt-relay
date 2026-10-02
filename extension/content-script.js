@@ -955,6 +955,28 @@
         } else if (msg.type === "configure-session") {
           configureManagedSession(msg.managed);
           sendResponse(sessionMetadata());
+        } else if (msg.type === "discover-projects") {
+          const projects = [];
+          for (const link of document.querySelectorAll('a[href]')) {
+            if (!isVisible(link) || link.closest('[data-message-author-role], [data-user-message-bubble], [data-conversation-role="assistant"]')) continue;
+            let url;
+            try { url = new URL(link.getAttribute("href"), "https://chatgpt.com" + location.pathname); }
+            catch { continue; }
+            const id = url.origin === "https://chatgpt.com" && url.pathname.match(/^\/g\/(g-p-[a-f0-9]{32})(?:-[^/]+)?\/project\/?$/i)?.[1]?.toLowerCase();
+            const name = (link.innerText ?? "").trim().replace(/\s+/g, " ");
+            if (id && name && name.length <= 200) projects.push({ projectId: id, name, href: url.origin + url.pathname });
+          }
+          for (const row of document.querySelectorAll('[data-app-action-sidebar-project-row]')) {
+            if (!isVisible(row) || row.closest('[data-message-author-role], [data-user-message-bubble], [data-conversation-role="assistant"]')) continue;
+            const id = row.getAttribute("data-app-action-sidebar-project-id")?.toLowerCase();
+            const label = row.getAttribute("data-app-action-sidebar-project-label")?.trim().replace(/\s+/g, " ");
+            const name = row.querySelector('[data-marquee-content]')?.innerText?.trim().replace(/\s+/g, " ");
+            if (/^g-p-[a-f0-9]{32}$/.test(id ?? "") && name && name === label && name.length <= 200) {
+              projects.push({ projectId: id, name, href: `https://chatgpt.com/g/${id}/project`, kind: "sidebar-row" });
+            }
+          }
+          sendResponse({ url: "https://chatgpt.com" + location.pathname, projects,
+            ...(document.readyState !== "complete" ? { error: "page_not_loaded" } : {}) });
         } else if (msg.type === "get-session-id") {
           sendResponse(sessionMetadata());
         } else if (msg.type === "get-inflight") {

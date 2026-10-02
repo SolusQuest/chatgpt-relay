@@ -208,3 +208,57 @@ test("client generates independent message keys and resume finds an accepted req
   const rows = (await api("/v1/tasks?session=existing")).body.tasks;
   assert.equal(rows.length, 3, "resume queries the accepted request and never submits again");
 }));
+
+test("Project discovery previews and merges observed names while preserving descriptions and unseen entries", async () => fixture(async ({ api }: any) => {
+  const unseen = "g-p-" + "d".repeat(32);
+  await api(`/v1/projects/${project}`, { name: "Old", description: "Manual purpose" }, "PUT");
+  await api(`/v1/projects/${unseen}`, { name: "Unseen" }, "PUT");
+  const sources = [{ url: "https://chatgpt.com/c/example", projects: [
+    { projectId: project, name: "Renamed", href: `https://chatgpt.com/g/${project}/project` },
+    { projectId: unseen, name: "Bad", href: `https://evil.test/g/${unseen}/project` },
+    { projectId: unseen, name: "Chat title", href: `https://chatgpt.com/g/${unseen}/c/example` },
+  ] }];
+  for (const save of [false, true]) {
+    const id = (await api("/v1/projects/discover", { save })).body.discoveryId;
+    const claim = (await api("/internal/project-discoveries/claim", { owner: "browser" })).body.command;
+    assert.equal(claim.discoveryId, id);
+    assert.equal((await api(`/internal/project-discoveries/${id}/complete`, { ...claim, owner: "other", sources })).status, 409);
+    const body = { ...claim, owner: "browser", sources };
+    const result = (await api(`/internal/project-discoveries/${id}/complete`, body)).body;
+    assert.equal(result.status, "done"); assert.equal(result.complete, false); assert.equal(result.saved, save);
+    assert.deepEqual(result.projects, [{ projectId: project, name: "Renamed" }]);
+    assert.deepEqual((await api(`/internal/project-discoveries/${id}/complete`, body)).body, result);
+    const rows = (await api("/v1/projects")).body.projects;
+    assert.equal(rows.find((p: any) => p.projectId === project).name, save ? "Renamed" : "Old");
+    assert.equal(rows.find((p: any) => p.projectId === project).description, "Manual purpose");
+    assert.equal(rows.find((p: any) => p.projectId === unseen).name, "Unseen");
+  }
+}));
+
+test("discovery resumes read-only commands, skips conflicting names and rejects expired completion", async () => fixture(async ({ api, config }: any) => {
+  const id = (await api("/v1/projects/discover", { save: true })).body.discoveryId;
+  const claim = (await api("/internal/project-discoveries/claim", { owner: "browser" })).body.command;
+  assert.deepEqual((await api("/internal/project-discoveries/claim", { owner: "browser" })).body.command, claim);
+  assert.equal((await api("/internal/project-discoveries/claim", { owner: "other" })).body.command, null);
+  const sources = ["First", "Second"].map(name => ({ url: "https://chatgpt.com/", projects: [
+    { projectId: project, name, href: `/g/${project}/project` },
+  ] }));
+  const result = (await api(`/internal/project-discoveries/${id}/complete`, { ...claim, owner: "browser", sources })).body;
+  assert.deepEqual(result.projects, []);
+  assert.ok(result.warnings.includes(`conflicting_names:${project}`));
+  assert.deepEqual((await api("/v1/projects")).body.projects, []);
+  const next = (await api("/v1/projects/discover", {})).body.discoveryId;
+  const second = (await api("/internal/project-discoveries/claim", { owner: "browser" })).body.command;
+  assert.ok(second);
+  const failed = (await api(`/internal/project-discoveries/${next}/complete`, { ...second, owner: "browser", sources: [] })).body;
+  assert.equal(failed.status, "failed"); assert.equal(failed.error, "no_readable_chatgpt_tabs");
+  assert.equal((await api(`/internal/project-discoveries/${next}/complete`, { ...second, owner: "browser", sources })).status, 409);
+  const expired = (await api("/v1/projects/discover", {})).body.discoveryId;
+  const third = (await api("/internal/project-discoveries/claim", { owner: "browser" })).body.command;
+  const { openDatabase } = await import("../server/db.js");
+  const db = openDatabase(config.dbFile);
+  db.prepare("UPDATE project_discoveries SET expires_at=0 WHERE id=?").run(expired);
+  db.close();
+  assert.equal((await api(`/v1/projects/discover/${expired}`)).body.error, "discovery_timeout");
+  assert.equal((await api(`/internal/project-discoveries/${expired}/complete`, { ...third, owner: "browser", sources })).status, 409);
+}));

@@ -9,6 +9,7 @@ import { createV1SessionsRouter } from "./routes/v1-sessions.js";
 import { createInternalRouter } from "./routes/internal.js";
 import { createSessionCreationRouter } from "./routes/session-creation.js";
 import { RegistryError } from "./session-registry.js";
+import { createProjectDiscoveryRouter } from "./project-discovery.js";
 
 export interface AppHandle {
   app: express.Express;
@@ -30,6 +31,7 @@ export function createApp(config: Config): AppHandle {
   // Extension-internal API.
   app.use("/internal", createInternalRouter(store));
   app.use(createSessionCreationRouter(store, config));
+  app.use(createProjectDiscoveryRouter(db, store.registry));
   app.use((err: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
     if (err instanceof RegistryError) return res.status(err.status).json({ error: err.message });
     if (err instanceof TaskStoreError) return res.status(err.code === "task_too_large" ? 413 : 409)

@@ -50,7 +50,7 @@ gpt-relay projects set --project-id <project-id> --name "Project name" --descrip
 gpt-relay projects remove --project-id <project-id>
 ```
 
-Catalog writes affect local metadata only. Omitted descriptions are preserved; an empty description clears its text. Names help selection, but creation uses the ID. The catalog is not an access guarantee or an allowlist: a valid directly supplied ID is accepted and the extension verifies the page before sending. Automatic webpage discovery is not part of this first version.
+Catalog writes affect local metadata only. Omitted descriptions are preserved; an empty description clears its text. Names help selection, but creation uses the ID. The catalog is not an access guarantee or an allowlist: a valid directly supplied ID is accepted and the extension verifies the page before sending. `gpt-relay projects discover` previews visible Project links in open ChatGPT tabs; `--save` merges observed names by ID and preserves descriptions and unseen entries. The JSON result includes source pages and `complete: false`: collapsed or unloaded projects may be missing. Conflicting observed names are reported and skipped. `--no-wait` returns a discovery ID for later API polling. Discovery never sends chat messages or switches tabs.
 
 Assume an existing session can access user-authorized GitHub URLs and retains the project context already placed in that conversation. Do not resend the README, full repository background, or complete diff every round unless relay cannot access the artifact or clearly misunderstands it. Add complete relevant material when the agent already has it; treat missing authorization, session selection, or sensitive context as a mode-aware blocker.
 

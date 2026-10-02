@@ -122,7 +122,7 @@ gpt-relay sessions --session-ref <ref> --json
 gpt-relay review --session-ref <ref> --file <follow-up-file> --no-wait
 ```
 
-Use `--project-id <id>` instead of `--no-project` for a Project chat. Maintain the local catalog with `gpt-relay projects set --project-id <id> --name "Name" --description "Purpose"` and `gpt-relay projects remove --project-id <id>`. See the agent guide for first-message context, creation failure boundaries and request recovery. Webpage discovery is deferred; use the catalog CLI for this version.
+Use `--project-id <id>` instead of `--no-project` for a Project chat. Maintain the local catalog with `gpt-relay projects set --project-id <id> --name "Name" --description "Purpose"` and `gpt-relay projects remove --project-id <id>`. Use `gpt-relay projects discover` to preview visible Project links in open ChatGPT tabs, or add `--save` to merge them into the catalog. Discovery preserves descriptions and unseen entries and reports partial coverage. It does not expand the sidebar or navigate tabs. See the agent guide for first-message context, creation failure boundaries and request recovery.
 
 ## Common commands
 
