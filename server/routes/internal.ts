@@ -27,9 +27,21 @@ export function createInternalRouter(store: TaskStore): Router {
         pauseReason: sessionState.pauseReason,
       });
     }
-    const task = await longPollSession(store, session, wait, () =>
-      store.claimNextTask(session),
-    );
+    // A disconnected extension must not leave a listener that can claim work
+    // later with nobody left to receive the response.
+    const controller = new AbortController();
+    const disconnected = () => controller.abort();
+    res.once('close', disconnected);
+    if (res.destroyed) controller.abort();
+    let task;
+    try {
+      task = await longPollSession(store, session, wait, () =>
+        store.claimNextTask(session), controller.signal,
+      );
+    } finally {
+      res.off('close', disconnected);
+    }
+    if (controller.signal.aborted) return;
     if (!task) {
       return res.json({ task: null });
     }

@@ -61,6 +61,40 @@ test("GET /health returns ok", async () => {
   assert.equal(r.json.status, "ok");
 });
 
+test('disconnected next_task poll cannot claim a later task',async()=>{
+  const session='disconnected-claim';
+  const original=taskStore!.onSessionTaskChange.bind(taskStore);
+  let registered!:()=>void;
+  const waiting=new Promise<void>(resolve=>{registered=resolve;});
+  taskStore!.onSessionTaskChange=(sid,listener)=>{
+    const off=original(sid,listener);
+    if(sid===session) registered();
+    return off;
+  };
+  let responseClosed!:()=>void;
+  const closed=new Promise<void>(resolve=>{responseClosed=resolve;});
+  const trackClose=(req:http.IncomingMessage,res:http.ServerResponse)=>{
+    if(req.url?.includes(session)) res.once('close',responseClosed);
+  };
+  server!.on('request',trackClose);
+  const request=http.get(`${baseUrl}/internal/next_task?session=${session}&wait=1000`);
+  request.on('error',()=>{});
+  try {
+    await waiting;
+    request.destroy();
+    await closed;
+    const created=await post('/v1/tasks',{session,text:'must stay queued until a live poll claims it'});
+    const task=await get(`/v1/tasks/${created.json.taskId}`);
+    assert.equal(task.json.status,'queued');
+    const live=await get(`/internal/next_task?session=${session}`);
+    assert.equal(live.json.task.taskId,created.json.taskId);
+  } finally {
+    request.destroy();
+    taskStore!.onSessionTaskChange=original;
+    server!.off('request',trackClose);
+  }
+});
+
 test("POST /v1/tasks creates queued task", async () => {
   const r = await post("/v1/tasks", { session: "sA", text: "hello" });
   assert.equal(r.status, 201);

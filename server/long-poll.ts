@@ -45,7 +45,9 @@ export async function longPollSession<T>(
   sessionId: string,
   timeoutMs: number,
   attempt: () => T | null,
+  signal?: AbortSignal,
 ): Promise<T | null> {
+  if (signal?.aborted) return null;
   const first = attempt();
   if (first != null) return first;
   if (timeoutMs <= 0) return null;
@@ -53,7 +55,7 @@ export async function longPollSession<T>(
   return new Promise<T | null>((resolve) => {
     let finished = false;
     const off = store.onSessionTaskChange(sessionId, () => {
-      if (finished) return;
+      if (finished || signal?.aborted) return;
       const v = attempt();
       if (v != null) {
         finished = true;
@@ -70,6 +72,15 @@ export async function longPollSession<T>(
     const cleanup = () => {
       off();
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
     };
+    const onAbort = () => {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      resolve(null);
+    };
+    signal?.addEventListener('abort', onAbort, {once:true});
+    if (signal?.aborted) onAbort();
   });
 }
