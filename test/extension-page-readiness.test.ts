@@ -55,6 +55,7 @@ function createHarness({ advanceTimers = false, managed = null as null | Record<
     users: [] as FakeElement[],
     assistants: [] as FakeElement[],
     modernUserBubbles: [] as FakeElement[],
+    modernUserUnits: [] as FakeElement[],
     modernAssistantHeadings: [] as FakeElement[],
     unrelatedSendButtons: [] as FakeElement[],
     projectLinks: [] as FakeElement[],
@@ -102,6 +103,7 @@ function createHarness({ advanceTimers = false, managed = null as null | Record<
       if (selector === '[data-message-author-role="user"]') return state.users;
       if (selector === '[data-message-author-role="assistant"]') return state.assistants;
       if (selector === '[data-user-message-bubble]') return state.modernUserBubbles;
+      if (selector === '[data-content-search-unit-key$=":user"]') return state.modernUserUnits;
       if (selector === '[data-conversation-role="assistant"]') return state.modernAssistantHeadings;
       if (selector === '[data-testid="send-button"]') return state.unrelatedSendButtons;
       if (selector === '[data-testid="stop-button"]') return state.stopButtons;
@@ -797,3 +799,39 @@ for (const ancestor of ["data-content-search-unit-key", "data-chatgpt-selection-
     assert.ok(projects.every(project => project.name === "Real Project" && project.projectId === id));
   });
 }
+
+for (const kind of ["pasted-text", "file", "image", "mixed-text-and-file"]) {
+  test(`attachment-only user identity supports reply capture and recovery: ${kind}`, async () => {
+    const h = createHarness(); h.state.readyState = "complete";
+    const oldUser = modernMessage("user", "previous-user", "old text", "fallback-turn-0:0:user");
+    const oldReply = modernMessage("assistant", "previous-reply", "old reply", "fallback-turn-0:1:assistant");
+    h.state.modernUserBubbles = [oldUser.marker]; h.state.modernUserUnits = [oldUser.unit];
+    h.state.modernAssistantHeadings = [oldReply.marker];
+    await h.pageState(); h.state.now += 4000;
+    const baseline = (await h.pageState()).baseline as any;
+    const attachment = modernMessage("user", "attachment-user", kind, "fallback-turn-1:0:user");
+    const reply = modernMessage("assistant", "attachment-reply", "ATTACHMENT_OK", "fallback-turn-1:2:assistant");
+    h.state.modernUserUnits.push(attachment.unit);
+    if (kind === "mixed-text-and-file") h.state.modernUserBubbles.push(attachment.marker);
+    h.state.modernAssistantHeadings.push(reply.marker);
+    await h.pageState(); h.state.now += 4000;
+    const page = await h.pageState();
+    assert.equal((page.baseline as any).userCount, 2, "each message counted once, even with both markers");
+    assert.equal((page.baseline as any).lastUserId, "attachment-user");
+    const result = await h.pollReply(baseline);
+    assert.equal(result.status, "reply-ready"); assert.equal(result.reply, "ATTACHMENT_OK");
+    assert.equal(result.submittedUserMessageId, "attachment-user");
+    h.state.modernUserBubbles = []; h.state.modernUserUnits = [attachment.unit];
+    h.state.modernAssistantHeadings = [reply.marker];
+    await h.pageState(); h.state.now += 4000;
+    assert.equal((await h.message({ type: "poll-reply", baseline, submittedUserMessageId: "attachment-user" })).reply, "ATTACHMENT_OK");
+  });
+}
+
+test("an attachment-only first turn satisfies conversation hydration", async () => {
+  const h = createHarness(); h.state.readyState = "complete";
+  const attachment = modernMessage("user", "first-attachment", "file", "fallback-turn-0:0:user");
+  h.state.modernUserUnits = [attachment.unit];
+  await h.pageState(); h.state.now += 4000;
+  assert.equal((await h.pageState()).ready, true);
+});
