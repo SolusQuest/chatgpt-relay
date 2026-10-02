@@ -36,6 +36,9 @@ const dlog = (...args) => { if (DEBUG) console.log(...args); };
 
 // Continuous per-session task dispatch loops.
 const dispatchLoops = new Map(); // session -> { tabId, controller }
+// Unlike dispatchLoops, ownership survives an abort until run-task settles.
+// This is intentionally ephemeral: after a worker restart all records are orphans.
+const activeDispatchTasks = new Set();
 // taskId to deferred completion waiter.
 const pendingCompletion = new Map();
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -798,12 +801,12 @@ async function startDispatchLoop(session, tabId) {
         "dispatchAt", dispatchAt,
         "waitMs", dispatchAt - loopStart,
       );
-      await markInflight(session, taskId, {
-        tabId,
-        deliveryPhase: "preparing",
-      });
-
+      activeDispatchTasks.add(taskId);
       try {
+        await markInflight(session, taskId, {
+          tabId,
+          deliveryPhase: "preparing",
+        });
         let pageState;
         try {
           pageState = await getPageState(tabId);
@@ -949,6 +952,8 @@ async function startDispatchLoop(session, tabId) {
         await httpJson("POST", `/internal/tasks/${taskId}/complete`, { error: e.message }).catch(() => {});
         await clearInflight(session);
         await notifyTabCleared(tabId);
+      } finally {
+        activeDispatchTasks.delete(taskId);
       }
     }
   } finally {
@@ -1480,6 +1485,9 @@ async function reconcileInflight() {
     try {
       const t = await httpJson("GET", `/v1/tasks/${entry.taskId}`);
       if (t?.status === "in_progress" || t?.status === "recovering") {
+        // Check after the asynchronous read: an active upload is not an orphan.
+        // Deferring it here races the content script's durable send fence.
+        if (activeDispatchTasks.has(entry.taskId)) continue;
         const action = classifyRecoveryAction(t, entry);
         let tabId = entry.tabId ?? null;
         if (!tabId) {

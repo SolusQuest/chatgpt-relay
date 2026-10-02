@@ -119,3 +119,50 @@ test("reply completion requires the same user and assistant identities across sa
   await poll(); assert.equal(captured(), 0, "equal text on a different message resets stability");
   await poll(); assert.equal(captured(), 1);
 });
+
+for (const stopLoop of [false, true]) {
+  test(`reconciliation does not recover a live preparing dispatch (loop stopped: ${stopLoop})`, async () => {
+    const w = await worker("opening", true);
+    w.context.events = [];
+    await vm.runInContext(`
+      tabSessionCache.set(7, 'session');
+      getPageState = async () => ({session:'session', ready:true, generating:false, baseline:{}});
+      httpJson = async (method, path) => {
+        events.push(path);
+        if (path.startsWith('/internal/next_task')) return {task:{taskId:'active-task', text:'test'}};
+        if (path === '/v1/tasks/active-task') return {taskId:'active-task', session:'session', status:'in_progress'};
+        return {};
+      };
+      let releaseRun;
+      const runGate = new Promise(resolve => { releaseRun = resolve; });
+      sendTabMessage = async (_tabId, msg) => {
+        if (msg.type === 'run-task') { events.push('run-task'); return runGate; }
+        return {};
+      };
+      const runningDispatch = startDispatchLoop('session', 7);
+    `, w.context);
+    try {
+      for (let i = 0; i < 20 && !w.context.events.includes("run-task"); i++) {
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
+      assert.ok(w.context.events.includes("run-task"));
+      if (stopLoop) await vm.runInContext("stopDispatchLoop('session')", w.context);
+      await vm.runInContext("reconcileInflight()", w.context);
+      assert.equal(w.context.events.includes("/internal/tasks/active-task/defer"), false);
+      assert.equal(w.storage.inflight.session?.taskId, "active-task");
+    } finally {
+      await vm.runInContext(`
+        stopDispatchLoop('session');
+        releaseRun({error:'test stopped before send', submissionState:'not-submitted'});
+        runningDispatch;
+      `, w.context);
+    }
+    // A worker restart has no live dispatch owner: pre-send recovery still works.
+    await vm.runInContext(`(async () => {
+      await markInflight('session', 'active-task', {tabId:7, deliveryPhase:'preparing'});
+      await reconcileInflight();
+    })()`, w.context);
+    assert.ok(w.context.events.includes("/internal/tasks/active-task/defer"));
+    assert.equal(w.storage.inflight.session, undefined);
+  });
+}
