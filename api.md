@@ -15,7 +15,27 @@ operations and [`README.md`](./README.md) for installation and CLI usage.
 - `/internal/*` is reserved for the browser extension and is not a stable agent
   integration surface.
 
-## Task status
+## Session maintenance and controls
+
+`GET /v1/sessions/:id/inspect` accepts a conversation ID or session reference. It returns registry identity, server pause/suspension state, active task, queued count, and `pageStatus` (`observed`, `ambiguous`, `unknown`). `page` is null unless exactly one page was observed within 30 seconds; historical `pages` carry `observedAt` and `stale`. No composer text is reported.
+
+`GET /v1/doctor?session=:id` returns server version/protocol and observed extension version, protocol compatibility and DOM capabilities. Omit `session` to inspect known active sessions. Missing messages in a virtualized or new conversation yield null capabilities, not failure.
+
+`POST /v1/sessions/:id/suspend` and `/continue` set the durable `suspended` dispatch gate. They neither cancel active tasks nor discard queued work, and do not change safety pause state. Task deadlines still apply.
+
+`GET /v1/tasks/:id/trace` returns `{taskId, completeHistory, events:[{seq, at, event, detail}]}`. Events include creation, status transitions, submission preparation, send fence, acknowledgement, generation, reply detection and recovery. Legacy tasks have incomplete history. Stop is represented by cancellation with its reason.
+
+`POST /v1/session-controls` accepts `{operationId, kind, session?, taskId?}`. `operationId` is a caller-retained 8–100 character identifier (`A-Z`, `a-z`, digits, `_`, `-`). `kind` is `refresh`, `recover`, or `stop`. Refresh requires `session` (reference or conversation ID), and optionally `taskId` to preserve observation of that active task. Recover and Stop require `taskId`. Reusing the same operation ID and target returns the existing operation; conflicting payloads return 409. An active operation holds new task claims for its session.
+
+The 202 response and `GET /v1/operations/:id` expose `operationId`, `session`, `taskId`, `kind`, `state`, `createdAt`, `expiresAt`, `error`, `errorInfo`, and `result`. States are `queued`, `claimed`, `executing`, `succeeded`, `blocked`, or `unknown`. Operations expire after 120 seconds. A durable execution fence prevents repeated refresh/Stop actions after worker restart; an uncertain fence or missing post-reload observation is not proof of success. Do not automatically repeat an `unknown` operation using a new ID.
+
+Recover requires an active task with a Send fence and surviving original browser evidence. Its result is `observation_attached`; obtain completion through the original task endpoint. Refresh requires a uniquely mapped fresh page, no draft and either no active task or the explicitly specified sent task. Success (`page_refreshed`) requires a different document and page readiness or resumed generation. Stop results separately expose `stopRequested` (boolean or null), `pageGenerationState` (`stopped`, `generating`, `unknown`), and `relayTaskStatus`; transport success does not imply generation stopped.
+
+HTTP failures, failed tasks and failed operations expose `errorInfo: {code, message, deliveryState, safeToResubmit, nextAction}` while retaining the existing `error` field. `safeToResubmit: null` means unknown, never permission to resend. Inspect the original task and operation before retrying.
+
+Extension-only maintenance endpoints: `POST /internal/session-snapshots` reports whitelisted observations; `POST /internal/session-controls/claim` takes an extension `owner`; `POST /internal/session-controls/:id/fence` takes `{owner, token, documentId}` and grants `execute: true` once; `/finish` takes `{owner, token, state, error?, result?}`. Ownership and tab identity are fixed when the public operation is created. These endpoints are not agent APIs.
+
+## Task lifecycle statuses
 
 | Status | Meaning |
 |---|---|

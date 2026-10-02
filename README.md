@@ -130,6 +130,15 @@ Use `--project-id <id>` instead of `--no-project` for a Project chat. Maintain t
 gpt-relay start
 gpt-relay health
 gpt-relay sessions
+gpt-relay sessions inspect --session-ref <ref>
+gpt-relay doctor --session-ref <ref>
+gpt-relay tasks trace <task-id>
+gpt-relay sessions suspend --session-ref <ref>
+gpt-relay sessions continue --session-ref <ref>
+gpt-relay tasks recover <task-id>
+gpt-relay sessions refresh --session-ref <ref>
+gpt-relay tasks stop <task-id>
+gpt-relay operations <operation-id>
 gpt-relay tasks --last 20
 gpt-relay show <task-id>
 gpt-relay cancel <task-id>
@@ -139,6 +148,18 @@ gpt-relay review --session <session-id> --stdin
 
 ## API summary
 
+Maintenance commands return JSON. `suspend` stops new claims while existing work continues; queued tasks retain their original expiry. `continue` releases only that dispatch suspension. Safety `pause`/`resume` remain separate.
+
+`inspect` uses page observations with a 30-second freshness limit and explicitly reports missing or ambiguous pages. `doctor` exits 2 when attention is required; null selector capabilities mean unobserved. `trace` persists lifecycle events without prompt/reply content; tasks predating trace installation report `completeHistory: false`.
+
+`recover`, `refresh`, and `stop` enqueue independent control operations. Retain the returned `operationId` and query `operations` until terminal. A queued operation is not success. Use `--operation-id <same-id>` when retrying an uncertain HTTP request; the CLI prints the identifier to stderr before submitting. Commands expire after two minutes. `unknown` requires inspection, not a new operation ID and blind retry.
+
+Refresh defaults to an idle page with an empty composer. To reload while observing a previously sent task, use `sessions refresh --session-ref <ref> --recover-task <task-id>`. It requires the original task's durable correlation evidence and never sends it again. Refresh refuses drafts, unknown page state and multiple candidate tabs. It waits for a new document and readiness after reload; a broken content script must be repaired manually because draft safety cannot be verified. `tasks recover` resumes observation of an active sent task without refreshing. Automatic late-reply recovery after eligible terminal failures is unchanged.
+
+`tasks stop` clicks Stop only for the original task's last user turn and reports `stopRequested`, `pageGenerationState`, and `relayTaskStatus` separately. `cancel` only cancels Relay tracking. HTTP and task failures include `errorInfo` with a stable code, delivery state, suggested next action, and conservative `safeToResubmit` (`false` or unknown/null).
+
+Restart the relay server, reload the Edge extension and refresh ChatGPT pages after updating these components. Use `doctor` to verify the page protocol before issuing control commands.
+
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `/v1/tasks` | Submit a task |
@@ -146,6 +167,12 @@ gpt-relay review --session <session-id> --stdin
 | `GET` | `/v1/tasks?session=&status=&limit=` | List tasks |
 | `DELETE` | `/v1/tasks/:id` | Cancel a task |
 | `GET` | `/v1/sessions` | List active sessions |
+| `GET` | `/v1/sessions/:id/inspect` | Read server and fresh page state |
+| `GET` | `/v1/doctor?session=:id` | Diagnose extension/page compatibility |
+| `GET` | `/v1/tasks/:id/trace` | Read persistent lifecycle timeline |
+| `POST` | `/v1/sessions/:id/suspend` or `/continue` | Hold/release new task claims |
+| `POST` | `/v1/session-controls` | Request recover, refresh or stop |
+| `GET` | `/v1/operations/:id` | Read control operation status |
 | `POST` | `/v1/sessions/:id/pause` | Pause a session |
 | `POST` | `/v1/sessions/:id/resume` | Resume a session |
 | `GET` | `/health` | Check relay health |

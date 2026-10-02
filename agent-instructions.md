@@ -1,5 +1,15 @@
 # gpt-relay agent guide
 
+## Diagnose and control an existing session
+
+Start with `gpt-relay sessions inspect --session-ref <ref>`, `gpt-relay doctor --session-ref <ref>`, and `gpt-relay tasks trace <task-id>`. Use the current task's exact session identity. Missing/stale observations and absent message DOM are unknown evidence.
+
+Use `sessions suspend` / `sessions continue` with the same session flag to hold/release new claims without cancelling existing work. Deadlines continue to run. Use `tasks recover <task-id>` to observe the original sent active task again; never replace an uncertain send with a new review request.
+
+Use `sessions refresh --session-ref <ref>` for an idle clean page, or add `--recover-task <task-id>` to preserve observation of an active sent task. It refuses drafts and ambiguous or unreachable pages. Use `tasks stop <task-id>` for the page's Stop button; `cancel` only cancels Relay tracking. Read both page generation and Relay task status in the Stop result.
+
+Control commands return an operation ID immediately. Poll `gpt-relay operations <operation-id>` for the result. Persist the ID (also printed before submission on stderr) and reuse it with `--operation-id` after transport failure. `queued` is not success, and `unknown` must not trigger a blind retry with a new ID. These commands and their errors use JSON. Structured `errorInfo.safeToResubmit: null` means unknown. See [API maintenance contracts](api.md#session-maintenance-and-controls) for details.
+
 Use this guide for relay mechanics. Multi-stage orchestration lives in [`workflows/`](./workflows/README.md); HTTP schemas and environment variables live in [`api.md`](./api.md); the complete state machine lives in [`task-lifecycle.md`](./task-lifecycle.md).
 
 ## Core rules

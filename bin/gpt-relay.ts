@@ -435,6 +435,12 @@ commands:
   start                    start relay server (foreground)
   health                   check relay at ${BASE}
   sessions                 list active ChatGPT sessions
+  sessions inspect|suspend|continue --session-ref REF (or --session ID)
+  sessions refresh --session-ref REF [--recover-task TASK_ID] [--operation-id ID]
+  doctor [--session-ref REF]  diagnose service, extension and observed DOM
+  tasks trace TASK_ID       read durable lifecycle events
+  tasks recover|stop TASK_ID [--operation-id ID]
+  operations OPERATION_ID   read asynchronous control result
   tasks [--session ID] [--status S] [--last N]
                            list recent tasks
   show <taskId>            show full prompt + reply
