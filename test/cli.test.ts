@@ -73,6 +73,8 @@ test("gpt-relay health reports ok", async () => {
   assert.match(r.stdout, /ok/);
 });
 
+
+
 test("gpt-relay health exits 1 when relay unreachable", async () => {
   const r = await runCli(["health"], { GPT_RELAY_URL: "http://127.0.0.1:1" });
   assert.equal(r.code, 1);
@@ -232,4 +234,12 @@ test("gpt-relay show labels in-memory progress as provisional", async () => {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ text: "done" }),
   });
+});
+
+test("sessions inspect resolves a session and reports unknown page state", async () => {
+  await fetch(`${baseUrl}/internal/heartbeat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session: "inspect-cli" }) });
+  const r = await runCli(["sessions", "inspect", "--session", "inspect-cli"]);
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).pageStatus, "unknown");
+  assert.equal(JSON.parse(r.stdout).activeTaskId, null);
 });

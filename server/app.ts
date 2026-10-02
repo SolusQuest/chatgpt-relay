@@ -10,6 +10,7 @@ import { createInternalRouter } from "./routes/internal.js";
 import { createSessionCreationRouter } from "./routes/session-creation.js";
 import { RegistryError } from "./session-registry.js";
 import { createProjectDiscoveryRouter } from "./project-discovery.js";
+import { SessionDiagnostics, diagnosticsRouter } from "./session-diagnostics.js";
 
 export interface AppHandle {
   app: express.Express;
@@ -23,6 +24,7 @@ export function createApp(config: Config): AppHandle {
 
   const app = express();
   app.use(express.json({ limit: "2mb" }));
+  app.use(diagnosticsRouter(new SessionDiagnostics(db, store)));
 
   // v1 API
   app.use("/v1", createV1TasksRouter(store));

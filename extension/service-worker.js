@@ -402,6 +402,29 @@ async function getPageState(tabId) {
   return state;
 }
 
+// Independent of task dispatch: a busy conversation must remain diagnosable.
+async function reportSessionSnapshots() {
+  try {
+    const owner = await creationOwner();
+    const tabs = await chrome.tabs.query({ url: "https://chatgpt.com/*" });
+    await Promise.all(tabs.map(async tab => {
+      if (tab.id == null) return;
+      const session = await getTabSession(tab.id, { forceFresh: true }).catch(() => null);
+      if (!session) return;
+      const state = await getPageState(tab.id).catch(() => null);
+      if (state && state.session !== session) return;
+      await httpJson("POST", "/internal/session-snapshots", {
+        owner, tabId: tab.id, session, protocol: 1,
+        version: chrome.runtime.getManifest?.().version ?? null,
+        ready: state?.ready ?? null, generating: state?.generating ?? null,
+        composerClean: state?.composerClean ?? null, reason: state?.reason ?? "page_unreachable",
+      });
+    }));
+  } catch (err) { dlog("session snapshots", err); }
+  finally { setTimeout(() => void reportSessionSnapshots(), 10000); }
+}
+void reportSessionSnapshots();
+
 async function reportTaskProgress(taskId, phase) {
   return httpJson("POST", `/internal/tasks/${taskId}/progress`, { phase }).then(() => true).catch((e) => {
     dlog("[relay sw] progress report failed", taskId.slice(0, 8), phase, e.message);
