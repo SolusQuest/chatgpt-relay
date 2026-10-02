@@ -118,6 +118,10 @@ export function toTaskView(store: TaskStore, t: Task, includeText = false): Task
 
 export function createV1TasksRouter(store: TaskStore): Router {
   const router = Router();
+  router.get("/tasks/:id/trace", (req, res) => {
+    if (!store.getTask(String(req.params.id))) return res.status(404).json({ error: "task_not_found" });
+    res.json(store.traceTask(String(req.params.id)));
+  });
 
   // Create a task.
   router.post("/tasks", (req: Request, res: Response) => {

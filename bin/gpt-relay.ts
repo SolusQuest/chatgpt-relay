@@ -96,6 +96,11 @@ interface CliTask {
 }
 
 async function cmdTasks(args: string[]): Promise<number> {
+  if (args[0] === "trace") {
+    if (!args[1]) throw new Error("usage: tasks trace TASK_ID");
+    console.log(JSON.stringify(await http.get(`/v1/tasks/${encodeURIComponent(args[1])}/trace`, { baseUrl: BASE })));
+    return 0;
+  }
   const q = new URLSearchParams();
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;

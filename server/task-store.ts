@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import type { Db } from "./db.js";
 import type { Config } from "./config.js";
 import { SessionRegistry } from "./session-registry.js";
+import { installTaskTrace, readTaskTrace } from "./task-trace.js";
 
 export type TaskStatus =
   | "queued"
@@ -213,10 +214,15 @@ export class TaskStore {
     private readonly config: Config,
   ) {
     this.registry = new SessionRegistry(db);
+    installTaskTrace(db);
     this.emitter.setMaxListeners(0);
   }
 
   // ── Task lifecycle ───────────────────────────────────────────────────────
+  traceTask(id: string) {
+    this.mustGetTask(id);
+    return readTaskTrace(this.db, id);
+  }
 
   createTask(input: CreateTaskInput): Task {
     input = { ...input, session: this.registry.resolve(input.session) };
