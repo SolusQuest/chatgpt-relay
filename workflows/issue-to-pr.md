@@ -168,4 +168,6 @@ After publication, read the remote issue back and verify rendered body, links, c
 
 The remote issue is now authoritative. Continue at Phase 1 of `agent-ready-issue-to-pr.md` with the same session and mode, using the remote URL and preserving the approved or pre-authorized scope. Do not repeat refinement.
 
+When entered through the downstream workflow's [automatic readiness fallback](./agent-ready-issue-to-pr.md#automatic-readiness-fallback), carry its fallback-used record, repository/issue and workspace/branch identity, project constraint profile, finding ledger, evidence, and consumed review rounds back into implementation. Resume with the remaining applicable budget; this return does not authorize a new plan cycle or another automatic fallback.
+
 Never let agent-relay agreement replace user product authority, silently expand scope, retry relay automatically after pause/captcha, or duplicate downstream PR rules here.

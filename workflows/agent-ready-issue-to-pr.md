@@ -17,6 +17,8 @@ Use `issue-to-pr.md` when material product, scope, or acceptance questions remai
 
 `default` preserves explicit checkpoints; `auto` continues without routine intervention to `READY_FOR_HUMAN_REVIEW` or `BLOCKED_HANDOFF`. Both modes use identical quality gates.
 
+Before implementation starts, `auto` may use the one-time [readiness fallback](#automatic-readiness-fallback) to `issue-to-pr.md` instead of ending at a readiness-related `BLOCKED_HANDOFF`.
+
 ## Preconditions
 
 - The authoritative issue is available by URL or complete text.
@@ -33,7 +35,22 @@ Verify or derive the issue's concise project constraint profile from current evi
 
 If an explicit frozen requirement appears materially disproportionate and cannot reasonably be satisfied by a narrower interpretation, record one contract-applicability challenge with evidence. Do not silently ignore it or spend implementation effort before resolving the contract: use one consolidated checkpoint in `default`, or return `BLOCKED_HANDOFF` in `auto`. A relay preference that is not part of the frozen contract does not trigger this checkpoint.
 
-If readiness fails, return the complete missing-decision set and recommend `issue-to-pr.md`. Use one checkpoint in `default`; in `auto`, do not rewrite the frozen issue and return `BLOCKED_HANDOFF` after independent safe analysis.
+If readiness fails, record the complete missing-decision set. In `default`, recommend `issue-to-pr.md` at one checkpoint. In `auto`, apply the automatic readiness fallback below; if it is ineligible, complete independent safe analysis and return `BLOCKED_HANDOFF`. Do not rewrite the frozen issue inside this implementation workflow.
+
+### Automatic readiness fallback
+
+In `auto`, automatically enter Phase 1 of `issue-to-pr.md` once per issue execution chain when all of these conditions hold:
+
+- Implementation has not started, and Phase 1 or Phase 2 would otherwise end at `BLOCKED_HANDOFF` because the issue contract is incomplete, acceptance criteria are ambiguous, or further issue refinement is required.
+- Refinement and issue publication remain within the user's stated intent and authorized scope. This fallback authorizes normal in-scope refinement and publication under `issue-to-pr.md`'s `auto` gates, unless the user explicitly excluded them; it does not delegate new product or contract decisions.
+- No unresolved authority blocker or absolute disagreement remains, and required sources, dependencies, and Relay are available. Missing authorization, unmet external dependencies, and Relay execution failures are not fallback triggers.
+- This execution chain has not already used the fallback, and the required remaining reviews can fit within the existing applicable budgets. Budget exhaustion alone is not a fallback trigger.
+
+Before switching, record the originating phase, readiness blockers, authority basis, and fallback usage. Preserve the same repository and issue, workspace/worktree and branch if already selected, `auto` mode, task-specific Relay session, project constraint profile, finding ledger, evidence, and consumed review rounds. Carry this record through refinement and the return to implementation; entering through `issue-to-pr.md` does not clear it.
+
+Use the refinement workflow's own bounded discovery and contract-review stages; do not use them as extra implementation-plan reviews. After remote issue publication and readback, return to Phase 1 here with the refined authoritative issue, reconcile the existing plan and ledger, and use only the remaining plan-review rounds. The switch or resulting refinement does not itself authorize a fresh plan cycle, an exhausted contract-review cycle, or weaker validation gates.
+
+If refinement or the returned implementation workflow remains blocked, return one consolidated `BLOCKED_HANDOFF` under the applicable stage rules. Do not switch back to refinement again automatically. Once implementation has started, this fallback is unavailable.
 
 ### Plan creation
 
@@ -142,7 +159,7 @@ Apply the shared continuation protocol:
 - `READY` → implement.
 - `CORRECT` → make and verify the minimum correction, update the ledger, implement, and require tests and PR review to cover the corrected area.
 - Product/public-contract/compatibility/migration/security/privacy decision or absolute disagreement → one checkpoint in `default`, or `BLOCKED_HANDOFF` in `auto`.
-- Fundamental re-plan or unready issue → one return-to-planning recommendation in `default`; no automatic reset in `auto`.
+- Fundamental re-plan or unready issue → one return-to-planning recommendation in `default`; in `auto`, use the one-time readiness fallback only when all its conditions hold, otherwise return `BLOCKED_HANDOFF`. A fundamental re-plan alone does not authorize fallback or a review-budget reset.
 
 The budget belongs to the current plan cycle. Only an explicit user-authorized material change to the issue or engineering risk boundary starts another full cycle; carry the ledger and reason forward.
 
