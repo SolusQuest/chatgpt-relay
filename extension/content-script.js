@@ -435,8 +435,6 @@
       reason = "generating";
     } else if (!input || !isVisible(input)) {
       reason = "composer-loading";
-    } else if (!composer.clean) {
-      reason = userOwnedComposer ? "composer-user-edit" : "composer-not-clean";
     } else if (
       conversationRoute &&
       baseline.userCount + baseline.assistantCount === 0
@@ -451,6 +449,7 @@
       return {
         session: getSessionId(),
         ready: false,
+        observationReady: false,
         reason,
         stableForMs: 0,
         generating,
@@ -477,11 +476,14 @@
     }
 
     const stableForMs = Math.max(0, now - pageReadyCandidate.since);
-    const ready = stableForMs >= PAGE_READY_STABLE_MS;
+    const observationReady = stableForMs >= PAGE_READY_STABLE_MS;
+    const draftReason = !composer.clean ? (userOwnedComposer ? "composer-user-edit" : "composer-not-clean") : null;
+    const ready = observationReady && !draftReason;
     return {
       session: getSessionId(),
       ready,
-      reason: ready ? null : "page-stabilizing",
+      observationReady,
+      reason: draftReason ?? (ready ? null : "page-stabilizing"),
       stableForMs,
       generating,
       baseline,
@@ -1042,7 +1044,9 @@
               return;
             }
             const readiness = getPageReadiness();
-            if (!readiness.ready && !readiness.generating) {
+            // A draft prevents new submissions, but must not stall observation
+            // of the already sent task (including completion and manual Stop).
+            if (!readiness.observationReady && !readiness.generating) {
               sendSnapshot({
                 status: "page-unready",
                 reason: readiness.reason,

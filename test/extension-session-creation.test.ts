@@ -165,7 +165,7 @@ test("Stop reports page and Relay outcomes separately and records original task 
 });
 
 for (const status of ['cancelled-stop', 'cancelled-client', 'done', 'failed', 'in_progress']) {
-  for (const pageCase of ['original', 'new-turn', 'generating', 'hydrating', 'other-session', 'unreachable', 'legacy-fence']) {
+  for (const pageCase of ['original', 'draft', 'new-turn', 'generating', 'hydrating', 'other-session', 'unreachable', 'legacy-fence']) {
     test(`resumed Stop observes durable outcome without pending state: ${status}, ${pageCase}`, async () => {
       const w = await worker();
       w.context.taskStatus = status;
@@ -175,7 +175,8 @@ for (const status of ['cancelled-stop', 'cancelled-client', 'done', 'failed', 'i
         getPageState=async()=>{
           if(pageCase==='unreachable') throw new Error('page unavailable');
           return {session:pageCase==='other-session'?'other':'session',documentId:'doc',
-            ready:pageCase!=='hydrating',generating:pageCase==='generating',
+            ready:!['hydrating','draft'].includes(pageCase),
+            ...(pageCase==='draft'?{observationReady:true}:{}),generating:pageCase==='generating',
             baseline:{lastUserId:pageCase==='new-turn'?'new-user':'original-user'}};
         };
         sendTabMessage=async()=>{throw new Error('must never replay Stop');};
@@ -190,7 +191,7 @@ for (const status of ['cancelled-stop', 'cancelled-client', 'done', 'failed', 'i
       })()`,w.context);
       assert.equal(result.stopRequested, status === 'cancelled-stop' ? true : null);
       assert.equal(result.relayTaskStatus, status.startsWith('cancelled') ? 'cancelled' : status);
-      assert.equal(result.pageGenerationState, pageCase === 'original' ? 'stopped' : pageCase === 'generating' ? 'generating' : 'unknown');
+      assert.equal(result.pageGenerationState, ['original','draft'].includes(pageCase) ? 'stopped' : pageCase === 'generating' ? 'generating' : 'unknown');
     });
   }
 }

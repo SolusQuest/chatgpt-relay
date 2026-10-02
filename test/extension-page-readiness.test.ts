@@ -491,6 +491,36 @@ test("refreshed conversation is not ready until history and composer stabilize",
   assert.equal(page.reason, "page-stabilizing");
 });
 
+for (const payload of ['text', 'attachment', 'upload']) {
+  test(`a new ${payload} draft blocks dispatch but not observation of the original reply`, async () => {
+    const h=createHarness(); h.state.readyState='complete';
+    h.state.users=[element('old-user','old prompt')];
+    await h.pageState(); h.state.now+=5000;
+    const baseline=(await h.pageState()).baseline;
+    h.state.users.push(element('sent-user','sent prompt'));
+    h.state.assistants=[element('new-answer','COMPLETE_REPLY')];
+    const input=h.state.input as any;
+    input.textContent=payload==='text'?'next unsent draft':'';
+    const attachment=element('draft-file','Private attachment');
+    const root={querySelectorAll:(selector:string)=>
+      selector==='[data-composer-attachments][data-visible-attachments]'&&payload==='attachment'?[attachment]:
+      selector==='[role="progressbar"]'&&payload==='upload'?[element('upload')]:[]};
+    input.closest=()=>root;
+    await h.pageState(); h.state.now+=5000;
+    const page=await h.pageState();
+    assert.equal(page.ready,false);
+    assert.equal(page.composerClean,false);
+    const request={type:'poll-reply',baseline,submittedUserMessageId:'sent-user'};
+    const reply=await h.message(request);
+    assert.equal(reply.status,'reply-ready');
+    assert.equal(reply.reply,'COMPLETE_REPLY');
+    assert.equal(input.textContent,payload==='text'?'next unsent draft':'');
+    h.state.readyState='loading';
+    assert.equal((await h.message(request)).status,'page-unready');
+    assert.equal((await h.pageState()).ready,false);
+  });
+}
+
 test("reply polling reports page-unready while refreshed history is hydrating", async () => {
   const harness = createHarness();
   harness.state.readyState = "complete";

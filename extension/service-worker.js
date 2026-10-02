@@ -542,7 +542,8 @@ async function executeStopControl(command) {
     if (requested == null && task.status === "cancelled" && task.error === "user stopped before reply") requested = true;
     pageGenerationState = page?.session === session && submittedUserMessageId &&
       page.baseline?.lastUserId === submittedUserMessageId
-      ? page.generating === true ? "generating" : page.generating === false && page.ready === true ? "stopped" : "unknown"
+      ? page.generating === true ? "generating" : page.generating === false &&
+        (page.observationReady ?? page.ready) === true ? "stopped" : "unknown"
       : "unknown";
     if (pageGenerationState === "stopped" && ["cancelled", "done", "failed", "expired"].includes(task.status)) break;
     if (Date.now() >= deadline) break;
