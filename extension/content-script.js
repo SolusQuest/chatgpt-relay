@@ -15,6 +15,7 @@
   "use strict";
   if (window.__gptRelayContentLoaded) return;
   window.__gptRelayContentLoaded = true;
+  const documentId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
   // Selectors and safety patterns.
   const SELECTORS = {
@@ -1145,7 +1146,21 @@
         } else if (msg.type === "get-inflight") {
           sendResponse({ inflight: readInflight() });
         } else if (msg.type === "get-page-state") {
-          sendResponse(getPageReadiness());
+          sendResponse({ ...getPageReadiness(), documentId });
+        } else if (msg.type === "refresh-page") {
+          const state = getPageReadiness();
+          if (msg.expectedSession !== state.session || msg.documentId !== documentId) throw new Error("session_identity_changed");
+          if (state.composerClean !== true) throw new Error("composer_not_clean");
+          const rec = readInflight();
+          if (msg.taskId) {
+            if (rec?.taskId !== msg.taskId || rec.session !== state.session || rec.phase === "preparing" ||
+                !rec.submittedUserMessageId || rec.stopRequestedAt ||
+                getLastUserId(getUserMessages()) !== rec.submittedUserMessageId) throw new Error("recovery_evidence_unavailable");
+          } else if (!state.ready || state.generating || rec?.taskId) throw new Error("page_not_idle");
+          // Validate and reload in one synchronous turn. A user edit cannot slip
+          // between a worker preflight round trip and a later tabs.reload call.
+          sendResponse({ reloading: true });
+          location.reload();
         } else if (msg.type === "check-safety") {
           sendResponse({ block: findSafetyBlock() });
         } else if (msg.type === "update-banner") {

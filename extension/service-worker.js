@@ -426,6 +426,8 @@ async function reportSessionSnapshots() {
 void reportSessionSnapshots();
 
 async function executeSessionControl(command) {
+  if (command.kind === "refresh") return executeRefreshControl(command);
+  if (command.kind !== "recover") throw new Error("unsupported_control");
   const { tabId, session, taskId } = command;
   if (await getTabSession(tabId, { forceFresh: true }) !== session) throw new Error("session_identity_changed");
   const task = await httpJson("GET", `/v1/tasks/${encodeURIComponent(taskId)}`);
@@ -440,6 +442,53 @@ async function executeSessionControl(command) {
   void pollPendingReplies();
   return { action: "observation_attached", taskId };
 }
+
+const refreshingTabs = new Set();
+async function executeRefreshControl(command) {
+  const { tabId, session, taskId } = command;
+  refreshingTabs.add(tabId);
+  try {
+    // Finish an already running sample before fencing the reload.
+    if (taskId && pendingPolls.has(taskId)) await pendingPolls.get(taskId);
+    let beforeDocumentId = command.result?.beforeDocumentId;
+    if (command.state !== "executing") {
+      if (await getTabSession(tabId, { forceFresh: true }) !== session) throw new Error("session_identity_changed");
+      const state = await getPageState(tabId);
+      if (state.session !== session || !state.documentId) throw new Error("page_identity_unavailable");
+      if (state.composerClean !== true) throw new Error("composer_not_clean");
+      if (!taskId && (!state.ready || state.generating)) throw new Error("page_not_idle");
+      if (taskId) {
+        const rec = await getPendingReply(taskId);
+        if (!rec?.baseline || rec.tabId !== tabId || !rec.submittedUserMessageId || rec.stopRequestedAt)
+          throw new Error("recovery_evidence_unavailable");
+      }
+      const fence = await httpJson("POST", `/internal/session-controls/${encodeURIComponent(command.operationId)}/fence`,
+        { owner: command.owner, token: command.token, documentId: state.documentId });
+      beforeDocumentId = fence.result?.beforeDocumentId;
+      if (fence.execute) {
+        const response = await sendTabMessage(tabId, { type: "refresh-page", expectedSession: session,
+          taskId, documentId: state.documentId }, PAGE_STATE_SENDMSG_TIMEOUT_MS, "refresh-page").catch(() => null);
+        if (response?.error) throw new Error(response.error);
+      }
+    }
+    if (!beforeDocumentId) throw new Error("refresh_outcome_unknown");
+    const deadline = Math.min(command.expiresAt, Date.now() + 30_000);
+    while (Date.now() < deadline) {
+      const state = await getPageState(tabId).catch(() => null);
+      if (state?.session === session && state.documentId && state.documentId !== beforeDocumentId &&
+          (state.ready || (taskId && state.generating && state.baseline?.userCount > 0))) {
+        if (taskId) {
+          const task = await httpJson("GET", `/v1/tasks/${encodeURIComponent(taskId)}`);
+          if (["in_progress", "recovering"].includes(task.status))
+            await executeSessionControl({ ...command, kind: "recover" });
+        }
+        return { action: "page_refreshed", taskId, documentId: state.documentId };
+      }
+      await delay(500);
+    }
+    throw new Error("refresh_outcome_unknown");
+  } finally { refreshingTabs.delete(tabId); }
+}
 let controlPollRunning = false;
 async function processSessionControls() {
   if (controlPollRunning) return;
@@ -450,7 +499,7 @@ async function processSessionControls() {
     if (!command) return;
     let outcome;
     try { outcome = { state: "succeeded", result: await executeSessionControl(command) }; }
-    catch (e) { outcome = { state: "blocked", error: e.message }; }
+    catch (e) { outcome = { state: e.message === "refresh_outcome_unknown" ? "unknown" : "blocked", error: e.message }; }
     await httpJson("POST", `/internal/session-controls/${encodeURIComponent(command.operationId)}/finish`,
       { owner, token: command.token, ...outcome });
   } catch (err) { dlog("session controls", err); }
@@ -1127,6 +1176,7 @@ async function pollPendingReplies() {
 }
 
 async function pollOnePending(taskId, rec) {
+  if (refreshingTabs.has(rec.tabId)) return;
   if (pendingPolls.has(taskId)) return pendingPolls.get(taskId);
   const running = pollOnePendingSnapshot(taskId, rec);
   pendingPolls.set(taskId, running);

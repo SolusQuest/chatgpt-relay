@@ -43,11 +43,16 @@ async function cmdHealth(): Promise<number> {
 }
 
 async function cmdSessions(args: string[] = []): Promise<number> {
-  if (["inspect", "suspend", "continue"].includes(args[0] ?? "")) {
+  if (["inspect", "suspend", "continue", "refresh"].includes(args[0] ?? "")) {
     const flag = args.includes("--session-ref") ? "--session-ref" : "--session";
     const i = args.indexOf(flag);
     if (i < 0 || !args[i + 1] || args.includes("--session-ref") && args.includes("--session"))
-      throw new Error("usage: sessions inspect|suspend|continue --session-ref REF | --session ID");
+      throw new Error("usage: sessions inspect|suspend|continue|refresh --session-ref REF | --session ID");
+    if (args[0] === "refresh") {
+      const recovery = args.indexOf("--recover-task");
+      if (recovery >= 0 && !args[recovery + 1]) throw new Error("missing recovery task ID");
+      return submitControl({ kind: "refresh", session: args[i + 1], taskId: recovery < 0 ? null : args[recovery + 1] }, args);
+    }
     const route = `/v1/sessions/${encodeURIComponent(args[i + 1]!)}/${args[0]}`;
     console.log(JSON.stringify(args[0] === "inspect" ? await http.get(route, { baseUrl: BASE }) :
       await http.post(route, {}, { baseUrl: BASE })));

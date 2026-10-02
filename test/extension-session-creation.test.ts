@@ -91,6 +91,25 @@ test("explicit recovery attaches original evidence without submitting or requeue
   await assert.rejects(vm.runInContext("executeSessionControl({kind:'recover',session:'session',tabId:7,taskId:'task'})", w.context), /recovery_evidence_unavailable/);
 });
 
+test("refresh verifies a new document and never repeats a fenced reload", async () => {
+  const w = await worker();
+  const result = await vm.runInContext(`(async()=>{
+    let reloads=0, fences=0;
+    getTabSession=async()=> 'session';
+    getPageState=async()=>({session:'session',ready:true,generating:false,composerClean:true,documentId:reloads?'new':'old'});
+    httpJson=async()=> {fences++; return {execute:true,result:{beforeDocumentId:'old'}};};
+    sendTabMessage=async()=>{reloads++; return {reloading:true};};
+    const command={kind:'refresh',session:'session',tabId:7,operationId:'operation',state:'claimed',expiresAt:Date.now()+1000};
+    const first=await executeSessionControl(command);
+    const second=await executeSessionControl({...command,state:'executing',result:{beforeDocumentId:'old'}});
+    return {first,second,reloads,fences};
+  })()`, w.context);
+  assert.equal(result.first.action, "page_refreshed");
+  assert.equal(result.second.action, "page_refreshed");
+  assert.equal(result.reloads, 1);
+  assert.equal(result.fences, 1);
+});
+
 test("worker restart finds the previously opened marked tab instead of creating another", async () => {
   const w = await worker("opening", true);
   assert.equal(w.operations.includes("open-tab"), false);

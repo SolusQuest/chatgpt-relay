@@ -49,6 +49,7 @@ function element(id: string, text = ""): FakeElement {
 
 function createHarness({ advanceTimers = false, managed = null as null | Record<string, unknown> } = {}) {
   const state = {
+    reloads: 0,
     now: 10_000,
     readyState: "loading",
     input: element("input-1") as FakeElement | null,
@@ -123,7 +124,7 @@ function createHarness({ advanceTimers = false, managed = null as null | Record<
     get pathname() {
       return state.pathname;
     },
-    reload() {},
+    reload() { state.reloads++; },
   };
   const sessionStorage = {
     getItem(key: string) {
@@ -274,6 +275,23 @@ function modernMessage(role: "user" | "assistant", id: string, text: string, key
   }
   return { unit, marker };
 }
+
+test("refresh validates identity and the latest composer before reloading", async () => {
+  const h = createHarness();
+  h.state.readyState = "complete";
+  h.state.users = [element("existing-user", "hello")];
+  await h.pageState();
+  h.state.now += 5000;
+  const page = await h.pageState();
+  const request = { type: "refresh-page", expectedSession: page.session, documentId: page.documentId };
+  assert.match(String((await h.message({ ...request, documentId: "wrong" })).error), /identity/);
+  h.state.input!.textContent = "new draft";
+  assert.match(String((await h.message(request)).error), /composer_not_clean/);
+  assert.equal(h.state.reloads, 0);
+  h.state.input!.textContent = "";
+  assert.equal((await h.message(request)).reloading, true);
+  assert.equal(h.state.reloads, 1);
+});
 
 test("managed creation retains its ref after first navigation and rejects later conversation changes", async () => {
   const h = createHarness({ managed: { sessionRef: "sr_test", token: "owner-token", owner: "browser", projectId: null } });
