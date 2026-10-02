@@ -346,6 +346,25 @@ async function forgetTabSession(tabId) {
 }
 
 // ── inflight tracking ──
+function mergeTaskEvidence(previous, incoming) {
+  const merged = { ...previous, ...incoming };
+  // An acknowledgement and a sampler can both hold snapshots of the same
+  // task. Once learned, these facts must survive an older snapshot's write.
+  for (const key of ["baseline", "submittedAt", "sendAttemptedAt", "submittedUserMessageId", "stopRequestedAt",
+    "submissionVerificationDeadlineAt"]) {
+    if (previous[key] != null) merged[key] = previous[key];
+  }
+  for (const key of ["wasGenerating", "submissionAcknowledged", "submitAcknowledgedProgressReported",
+    "generatingProgressReported", "replyProgressReported", "composerPayloadObservedAfterFailure"]) {
+    if (previous[key] === true) merged[key] = true;
+  }
+  if (previous.deliveryPhase === "accepted" || merged.deliveryPhase === "accepted" ||
+      merged.submissionAcknowledged || merged.wasGenerating) {
+    merged.deliveryPhase = "accepted";
+    merged.ackState = "accepted";
+  }
+  return merged;
+}
 async function markInflight(session, taskId, details = {}, epochs = null) {
   return mutateStorageMap(STORAGE_KEYS.INFLIGHT, inflight => {
   if (epochs && (epochs.get(session) ?? 0) !== (taskEpochs.get(session) ?? 0)) return false;
@@ -354,12 +373,13 @@ async function markInflight(session, taskId, details = {}, epochs = null) {
   if (acquiring) retiredTasks.delete(taskId);
   bumpTaskEpoch(session);
   const existing = inflight[session]?.taskId === taskId ? inflight[session] : {};
-  inflight[session] = {
-    ...existing,
+  if (existing.submittedUserMessageId && details.submittedUserMessageId &&
+      existing.submittedUserMessageId !== details.submittedUserMessageId) return false;
+  inflight[session] = mergeTaskEvidence(existing, {
     taskId,
     submittedAt: existing.submittedAt ?? Date.now(),
     ...details,
-  };
+  });
   return true;
   });
 }
@@ -1250,13 +1270,25 @@ async function listPendingReplies() {
 }
 async function setPendingReply(taskId, rec) {
   return mutateTaskStorage(async () => {
-    const inflight = await getInflight(rec.session);
-    if (retiredTasks.has(taskId) || (inflight && inflight.taskId !== taskId)) return false;
+    const inflight = await getStorage(STORAGE_KEYS.INFLIGHT, {});
+    const owner = inflight[rec.session];
+    if (retiredTasks.has(taskId) || (owner && owner.taskId !== taskId)) return false;
     const map = await listPendingReplies();
-    rec.stopRequestedAt = map[taskId]?.stopRequestedAt ?? rec.stopRequestedAt ?? null;
+    const existing = mergeTaskEvidence(owner ?? {}, map[taskId] ?? {});
+    if (existing.submittedUserMessageId && rec.submittedUserMessageId &&
+        existing.submittedUserMessageId !== rec.submittedUserMessageId) return false;
+    Object.assign(rec, mergeTaskEvidence(existing, rec));
+    rec.stopRequestedAt ??= null;
     observeStopRequest(taskId, rec);
     map[taskId] = rec;
-    await setStorage(STORAGE_KEYS.PENDING_REPLIES, map);
+    // Keep durable recovery evidence in sync when a sampler first learns the
+    // original user ID, including generation-before-message acceptance.
+    if (owner) inflight[rec.session] = mergeTaskEvidence(owner, {
+      submittedUserMessageId: rec.submittedUserMessageId,
+      deliveryPhase: rec.deliveryPhase,
+      stopRequestedAt: rec.stopRequestedAt,
+    });
+    await chrome.storage.local.set({ [STORAGE_KEYS.INFLIGHT]: inflight, [STORAGE_KEYS.PENDING_REPLIES]: map });
     activatePendingReply(taskId);
     return true;
   });

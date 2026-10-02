@@ -562,6 +562,78 @@ test('late sampler writes cannot restore a retired task or displace another owne
   assert.equal(result.inflight.taskId,'new');
 });
 
+for (const writer of ['sampler', 'submission-ack']) {
+  test(`late ${writer} preserves learned identity through recovery, refresh and Stop`, async () => {
+    const w=await worker();
+    w.context.lateWriter=writer;
+    const result=await vm.runInContext(`(async()=>{
+      const task={taskId:'task',session:'session',status:'in_progress',sendAttemptedAt:10,submitAcknowledgedAt:20};
+      const early={taskId:'task',session:'session',tabId:7,baseline:{lastUserId:'previous'},
+        deliveryPhase:'send-attempted',sendAttemptedAt:10,submittedUserMessageId:null,wasGenerating:false};
+      await markInflight('session','task',early);
+      await setPendingReply('task',early);
+      const late=await getPendingReply('task');
+      await setPendingReply('task',{...early,deliveryPhase:'accepted',wasGenerating:true,submissionAcknowledged:true,
+        submittedUserMessageId:'original-user',submitAcknowledgedProgressReported:true});
+      const epochs=await captureTaskEpochs();
+      await attachPendingFromTask(task,'session',7,await getPendingReply('task'),epochs);
+      if(lateWriter==='sampler') await setPendingReply('task',late);
+      else {
+        await markInflight('session','task',{deliveryPhase:'accepted',submittedUserMessageId:null});
+        await setClaimPendingReply({task},'session',7,early.baseline,'accepted',{submittedUserMessageId:null});
+      }
+      const pending=await getPendingReply('task'), inflight=await getInflight('session');
+      let documentId='before', stopping=false;
+      getTabSession=async()=> 'session';
+      getPageState=async()=>({session:'session',ready:true,generating:false,composerClean:true,documentId,
+        baseline:{lastUserId:'original-user',userCount:1}});
+      pollOnePending=async()=>{}; pollPendingReplies=async()=>{};
+      httpJson=async(method,url,body)=>url.endsWith('/fence')?{execute:true,result:{beforeDocumentId:body.documentId}}:
+        {...task,status:stopping?'cancelled':'in_progress'};
+      sendTabMessage=async(tab,msg)=>{
+        if(msg.type==='refresh-page') {documentId='after';return {reloading:true};}
+        stopping=true;
+        return {clicked:msg.submittedUserMessageId==='original-user',stopRequestedAt:123};
+      };
+      const refreshed=await executeRefreshControl({kind:'refresh',state:'claimed',session:'session',taskId:'task',tabId:7,expiresAt:Date.now()+1000});
+      const stopped=await executeStopControl({kind:'stop',state:'claimed',session:'session',taskId:'task',tabId:7,expiresAt:Date.now()-1});
+      return {pending,inflight,refreshed,stopped};
+    })()`,w.context);
+    assert.equal(result.pending.submittedUserMessageId,'original-user');
+    assert.equal(result.inflight.submittedUserMessageId,'original-user');
+    assert.equal(result.pending.wasGenerating,true);
+    assert.equal(result.pending.deliveryPhase,'accepted');
+    assert.equal(result.pending.submissionAcknowledged,true);
+    assert.equal(result.refreshed.action,'page_refreshed');
+    assert.equal(result.stopped.stopRequested,true);
+  });
+}
+
+test('same-task evidence survives stale snapshots and rejects conflicting message identities',async()=>{
+  const w=await worker();
+  const result=await vm.runInContext(`(async()=>{
+    await markInflight('session','task',{tabId:7,baseline:{lastUserId:'previous'},deliveryPhase:'send-attempted',sendAttemptedAt:10});
+    await setPendingReply('task',{session:'session',tabId:7,submittedUserMessageId:'original-user',
+      deliveryPhase:'accepted',wasGenerating:true,submissionAcknowledged:true,stopRequestedAt:20});
+    const learned=await getInflight('session');
+    await setPendingReply('task',{session:'session',tabId:7,baseline:{lastUserId:'wrong'},submittedUserMessageId:null,
+      deliveryPhase:'send-attempted',sendAttemptedAt:99,wasGenerating:false,submissionAcknowledged:false,stopRequestedAt:null});
+    const pending=await getPendingReply('task');
+    const conflict=await setPendingReply('task',{session:'session',tabId:7,submittedUserMessageId:'other-user'});
+    const ownerConflict=await markInflight('session','task',{submittedUserMessageId:'other-user'});
+    return {learned,pending,conflict,ownerConflict,final:await getPendingReply('task')};
+  })()`,w.context);
+  assert.equal(result.learned.submittedUserMessageId,'original-user','sampling alone persists recovery identity');
+  assert.equal(result.pending.baseline.lastUserId,'previous');
+  assert.equal(result.pending.sendAttemptedAt,10);
+  assert.equal(result.pending.stopRequestedAt,20);
+  assert.equal(result.pending.wasGenerating,true);
+  assert.equal(result.pending.submissionAcknowledged,true);
+  assert.equal(result.conflict,false);
+  assert.equal(result.ownerConflict,false);
+  assert.deepEqual(result.final,result.pending);
+});
+
 test('task cleanup finishes on the page before releasing the next dispatch', async () => {
   const w=await worker('opening',true);
   await vm.runInContext(`
