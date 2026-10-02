@@ -70,6 +70,7 @@ function createHarness({ advanceTimers = false, managed = null as null | Record<
   };
   const storage = new Map<string, string>();
   const sentMessages: unknown[] = [];
+  const listeners = new Map<string, Set<(event: any) => void>>();
   const intervals: Array<{ callback: () => void; ms: number }> = [];
   let onMessage:
     | ((message: unknown, sender: unknown, respond: (value: unknown) => void) => boolean)
@@ -93,7 +94,13 @@ function createHarness({ advanceTimers = false, managed = null as null | Record<
     createTextNode(text: string) {
       return { textContent: text };
     },
-    addEventListener() {},
+    addEventListener(type: string, callback: (event: any) => void) {
+      if (!listeners.has(type)) listeners.set(type, new Set());
+      listeners.get(type)!.add(callback);
+    },
+    removeEventListener(type: string, callback: (event: any) => void) {
+      listeners.get(type)?.delete(callback);
+    },
     querySelector(selector: string) {
       return this.querySelectorAll(selector)[0] ?? null;
     },
@@ -162,6 +169,7 @@ function createHarness({ advanceTimers = false, managed = null as null | Record<
     chrome,
     crypto: { randomUUID: () => "fallback-session" },
     URL,
+    Element: class {},
     getComputedStyle: () => ({ visibility: "visible", display: "block" }),
     Date: FakeDate,
     Math,
@@ -198,6 +206,9 @@ function createHarness({ advanceTimers = false, managed = null as null | Record<
   return {
     state,
     sentMessages,
+    userEvent(type: string, target: any) {
+      for (const callback of listeners.get(type) ?? []) callback({type, target, isTrusted:true});
+    },
     tickInterval(ms: number) {
       for (const interval of intervals) {
         if (interval.ms === ms) interval.callback();
@@ -688,6 +699,68 @@ for (const scenario of ["unchanged", "attachment-unchanged", "wrong-session", "n
       if (scenario === "edit") assert.equal(input.textContent, "edited by user");
       if (scenario === "attachment") assert.equal(attachments[0]?.textContent, "Other file");
       if (scenario === "wrong-session") assert.equal(input.textContent, "", "reject before injection");
+    }
+  });
+}
+
+for (const scenario of ['early-edit', 'upload-edit', 'upload-remove', 'upload-file-change', 'normal-upload', 'normal-multiline'] as const) {
+  test(`preparation preserves user ownership: ${scenario}`, async () => {
+    const h = createHarness({advanceTimers:true});
+    h.state.readyState = 'complete';
+    h.state.users = [element('old-user','old prompt')];
+    const input = h.state.input as any;
+    input.isConnected = true; input.focus = () => {};
+    const isUpload = scenario.includes('upload');
+    const text = isUpload ? 'x'.repeat(25000) : 'authorized\nmultiline prompt';
+    let attachments: FakeElement[] = [];
+    let uploading = false;
+    const send = element('send') as any;
+    const sent: string[] = [];
+    send.click = () => { sent.push(input.textContent); h.state.users.push(element('new-user',text)); };
+    const root = {contains:(node: any)=>node===input||node===remove, querySelectorAll:(selector:string) => {
+      if (selector === 'button[type="submit"]' && !uploading && (input.textContent||attachments.length)) return [send];
+      if (selector === '[data-composer-attachments][data-visible-attachments]') return attachments;
+      if (selector === '[role="progressbar"]' && uploading) return [element('progress')];
+      return [];
+    }};
+    const remove = {closest:()=>remove};
+    input.closest = () => root;
+    input.dispatchEvent = (event:any) => {
+      if (event.type !== 'paste') return;
+      input.textContent = isUpload ? '' : text.replace(/\n/g,'');
+      if (isUpload) { attachments=[element('file','Uploading')]; uploading=true; }
+      let ticks=0;
+      h.state.onTimer = () => {
+        ticks++;
+        if (scenario==='early-edit') input.textContent='private draft';
+        if (ticks===2 && scenario==='upload-edit') {
+          h.userEvent('beforeinput',input); input.textContent='private draft';
+        }
+        if (ticks===2 && scenario==='upload-remove') {
+          h.userEvent('click',remove); attachments=[element('replacement','Private file')];
+        }
+        if (ticks===2 && scenario==='upload-file-change') {
+          h.userEvent('change',{type:'file',files:[{}]}); attachments=[element('replacement','Private file')];
+        }
+        if (ticks>=3 || !isUpload) {
+          uploading=false;
+          if (scenario==='normal-upload') attachments=[element('ready-file','Pasted text')];
+          h.state.onTimer=null;
+        }
+      };
+    };
+    h.state.onSendMessage = msg => msg.type==='send-attempted'?{status:'fenced'}:null;
+    const session = await h.sessionId();
+    const result = await h.message({type:'run-task',taskId:'task',text,expectedSession:session});
+    if (scenario.startsWith('normal')) {
+      assert.equal(result.status,'submitted'); assert.equal(sent.length,1);
+    } else {
+      assert.equal(sent.length,0);
+      assert.equal(result.errorCode,'submission_payload_changed');
+      assert.equal((await h.message({type:'reset-composer',expectedSession:session,taskId:'task'})).clean,false);
+      if (scenario.endsWith('edit')) assert.equal(input.textContent,'private draft');
+      else assert.equal(attachments[0]?.textContent,'Private file');
+      assert.equal((await h.pageState()).ready,false,'queued successors must not erase the preserved draft');
     }
   });
 }

@@ -236,7 +236,40 @@
     return error;
   }
 
+  let userOwnedComposer = readInflight()?.preserveComposer === true;
+  function watchComposerEdits(target, inflight) {
+    const types = ['beforeinput', 'input', 'paste', 'cut', 'drop', 'change', 'click'];
+    const listener = event => {
+      if (!event.isTrusted) return; // Relay injection and React upload updates are not user edits.
+      const node = event.target;
+      const fileChange = event.type === 'change' && node?.type === 'file';
+      const inComposer = node === target.input || target.root?.contains?.(node);
+      if (!fileChange && (!inComposer ||
+          (event.type === 'click' && !node?.closest?.('button, input[type="file"]')))) return;
+      target.userModified = true;
+      userOwnedComposer = true;
+      inflight.preserveComposer = true;
+      writeInflight(inflight);
+    };
+    types.forEach(type => document.addEventListener(type, listener, true));
+    return () => types.forEach(type => document.removeEventListener(type, listener, true));
+  }
+
+  // Lexical can represent pasted newlines with separate paragraphs instead of
+  // text nodes. Ignore that representation difference, but never other edits.
+  const normalizePastedText = text => (text ?? '').replace(/\r|\n/g, '').replace(/\u00a0/g, ' ').trim();
+  function assertInjectedText(target) {
+    const current = normalizePastedText(target.input.textContent);
+    if (current && current !== normalizePastedText(target.sourceText)) {
+      userOwnedComposer = true;
+      throw makeRelayError('submission_payload_changed', 'Composer text changed during preparation');
+    }
+  }
+
   function assertSubmissionTarget(target, checkPayload = false) {
+    if (target?.userModified) {
+      throw makeRelayError('submission_payload_changed', 'User edited the composer during submission');
+    }
     if (!target || getSessionId() !== target.session || location.pathname !== target.path ||
         !target.input?.isConnected || findInput() !== target.input ||
         getComposerRoot(target.input) !== target.root || !isVisible(target.input)) {
@@ -390,6 +423,7 @@
     const input = findInput();
     const composer = getComposerPayloadState(input);
     const conversationRoute = location.pathname.match(/\/c\/([a-f0-9-]+)/);
+    if (composer.clean) userOwnedComposer = false;
 
     let reason = null;
     if (!managedRouteMatches()) {
@@ -400,6 +434,8 @@
       reason = "generating";
     } else if (!input || !isVisible(input)) {
       reason = "composer-loading";
+    } else if (userOwnedComposer && !composer.clean) {
+      reason = "composer-user-edit";
     } else if (
       conversationRoute &&
       baseline.userCount + baseline.assistantCount === 0
@@ -604,6 +640,7 @@
 
     while (true) {
       assertSubmissionTarget(target);
+      assertInjectedText(target);
       const block = findSafetyBlock();
       if (block) throw new Error(`check-send-enabled: safety block: ${block.reason}`);
       state = getComposerPayloadState(inp);
@@ -1097,6 +1134,7 @@
             session: msg.expectedSession ?? getSessionId(),
             path: location.pathname,
             input: findInput(),
+            sourceText: msg.text,
           };
           target.root = getComposerRoot(target.input);
           const inflight = {
@@ -1107,6 +1145,7 @@
             phase: "preparing",
           };
           writeInflight(inflight);
+          const stopWatching = watchComposerEdits(target, inflight);
 
           try {
             assertSubmissionTarget(target);
@@ -1173,7 +1212,8 @@
             const composerPayloadObserved = failedComposer?.clean === false;
             inflight.composerPayloadObservedAfterFailure = composerPayloadObserved;
             inflight.preserveComposer = e.code === "submission_target_changed" ||
-              e.code === "submission_payload_changed";
+              e.code === "submission_payload_changed" || target.userModified === true;
+            if (inflight.preserveComposer) userOwnedComposer = true;
             writeInflight(inflight);
             if (inflight.phase !== "preparing") {
               await chrome.runtime.sendMessage({
@@ -1188,7 +1228,7 @@
             const attachmentCleanupConfirmed = attachmentFailure
               ? await cleanupAfterAttachmentFailure(e, target).catch(() => false)
               : null;
-            if (!attachmentFailure && e.code !== "submission_payload_changed") {
+            if (!attachmentFailure && !inflight.preserveComposer) {
               const reset = await resetComposer(COMPOSER_RESET_TIMEOUT_MS, COMPOSER_RESET_STABLE_MS, target)
                 .catch(() => ({ clean: false }));
               if (!reset.clean) {
@@ -1206,6 +1246,8 @@
                 ? "not-submitted"
                 : "send-attempted",
             });
+          } finally {
+            stopWatching();
           }
         } else {
           sendResponse({ error: `unknown message type: ${msg.type}` });
