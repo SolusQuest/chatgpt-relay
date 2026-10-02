@@ -63,6 +63,25 @@ async function worker(commandState = "claimed", existing = false, discovery = fa
     message:(msg:any,tabId=7)=>new Promise<any>(resolve=>bridge(msg,{tab:{id:tabId}},resolve)) };
 }
 
+test("snapshot reason distinguishes ready pages from unreachable pages", async () => {
+  const w = await worker();
+  const reports = await vm.runInContext(`(async()=>{
+    const reports=[];
+    chrome.tabs.query=async()=>[{id:7}];
+    getTabSession=async()=> 'session';
+    httpJson=async(method,url,body)=>{reports.push(body);return {};};
+    getPageState=async()=>({session:'session',ready:true,generating:false,composerClean:true,reason:null});
+    await reportSessionSnapshots();
+    getPageState=async()=>{throw new Error('unreachable');};
+    await reportSessionSnapshots();
+    return reports;
+  })()`, w.context);
+  assert.equal(reports[0].ready, true);
+  assert.equal(reports[0].reason, null);
+  assert.equal(reports[1].ready, null);
+  assert.equal(reports[1].reason, "page_unreachable");
+});
+
 test("worker persists the creation open fence before opening one tab", async () => {
   const w = await worker();
   assert.equal(w.operations.filter(x => x === "open-tab").length, 1);

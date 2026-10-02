@@ -417,7 +417,7 @@ async function reportSessionSnapshots() {
         owner, tabId: tab.id, session, protocol: state?.controlProtocol ?? null,
         version: chrome.runtime.getManifest?.().version ?? null,
         ready: state?.ready ?? null, generating: state?.generating ?? null,
-        composerClean: state?.composerClean ?? null, reason: state?.reason ?? "page_unreachable",
+        composerClean: state?.composerClean ?? null, reason: state ? state.reason ?? null : "page_unreachable",
         capabilities: state?.capabilities,
       }, 5000);
     }));
