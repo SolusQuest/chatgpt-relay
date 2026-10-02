@@ -110,6 +110,28 @@ test("refresh verifies a new document and never repeats a fenced reload", async 
   assert.equal(result.fences, 1);
 });
 
+test("Stop reports page and Relay outcomes separately and records original task intent", async () => {
+  const w = await worker();
+  const result = await vm.runInContext(`(async()=>{
+    let clicked=0,record={session:'session',tabId:7,taskId:'task',submittedUserMessageId:'user'};
+    getTabSession=async()=> 'session';
+    getPageState=async()=>({session:'session',documentId:'doc',generating:false});
+    getPendingReply=async()=>record;
+    setPendingReply=async(id,value)=>{record=value;};
+    pollOnePending=async()=>{};
+    httpJson=async(method,url)=>url.endsWith('/fence')?{execute:true}:{status:'cancelled'};
+    sendTabMessage=async()=>{clicked++;return {clicked:true,stopRequestedAt:123};};
+    const command={kind:'stop',session:'session',tabId:7,taskId:'task',state:'claimed',expiresAt:Date.now()+1000};
+    const result=await executeSessionControl(command);
+    await executeSessionControl({...command,state:'executing'});
+    return {result,clicked,record};
+  })()`, w.context);
+  assert.equal(result.clicked, 1);
+  assert.equal(result.record.stopRequestedAt, 123);
+  assert.equal(result.result.pageGenerationState, "stopped");
+  assert.equal(result.result.relayTaskStatus, "cancelled");
+});
+
 test("worker restart finds the previously opened marked tab instead of creating another", async () => {
   const w = await worker("opening", true);
   assert.equal(w.operations.includes("open-tab"), false);

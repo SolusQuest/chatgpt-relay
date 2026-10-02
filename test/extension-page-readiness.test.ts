@@ -206,6 +206,7 @@ function createHarness({ advanceTimers = false, managed = null as null | Record<
   assert.ok(onMessage, "content script did not register onMessage");
   return {
     state,
+    seedInflight(record: Record<string, unknown>) { storage.set("gpt_relay_inflight_v3", JSON.stringify(record)); },
     sentMessages,
     userEvent(type: string, target: any) {
       for (const callback of listeners.get(type) ?? []) callback({type, target, isTrusted:true});
@@ -291,6 +292,30 @@ test("refresh validates identity and the latest composer before reloading", asyn
   h.state.input!.textContent = "";
   assert.equal((await h.message(request)).reloading, true);
   assert.equal(h.state.reloads, 1);
+});
+
+test("Stop targets only the original last user turn and persists intent before clicking", async () => {
+  const h = createHarness();
+  const session = await h.sessionId();
+  h.state.users = [element("original-user")];
+  h.seedInflight({ taskId: "original-task", session, phase: "accepted", submittedUserMessageId: "original-user" });
+  const request = { type: "stop-generation", expectedSession: session, taskId: "original-task", submittedUserMessageId: "original-user" };
+  let clicks = 0;
+  const stop = element("stop") as any;
+  stop.click = () => { clicks++; h.state.stopButtons = []; };
+  h.state.stopButtons = [stop];
+  assert.match(String((await h.message({ ...request, taskId: "other" })).error), /stop_identity_mismatch/);
+  h.state.users.push(element("newer-user"));
+  assert.match(String((await h.message(request)).error), /stop_identity_mismatch/);
+  assert.equal(clicks, 0);
+  h.state.users.pop();
+  const response = await h.message(request);
+  assert.equal(response.clicked, true);
+  assert.equal(response.generating, false);
+  assert.equal(clicks, 1);
+  assert.ok((await h.message({ type: "get-inflight" }) as any).inflight.stopRequestedAt);
+  assert.equal((await h.message(request)).clicked, false);
+  assert.equal(clicks, 1);
 });
 
 test("managed creation retains its ref after first navigation and rejects later conversation changes", async () => {

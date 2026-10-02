@@ -104,9 +104,9 @@ interface CliTask {
 }
 
 async function cmdTasks(args: string[]): Promise<number> {
-  if (args[0] === "recover") {
-    if (!args[1]) throw new Error("usage: tasks recover TASK_ID [--operation-id ID]");
-    return submitControl({ kind: "recover", taskId: args[1] }, args);
+  if (["recover", "stop"].includes(args[0] ?? "")) {
+    if (!args[1]) throw new Error("usage: tasks recover|stop TASK_ID [--operation-id ID]");
+    return submitControl({ kind: args[0], taskId: args[1] }, args);
   }
   if (args[0] === "trace") {
     if (!args[1]) throw new Error("usage: tasks trace TASK_ID");

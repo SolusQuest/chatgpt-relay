@@ -36,11 +36,11 @@ export class SessionControls {
   create(body: any) {
     this.expire();
     if (typeof body?.operationId !== "string" || !/^[a-zA-Z0-9_-]{8,100}$/.test(body.operationId) ||
-        !["recover", "refresh"].includes(body.kind) ||
+        !["recover", "refresh", "stop"].includes(body.kind) ||
         (body.taskId != null && typeof body.taskId !== "string")) throw new ControlError("invalid_control", 400);
     const task = body.taskId ? this.store.getTask(body.taskId) : null;
     if (body.taskId && !task) throw new ControlError("task_not_found", 404);
-    const ref = this.store.registry.get(body.kind === "recover" ? task?.session ?? "" : body.session ?? "");
+    const ref = this.store.registry.get(body.kind !== "refresh" ? task?.session ?? "" : body.session ?? "");
     if (!ref) throw new ControlError("session_not_found", 404);
     const session = ref.canonical;
     if (task && task.session !== session) throw new ControlError("task_session_mismatch");
@@ -50,7 +50,7 @@ export class SessionControls {
       return this.view(old);
     }
     if (task && (task.sendAttemptedAt == null || !["in_progress", "recovering"].includes(task.status))) throw new ControlError("task_not_recoverable");
-    if (body.kind === "recover" && !task) throw new ControlError("task_not_found", 404);
+    if (body.kind !== "refresh" && !task) throw new ControlError("task_not_found", 404);
     const snapshot = this.diagnostics.inspect(session);
     if (snapshot?.pageStatus !== "observed" || snapshot.page.protocol !== 1) throw new ControlError("page_identity_unavailable");
     if (body.kind === "refresh") {

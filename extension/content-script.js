@@ -1164,6 +1164,20 @@
           // between a worker preflight round trip and a later tabs.reload call.
           sendResponse({ reloading: true });
           location.reload();
+        } else if (msg.type === "stop-generation") {
+          const rec = readInflight();
+          if (msg.expectedSession !== getSessionId() || rec?.session !== getSessionId() ||
+              rec?.taskId !== msg.taskId || rec.phase === "preparing" ||
+              !msg.submittedUserMessageId || rec.submittedUserMessageId !== msg.submittedUserMessageId ||
+              getLastUserId(getUserMessages()) !== msg.submittedUserMessageId) throw new Error("stop_identity_mismatch");
+          const button = SELECTORS.stopButton.flatMap(sel => Array.from(document.querySelectorAll(sel))).find(isVisible);
+          if (!button) { sendResponse({ clicked: false, generating: false }); return; }
+          rec.stopRequestedAt ??= Date.now();
+          writeInflight(rec);
+          chrome.runtime.sendMessage({ type: "user-stop-requested", taskId: rec.taskId,
+            expectedSession: rec.session, submittedUserMessageId: rec.submittedUserMessageId }).catch(() => {});
+          button.click();
+          sendResponse({ clicked: true, generating: isGenerating(), stopRequestedAt: rec.stopRequestedAt });
         } else if (msg.type === "check-safety") {
           sendResponse({ block: findSafetyBlock() });
         } else if (msg.type === "update-banner") {

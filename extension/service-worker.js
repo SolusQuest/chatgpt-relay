@@ -428,6 +428,7 @@ void reportSessionSnapshots();
 
 async function executeSessionControl(command) {
   if (command.kind === "refresh") return executeRefreshControl(command);
+  if (command.kind === "stop") return executeStopControl(command);
   if (command.kind !== "recover") throw new Error("unsupported_control");
   const { tabId, session, taskId } = command;
   if (await getTabSession(tabId, { forceFresh: true }) !== session) throw new Error("session_identity_changed");
@@ -442,6 +443,48 @@ async function executeSessionControl(command) {
   await attachPendingFromTask(task, session, tabId, record);
   void pollPendingReplies();
   return { action: "observation_attached", taskId };
+}
+
+async function executeStopControl(command) {
+  const { tabId, session, taskId } = command;
+  let requested = null;
+  refreshingTabs.add(tabId);
+  try {
+    if (pendingPolls.has(taskId)) await pendingPolls.get(taskId);
+    if (await getTabSession(tabId, { forceFresh: true }) !== session) throw new Error("session_identity_changed");
+    const rec = await getPendingReply(taskId);
+    if (!rec || rec.tabId !== tabId || rec.session !== session || !rec.submittedUserMessageId) throw new Error("stop_identity_mismatch");
+    if (command.state !== "executing") {
+      const page = await getPageState(tabId);
+      const fence = await httpJson("POST", `/internal/session-controls/${encodeURIComponent(command.operationId)}/fence`,
+        { owner: command.owner, token: command.token, documentId: page.documentId });
+      if (fence.execute) {
+        const response = await sendTabMessage(tabId, { type: "stop-generation", taskId,
+          expectedSession: session, submittedUserMessageId: rec.submittedUserMessageId }, PAGE_STATE_SENDMSG_TIMEOUT_MS, "stop-generation");
+        if (response?.error) throw new Error(response.error);
+        requested = response?.clicked ?? null;
+        if (response?.stopRequestedAt) {
+          stopRequests.set(taskId, { tabId, session, userId: rec.submittedUserMessageId, at: response.stopRequestedAt });
+          rec.stopRequestedAt ??= response.stopRequestedAt;
+          await setPendingReply(taskId, rec);
+        }
+      }
+    } else requested = rec.stopRequestedAt ? true : null;
+  } finally { refreshingTabs.delete(tabId); }
+  // Click acknowledgement, observed page state, and Relay cancellation are
+  // separate facts. A stalled Stop button must not masquerade as cancellation.
+  const deadline = Math.min(command.expiresAt, Date.now() + 10_000);
+  let page = null, task = null;
+  do {
+    page = await getPageState(tabId).catch(() => null);
+    const rec = await getPendingReply(taskId);
+    if (rec) await pollOnePending(taskId, rec);
+    task = await httpJson("GET", `/v1/tasks/${encodeURIComponent(taskId)}`);
+    if (page?.session === session && !page.generating && ["cancelled", "done", "failed"].includes(task.status)) break;
+    await delay(400);
+  } while (Date.now() < deadline);
+  return { stopRequested: requested, pageGenerationState: page?.session !== session ? "unknown" :
+    page.generating ? "generating" : "stopped", relayTaskStatus: task?.status ?? "unknown" };
 }
 
 const refreshingTabs = new Set();
