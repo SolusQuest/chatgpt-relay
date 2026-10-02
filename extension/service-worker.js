@@ -528,6 +528,7 @@ async function executeRefreshControl(command) {
           const task = await httpJson("GET", `/v1/tasks/${encodeURIComponent(taskId)}`);
           if (["in_progress", "recovering"].includes(task.status))
             await executeSessionControl({ ...command, kind: "recover" });
+          else if (task.status !== "done") throw new Error("refresh_task_not_preserved");
         }
         return { action: "page_refreshed", taskId, documentId: state.documentId };
       }
@@ -1108,6 +1109,9 @@ async function startDispatchLoop(session, tabId) {
         await waitForPendingReply(taskId, controller.signal);
         console.log("[relay sw] task completed", taskId.slice(0, 8), "completionAt", Date.now());
       } catch (e) {
+        // Navigation/offline interrupts this observer, not the ChatGPT request.
+        // Preserve pending state and the Send fence for the replacement loop.
+        if (e.code === "dispatch_loop_interrupted") break;
         console.warn("[relay sw] task failed", taskId.slice(0, 8), e.message);
         await httpJson("POST", `/internal/tasks/${taskId}/complete`, { error: e.message }).catch(() => {});
         await clearRecoveredTask(taskId, session, tabId);
@@ -1148,14 +1152,19 @@ async function waitForPendingReply(taskId, signal) {
     pendingCompletion.set(taskId, deferred);
   }
   if (signal?.aborted) return;
-  return Promise.race([
-    deferred.promise,
-    new Promise((_, reject) => {
-      const handler = () => reject(new Error("aborted"));
-      if (signal.aborted) handler();
-      else signal.addEventListener("abort", handler, { once: true });
-    }),
-  ]);
+  return new Promise((resolve, reject) => {
+    const handler = () => reject(Object.assign(new Error("dispatch loop interrupted"), {
+      code: "dispatch_loop_interrupted",
+    }));
+    signal.addEventListener("abort", handler, { once: true });
+    deferred.promise.then(value => {
+      signal.removeEventListener("abort", handler);
+      resolve(value);
+    }, error => {
+      signal.removeEventListener("abort", handler);
+      reject(error);
+    });
+  });
 }
 
 // ── pending-reply state machine ──

@@ -129,6 +129,19 @@ test("refresh verifies a new document and never repeats a fenced reload", async 
   assert.equal(result.fences, 1);
 });
 
+for (const status of ["failed", "cancelled"]) {
+  test(`a new document alone cannot certify preservation of a ${status} task`, async () => {
+    const w = await worker();
+    w.context.terminalStatus = status;
+    await vm.runInContext(`
+      getPageState=async()=>({session:'session',ready:true,documentId:'new'});
+      httpJson=async()=>({status:terminalStatus});
+    `, w.context);
+    await assert.rejects(vm.runInContext(`executeRefreshControl({tabId:7,session:'session',taskId:'task',
+      state:'executing',result:{beforeDocumentId:'old'},expiresAt:Date.now()+1000})`, w.context), /refresh_task_not_preserved/);
+  });
+}
+
 test("Stop reports page and Relay outcomes separately and records original task intent", async () => {
   const w = await worker();
   const result = await vm.runInContext(`(async()=>{
@@ -267,6 +280,34 @@ for (const stopLoop of [false, true]) {
     })()`, w.context);
     assert.ok(w.context.events.includes("/internal/tasks/active-task/defer"));
     assert.equal(w.storage.inflight.session, undefined);
+  });
+}
+
+for (const interruption of ["stopDispatchLoop('session')", "forgetTabSession(7)"]) {
+  test(`interrupting an accepted dispatch preserves the task and send evidence: ${interruption}`, async () => {
+    const w = await worker("opening", true);
+    w.context.events = [];
+    await vm.runInContext(`
+      tabSessionCache.set(7,'session');
+      getPageState=async()=>({session:'session',ready:true,generating:false,baseline:{lastUserId:'old-user'}});
+      httpJson=async(method,path)=>{
+        events.push(path);
+        if(path.startsWith('/internal/next_task')) return {task:{taskId:'original-task',text:'test'}};
+        return {};
+      };
+      sendTabMessage=async(tab,msg)=>msg.type==='run-task' ?
+        {status:'submitted',submittedUserMessageId:'sent-user',baseline:{lastUserId:'old-user'}} : {};
+      waitForPendingReply=((original)=>(id,signal)=>{events.push('waiting');return original(id,signal);})(waitForPendingReply);
+      const interruptedDispatch=startDispatchLoop('session',7);
+    `, w.context);
+    for (let i=0; i<30 && !w.context.events.includes('waiting'); i++) await new Promise<void>(r=>setImmediate(r));
+    assert.ok(w.context.events.includes('waiting'));
+    await vm.runInContext(`${interruption}; interruptedDispatch;`, w.context);
+    assert.equal(w.context.events.includes('/internal/tasks/original-task/complete'), false);
+    assert.equal(w.storage.inflight.session.taskId, 'original-task');
+    const pending = await vm.runInContext("getPendingReply('original-task')", w.context);
+    assert.equal(pending.submittedUserMessageId, 'sent-user');
+    assert.equal(pending.baseline.lastUserId, 'old-user');
   });
 }
 test('review: delayed terminal reconciliation must not erase a successor task', async () => {
