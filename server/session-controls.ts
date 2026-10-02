@@ -37,6 +37,7 @@ export class SessionControls {
     this.expire();
     if (typeof body?.operationId !== "string" || !/^[a-zA-Z0-9_-]{8,100}$/.test(body.operationId) ||
         !["recover", "refresh", "stop"].includes(body.kind) ||
+        (body.kind === "refresh" && typeof body.session !== "string") ||
         (body.taskId != null && typeof body.taskId !== "string")) throw new ControlError("invalid_control", 400);
     const task = body.taskId ? this.store.getTask(body.taskId) : null;
     if (body.taskId && !task) throw new ControlError("task_not_found", 404);
@@ -88,6 +89,7 @@ export class SessionControls {
     const row = this.row(id);
     if (!row || row.owner !== body?.owner || row.token !== body?.token) throw new ControlError("control_ownership_mismatch");
     if (row.state !== "claimed") return { ...this.view(row), execute: false };
+    if (!["refresh", "stop"].includes(row.kind)) throw new ControlError("control_has_no_side_effect_fence");
     if (typeof body.documentId !== "string" || body.documentId.length > 100 || !body.documentId) throw new ControlError("invalid_document_id", 400);
     const active = this.store.listTasks({ session: row.session, status: ["in_progress", "recovering"] })[0];
     if ((active?.id ?? null) !== row.task_id) throw new ControlError("active_task_changed");

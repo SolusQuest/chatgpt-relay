@@ -250,3 +250,34 @@ test("agent commands return structured errors for missing sessions", async () =>
   assert.equal(JSON.parse(r.stderr).errorInfo.code, "session_not_found");
   assert.equal(JSON.parse(r.stderr).errorInfo.safeToResubmit, null);
 });
+
+test("maintenance CLI suspends, diagnoses and tracks an idempotent refresh operation", async () => {
+  const session = "maintenance-cli";
+  const post = async (route: string, body: unknown) => (await fetch(`${baseUrl}${route}`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  })).json() as Promise<any>;
+  await post("/internal/heartbeat", { session });
+  await post("/internal/session-snapshots", { owner: "cli-browser", tabId: 42, session, protocol: 1,
+    ready: true, generating: false, composerClean: true, capabilities: { composer: true } });
+  for (const action of ["suspend", "continue"]) {
+    const r = await runCli(["sessions", action, "--session", session]);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(JSON.parse(r.stdout).suspended, action === "suspend");
+  }
+  const doctor = await runCli(["doctor", "--session", session]);
+  assert.equal(doctor.code, 0, doctor.stderr);
+  const args = ["sessions", "refresh", "--session", session, "--operation-id", "cli-refresh-test"];
+  const created = await runCli(args);
+  assert.equal(created.code, 0, created.stderr);
+  const command = (await post("/internal/session-controls/claim", { owner: "cli-browser" })).command;
+  assert.equal(command.operationId, "cli-refresh-test");
+  await post(`/internal/session-controls/${command.operationId}/finish`, { owner: command.owner, token: command.token,
+    state: "blocked", error: "composer_not_clean" });
+  const status = await runCli(["operations", command.operationId]);
+  assert.equal(JSON.parse(status.stdout).errorInfo.code, "composer_not_clean");
+  const retried = await runCli(args);
+  assert.equal(JSON.parse(retried.stdout).state, "blocked");
+  const bad = await runCli([...args, "--force"]);
+  assert.equal(bad.code, 1);
+  assert.equal(JSON.parse(bad.stderr).errorInfo.code, "client_error");
+});

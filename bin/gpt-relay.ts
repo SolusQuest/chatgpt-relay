@@ -23,6 +23,17 @@ const TSX_LOADER = pathToFileURL(require.resolve("tsx")).href;
 const PORT = Number(process.env.GPT_RELAY_PORT ?? 8765);
 const BASE = process.env.GPT_RELAY_URL ?? `http://127.0.0.1:${PORT}`;
 
+function validateControlOptions(args: string[], flags: string[]) {
+  const seen = new Set<string>();
+  for (let i = 0; i < args.length; i++) {
+    const flag = args[i]!;
+    if (seen.has(flag) || flag !== "--json" && !flags.includes(flag)) throw new Error(`invalid or duplicate option: ${flag}`);
+    seen.add(flag);
+    if (flag !== "--json" && (!args[++i] || args[i]!.startsWith("--"))) throw new Error(`missing value: ${flag}`);
+  }
+  if (seen.has("--session") && seen.has("--session-ref")) throw new Error("provide exactly one session identity");
+}
+
 async function cmdStart(args: string[]): Promise<number> {
   const entry = path.join(REPO_ROOT, "server", "index.ts");
   const proc = spawn(process.execPath, ["--import", TSX_LOADER, entry, ...args], {
@@ -44,6 +55,7 @@ async function cmdHealth(): Promise<number> {
 
 async function cmdSessions(args: string[] = []): Promise<number> {
   if (["inspect", "suspend", "continue", "refresh"].includes(args[0] ?? "")) {
+    validateControlOptions(args.slice(1), ["--session", "--session-ref", ...(args[0] === "refresh" ? ["--operation-id", "--recover-task"] : [])]);
     const flag = args.includes("--session-ref") ? "--session-ref" : "--session";
     const i = args.indexOf(flag);
     if (i < 0 || !args[i + 1] || args.includes("--session-ref") && args.includes("--session"))
@@ -106,10 +118,12 @@ interface CliTask {
 async function cmdTasks(args: string[]): Promise<number> {
   if (["recover", "stop"].includes(args[0] ?? "")) {
     if (!args[1]) throw new Error("usage: tasks recover|stop TASK_ID [--operation-id ID]");
+    validateControlOptions(args.slice(2), ["--operation-id"]);
     return submitControl({ kind: args[0], taskId: args[1] }, args);
   }
   if (args[0] === "trace") {
     if (!args[1]) throw new Error("usage: tasks trace TASK_ID");
+    validateControlOptions(args.slice(2), []);
     console.log(JSON.stringify(await http.get(`/v1/tasks/${encodeURIComponent(args[1])}/trace`, { baseUrl: BASE })));
     return 0;
   }
@@ -449,6 +463,7 @@ async function main(): Promise<number> {
       case "health":
         return await cmdHealth();
       case "doctor": {
+        validateControlOptions(rest, ["--session", "--session-ref"]);
         const i = rest.findIndex(x => x === "--session" || x === "--session-ref");
         if (i >= 0 && !rest[i + 1]) throw new Error("missing session");
         const result = await http.get<{ status: string }>(`/v1/doctor${i < 0 ? "" : `?session=${encodeURIComponent(rest[i + 1]!)}`}`, { baseUrl: BASE });
@@ -463,6 +478,7 @@ async function main(): Promise<number> {
         return await cmdTasks(rest);
       case "operations":
         if (!rest[0]) throw new Error("usage: operations OPERATION_ID");
+        validateControlOptions(rest.slice(1), []);
         console.log(JSON.stringify(await http.get(`/v1/operations/${encodeURIComponent(rest[0])}`, { baseUrl: BASE })));
         return 0;
       case "show":
