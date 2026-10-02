@@ -56,6 +56,7 @@ export interface SessionRow {
   paused: boolean;
   pauseReason: string | null;
   pausedAt: number | null;
+  suspended: boolean;
 }
 
 // SQLite row shape in snake_case.
@@ -128,6 +129,7 @@ function rowToSession(r: SessionRowRaw): SessionRow {
     paused: r.paused !== 0,
     pauseReason: r.pause_reason,
     pausedAt: r.paused_at,
+    suspended: false,
   };
 }
 
@@ -215,6 +217,8 @@ export class TaskStore {
   ) {
     this.registry = new SessionRegistry(db);
     installTaskTrace(db);
+    db.exec(`CREATE TABLE IF NOT EXISTS session_dispatch_gate (
+      session TEXT PRIMARY KEY, suspended INTEGER NOT NULL DEFAULT 0);`);
     this.emitter.setMaxListeners(0);
   }
 
@@ -423,6 +427,7 @@ export class TaskStore {
   // Atomically claim the next queued task unless the session already has one in progress.
   claimNextTask(sessionId: string, now = Date.now()): Task | null {
     sessionId = this.registry.resolve(sessionId);
+    if (this.isSuspended(sessionId) || this.getSession(sessionId)?.paused) return null;
     const ref = this.registry.get(sessionId);
     if (ref?.initial_task && !["attached", "finished"].includes(ref.command_state)) return null;
     // Use a transaction to preserve atomicity.
@@ -775,14 +780,28 @@ export class TaskStore {
     const row = this.db.prepare(`SELECT * FROM sessions WHERE id = ?`).get(id) as
       | SessionRowRaw
       | undefined;
-    return row ? rowToSession(row) : null;
+    return row ? { ...rowToSession(row), suspended: this.isSuspended(id) } : null;
   }
 
   listSessions(activeSince = Date.now() - this.config.sessionActiveMs): SessionRow[] {
     const rows = this.db
       .prepare(`SELECT * FROM sessions WHERE last_seen >= ? ORDER BY last_seen DESC`)
       .all(activeSince) as unknown as SessionRowRaw[];
-    return rows.map(rowToSession);
+    return rows.map(row => ({ ...rowToSession(row), suspended: this.isSuspended(row.id) }));
+  }
+
+  isSuspended(id: string): boolean {
+    const row = this.db.prepare("SELECT suspended FROM session_dispatch_gate WHERE session = ?")
+      .get(this.registry.resolve(id));
+    return row?.suspended === 1;
+  }
+
+  suspendDispatch(id: string, suspended: boolean) {
+    id = this.registry.resolve(id);
+    this.db.prepare(`INSERT INTO session_dispatch_gate VALUES (?, ?)
+      ON CONFLICT(session) DO UPDATE SET suspended=excluded.suspended`).run(id, suspended ? 1 : 0);
+    this.emitter.emit(`session:${id}`);
+    return { session: id, suspended };
   }
 
   markSessionStatus(

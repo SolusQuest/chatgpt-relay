@@ -19,6 +19,7 @@ export function createV1SessionsRouter(store: TaskStore): Router {
         lastSeen: s.lastSeen,
         lastStatusAt: s.lastStatusAt,
         paused: s.paused,
+        suspended: s.suspended,
         pauseReason: s.pauseReason,
         pausedAt: s.pausedAt,
         pendingTasks: store.listTasks({ session: s.id, status: "queued" }).length,
@@ -39,6 +40,14 @@ export function createV1SessionsRouter(store: TaskStore): Router {
     const s = store.markSessionStatus(id, true, reason);
     res.json({ session: s });
   });
+
+  for (const action of ["suspend", "continue"]) {
+    router.post(`/sessions/:id/${action}`, (req, res) => {
+      const id = String(req.params.id);
+      if (!store.registry.get(id)) return res.status(404).json({ error: "session_not_found" });
+      res.json(store.suspendDispatch(id, action === "suspend"));
+    });
+  }
 
   router.post("/sessions/:id/resume", (req: Request, res: Response) => {
     const id = String(req.params.id ?? "");

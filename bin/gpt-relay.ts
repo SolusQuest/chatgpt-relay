@@ -42,12 +42,14 @@ async function cmdHealth(): Promise<number> {
 }
 
 async function cmdSessions(args: string[] = []): Promise<number> {
-  if (args[0] === "inspect") {
+  if (["inspect", "suspend", "continue"].includes(args[0] ?? "")) {
     const flag = args.includes("--session-ref") ? "--session-ref" : "--session";
     const i = args.indexOf(flag);
     if (i < 0 || !args[i + 1] || args.includes("--session-ref") && args.includes("--session"))
-      throw new Error("usage: sessions inspect --session-ref REF | --session ID");
-    console.log(JSON.stringify(await http.get(`/v1/sessions/${encodeURIComponent(args[i + 1]!)}/inspect`, { baseUrl: BASE })));
+      throw new Error("usage: sessions inspect|suspend|continue --session-ref REF | --session ID");
+    const route = `/v1/sessions/${encodeURIComponent(args[i + 1]!)}/${args[0]}`;
+    console.log(JSON.stringify(args[0] === "inspect" ? await http.get(route, { baseUrl: BASE }) :
+      await http.post(route, {}, { baseUrl: BASE })));
     return 0;
   }
   const refIndex = args.indexOf("--session-ref");
