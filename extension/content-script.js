@@ -590,6 +590,20 @@
     }
     sessionStorage.setItem(INFLIGHT_KEY, JSON.stringify(rec));
   }
+  function learnInflightUser(taskId, expectedSession, expectedUserId = null) {
+    const rec = readInflight();
+    if (!taskId || rec?.taskId !== taskId || rec.session !== getSessionId() ||
+        rec.session !== expectedSession || rec.phase === "preparing" || rec.submittedUserMessageId) return rec;
+    // Generation can start before the submitted user is mounted. Bind later
+    // only from this task's original baseline, never from a caller's UUID alone.
+    if (!rec.baseline || !Number.isInteger(rec.baseline.userCount) || rec.baseline.userCount < 0) return rec;
+    const users = getUserMessages();
+    const userId = getMessageId(findSubmittedUser(users, rec.baseline));
+    if (!userId || (expectedUserId && userId !== expectedUserId) || getLastUserId(users) !== userId) return rec;
+    rec.submittedUserMessageId = userId;
+    writeInflight(rec);
+    return rec;
+  }
   function clearInflight(taskId, session) {
     const rec = readInflight();
     if (!taskId || !session || rec?.taskId !== taskId || rec?.session !== session) return false;
@@ -602,8 +616,9 @@
     const target = event.target instanceof Element
       ? event.target.closest(SELECTORS.stopButton.join(","))
       : null;
-    const rec = readInflight();
-    if (!target || !rec?.taskId || rec.phase === 'preparing' || rec.session !== getSessionId()) return;
+    if (!target) return;
+    const rec = learnInflightUser(readInflight()?.taskId, getSessionId());
+    if (!rec?.taskId || !rec.submittedUserMessageId || rec.phase === 'preparing' || rec.session !== getSessionId()) return;
     const users = getUserMessages();
     const submittedUser = findSubmittedUser(users, rec.baseline ?? {}, rec.submittedUserMessageId);
     const userId = getMessageId(submittedUser);
@@ -1063,6 +1078,7 @@
             const expectedUserId = msg.submittedUserMessageId ?? null;
             const submittedUser = findSubmittedUser(users, baseline, expectedUserId);
             const currentUserId = getMessageId(submittedUser);
+            if (currentUserId) learnInflightUser(msg.taskId, msg.expectedSession ?? getSessionId(), currentUserId);
             const hasNewUser = !!submittedUser;
             const replies = getReplyMessages(msgs, users, submittedUser);
             const lastId = getLastAssistantId(replies);
@@ -1166,7 +1182,7 @@
           const state = getPageReadiness();
           if (msg.expectedSession !== state.session || msg.documentId !== documentId) throw new Error("session_identity_changed");
           if (state.composerClean !== true) throw new Error("composer_not_clean");
-          const rec = readInflight();
+          const rec = learnInflightUser(msg.taskId, msg.expectedSession, msg.submittedUserMessageId);
           if (msg.taskId) {
             if (rec?.taskId !== msg.taskId || rec.session !== state.session || rec.phase === "preparing" ||
                 !rec.submittedUserMessageId || rec.stopRequestedAt ||
@@ -1177,7 +1193,7 @@
           sendResponse({ reloading: true });
           location.reload();
         } else if (msg.type === "stop-generation") {
-          const rec = readInflight();
+          const rec = learnInflightUser(msg.taskId, msg.expectedSession, msg.submittedUserMessageId);
           if (msg.expectedSession !== getSessionId() || rec?.session !== getSessionId() ||
               rec?.taskId !== msg.taskId || rec.phase === "preparing" ||
               !msg.submittedUserMessageId || rec.submittedUserMessageId !== msg.submittedUserMessageId ||

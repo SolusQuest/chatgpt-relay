@@ -319,6 +319,63 @@ test("Stop targets only the original last user turn and persists intent before c
   assert.equal(clicks, 1);
 });
 
+for (const action of ["poll-reply", "refresh-page", "stop-generation"]) {
+  test(`${action} persists a user ID that appears after generation starts`, async () => {
+    const h = createHarness();
+    h.state.readyState = "complete";
+    h.state.users = [element("baseline-user")];
+    const page = await h.pageState();
+    const baseline = page.baseline;
+    h.seedInflight({ taskId: "task", session: page.session, phase: "accepted", baseline, submittedUserMessageId: null });
+    let clicks = 0;
+    const stop = element("stop") as any;
+    stop.click = () => { clicks++; h.state.stopButtons = []; };
+    h.state.stopButtons = [stop];
+    const request = { type: action, taskId: "task", expectedSession: page.session,
+      documentId: page.documentId, baseline, ...(action === "stop-generation" ? { submittedUserMessageId: "late-user" } : {}) };
+    await h.message(request);
+    assert.equal((await h.message({ type: "get-inflight" }) as any).inflight.submittedUserMessageId, null);
+    assert.equal(clicks, 0); assert.equal(h.state.reloads, 0);
+    h.state.users.push(element("late-user"));
+    const result = await h.message(request);
+    assert.equal(result.error, undefined);
+    assert.equal((await h.message({ type: "get-inflight" }) as any).inflight.submittedUserMessageId, "late-user");
+    if (action === "poll-reply") {
+      assert.equal(result.submittedUserMessageId, "late-user");
+      assert.equal((await h.message({ ...request, type: "refresh-page" })).reloading, true);
+      assert.equal((await h.message({ ...request, type: "stop-generation", submittedUserMessageId: "late-user" })).clicked, true);
+    } else if (action === "refresh-page") assert.equal(result.reloading, true);
+    else assert.equal(result.clicked, true);
+  });
+
+  for (const fault of ["foreign-task", "foreign-session", "wrong-id", "ambiguous", "missing-anchor", "missing-baseline", "preparing", "existing-id"]) {
+    test(`${action} does not learn a late user ID with ${fault}`, async () => {
+      const h = createHarness();
+      h.state.readyState = "complete";
+      h.state.users = [element("baseline-user")];
+      const page = await h.pageState();
+      const baseline = page.baseline;
+      const originalId = fault === "existing-id" ? "different-bound-user" : null;
+      h.seedInflight({ taskId: "task", session: page.session, phase: fault === "preparing" ? "preparing" : "accepted",
+        ...(fault === "missing-baseline" ? {} : { baseline }), submittedUserMessageId: originalId });
+      h.state.users.push(element("late-user"));
+      if (fault === "ambiguous") h.state.users.push(element("newer-user"));
+      if (fault === "missing-anchor") h.state.users.shift();
+      let clicks = 0;
+      const stop = element("stop") as any;
+      stop.click = () => { clicks++; };
+      h.state.stopButtons = [stop];
+      const result = await h.message({ type: action, taskId: fault === "foreign-task" ? "other" : "task",
+        expectedSession: fault === "foreign-session" ? "other" : page.session,
+        documentId: page.documentId, baseline,
+        submittedUserMessageId: fault === "wrong-id" ? "wrong" : "late-user" });
+      assert.equal((await h.message({ type: "get-inflight" }) as any).inflight.submittedUserMessageId, originalId);
+      assert.equal(clicks, 0); assert.equal(h.state.reloads, 0);
+      if (action !== "poll-reply") assert.ok(result.error);
+    });
+  }
+}
+
 test("managed creation retains its ref after first navigation and rejects later conversation changes", async () => {
   const h = createHarness({ managed: { sessionRef: "sr_test", token: "owner-token", owner: "browser", projectId: null } });
   h.state.pathname = "/";
@@ -761,7 +818,7 @@ for (const payload of ["text", "attachment", "upload"] as const) {
   }
 }
 
-for (const scenario of ["unchanged", "attachment-unchanged", "wrong-session", "navigation", "remount", "edit", "attachment", "delayed-navigation", "disabled-send", "replaced-send"] as const) {
+for (const scenario of ["unchanged", "attachment-unchanged", "delayed-user", "wrong-session", "navigation", "remount", "edit", "attachment", "delayed-navigation", "disabled-send", "replaced-send"] as const) {
   test(`submission stays bound to its session, composer and payload: ${scenario}`, async () => {
     const h = createHarness({ advanceTimers: true });
     h.state.readyState = "complete";
@@ -780,7 +837,11 @@ for (const scenario of ["unchanged", "attachment-unchanged", "wrong-session", "n
     };
     const clicks: string[] = [];
     let send = element("send-A") as any;
-    send.click = () => { clicks.push("A"); h.state.users.push(element("user-new", "prompt")); };
+    send.click = () => {
+      clicks.push("A");
+      if (scenario === "delayed-user") h.state.stopButtons = [element("stop")];
+      else h.state.users.push(element("user-new", "prompt"));
+    };
     const root = { querySelectorAll: (selector: string) => {
       if (selector === 'button[type="submit"]' && (input.textContent || attachments.length)) return [send];
       if (selector === '[data-composer-attachments][data-visible-attachments]') return attachments;
@@ -815,9 +876,17 @@ for (const scenario of ["unchanged", "attachment-unchanged", "wrong-session", "n
     };
     const result = await h.message({ type: "run-task", taskId: "task-A", text: "intended prompt",
       expectedSession: scenario === "wrong-session" ? "different-session" : await h.sessionId() });
-    if (scenario === "unchanged" || scenario === "attachment-unchanged") {
+    if (scenario === "unchanged" || scenario === "attachment-unchanged" || scenario === "delayed-user") {
       assert.deepEqual(clicks, ["A"]);
       assert.equal(result.status, "submitted");
+      if (scenario === "delayed-user") {
+        assert.equal(result.submittedUserMessageId, null);
+        h.state.users.push(element("user-new", "prompt"));
+        const learned = await h.message({ type: "poll-reply", taskId: "task-A", baseline: result.baseline,
+          expectedSession: await h.sessionId() });
+        assert.equal(learned.submittedUserMessageId, "user-new");
+        assert.equal((await h.message({ type: "get-inflight" }) as any).inflight.submittedUserMessageId, "user-new");
+      }
       const stop = element('stop') as any;
       stop.closest = (selector:string)=>selector.includes('stop-button')?stop:null;
       h.userEvent('click',stop);
