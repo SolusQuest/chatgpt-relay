@@ -514,7 +514,7 @@
     return null;
   }
   function managedRouteMatches() {
-    const m = managedSession();
+    const m = managedSessionForRoute();
     if (!m) return true;
     const project = routeProject();
     const conversation = routeConversation();
@@ -523,10 +523,17 @@
     if (!conversation && !project && location.pathname !== "/") return false;
     return true;
   }
+  function managedSessionForRoute() {
+    const m = managedSession();
+    // A completed creation owns one conversation, not every later chat opened
+    // manually in this tab. Keep its binding for a return to the original URL.
+    // Unbound creations still use strict route validation before their first Send.
+    return m?.boundConversation && routeConversation() !== m.boundConversation ? null : m;
+  }
   function sessionMetadata() {
     const inflight = readInflight();
     const baseline = captureBaseline();
-    const managed = managedSession();
+    const managed = managedSessionForRoute();
     return { session: getSessionId(), managed, conversationId: routeConversation(), projectId: routeProject(),
       hasHistory: baseline.userCount + baseline.assistantCount > 0,
       postSend: !!inflight && inflight.session === getSessionId() &&
@@ -542,7 +549,7 @@
     reportSid();
   }
   function getSessionId() {
-    const managed = managedSession();
+    const managed = managedSessionForRoute();
     if (managed && managedRouteMatches()) return managed.sessionRef;
     const m = location.pathname.match(/\/c\/([a-f0-9-]+)/);
     if (m) return m[1];
@@ -1358,7 +1365,7 @@
     lastReportedPath = path;
     chrome.runtime.sendMessage({ type: "session-hello", ...sessionMetadata() })
       .then((response) => {
-        const managed = managedSession();
+        const managed = managedSessionForRoute();
         if (managed && response?.conversationId) {
           managed.boundConversation = response.conversationId;
           sessionStorage.setItem("gpt_relay_managed", JSON.stringify(managed));

@@ -376,7 +376,7 @@ for (const action of ["poll-reply", "refresh-page", "stop-generation"]) {
   }
 }
 
-test("managed creation retains its ref after first navigation and rejects later conversation changes", async () => {
+test("managed creation retains its ref after first navigation and releases later manual conversations", async () => {
   const h = createHarness({ managed: { sessionRef: "sr_test", token: "owner-token", owner: "browser", projectId: null } });
   h.state.pathname = "/";
   h.state.readyState = "complete";
@@ -389,9 +389,38 @@ test("managed creation retains its ref after first navigation and rejects later 
   await Promise.resolve();
   assert.equal(await h.sessionId(), "sr_test");
   h.state.pathname = "/c/6ab53993-e114-83ee-9b06-3859506fe3e3";
-  assert.equal((await h.pageState()).reason, "creation-route-mismatch");
-  assert.notEqual(await h.sessionId(), "sr_test");
+  assert.notEqual((await h.pageState()).reason, "creation-route-mismatch");
+  assert.equal(await h.sessionId(), "6ab53993-e114-83ee-9b06-3859506fe3e3");
+  assert.equal((await h.message({ type: "get-session-id" })).managed, null);
 });
+
+for (const target of ["/", "/c/6ac0da0c-f304-83e8-ac0f-25235ca1d760",
+  "/g/g-p-" + "a".repeat(32) + "/project", "/g/g-p-" + "a".repeat(32) + "/c/6ac0da0c-f304-83e8-ac0f-25235ca1d760"]) {
+  test(`a bound managed tab registers manual navigation independently: ${target}`, async () => {
+    const bound = "6ab53993-e114-83ee-9b06-3859506fe3e2";
+    const h = createHarness({ managed: { sessionRef: "sr_original", token: "t", owner: "b", projectId: null,
+      boundConversation: bound } });
+    h.state.pathname = `/c/${bound}`;
+    h.state.readyState = "complete";
+    h.state.users = [element("original-user")];
+    h.seedInflight({ taskId: "original-task", session: "sr_original", phase: "accepted", submittedUserMessageId: "original-user" });
+    assert.equal(await h.sessionId(), "sr_original");
+    h.state.pathname = target;
+    h.state.users = [element("manual-user")];
+    h.tickInterval(3000);
+    const metadata = await h.message({ type: "get-session-id" });
+    assert.equal(metadata.managed, null);
+    assert.notEqual(metadata.session, "sr_original");
+    assert.equal(metadata.postSend, false);
+    assert.equal((h.sentMessages.at(-1) as any).managed, null);
+    await h.pageState(); h.state.now += 5000;
+    assert.equal((await h.pageState()).ready, true);
+    assert.equal((await h.message({ type: "get-inflight" }) as any).inflight.taskId, "original-task");
+    h.state.pathname = `/c/${bound}`;
+    assert.equal(await h.sessionId(), "sr_original");
+    assert.equal((await h.message({ type: "get-session-id" }) as any).managed.boundConversation, bound);
+  });
+}
 
 test("managed project creation blocks fallback into an ordinary conversation", async () => {
   const projectId = "g-p-" + "a".repeat(32);
