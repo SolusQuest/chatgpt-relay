@@ -174,7 +174,7 @@ async function listChatGPTTabs() {
 async function getTabSession(tabId, opts = {}) {
   // Return cached state because sendMessage can be throttled in background tabs.
   const cached = tabSessionCache.get(tabId);
-  if (cached && !opts.forceFresh) return cached;
+  if (cached && verifiedTabSessions.has(tabId) && !opts.forceFresh) return cached;
   // Cold path: query the content script.
   try {
     const r = await Promise.race([
@@ -182,9 +182,9 @@ async function getTabSession(tabId, opts = {}) {
       new Promise((_, rej) => setTimeout(() => rej(new Error("sendMessage timeout")), 3000)),
     ]);
     if (r?.session) {
-      if (r.managed) await registerManagedPage(tabId, r);
-      await rememberTabSession(tabId, r.session);
-      return r.session;
+      const page = await registerPageSession(tabId, r);
+      await rememberTabSession(tabId, page.session);
+      return page.session;
     }
     return null;
   } catch {
@@ -195,6 +195,7 @@ async function getTabSession(tabId, opts = {}) {
 // Tab-to-session cache. Suspension clears memory, but content scripts report
 // session-hello periodically so the next alarm can rebuild the mapping.
 const tabSessionCache = new Map();
+const verifiedTabSessions = new Set(); // Persisted mappings require fresh page registration after worker restart.
 
 let ownerPromise;
 function creationOwner() {
@@ -245,6 +246,36 @@ async function registerManagedPage(tabId, page) {
     return bound;
   }
   return { status: "ok" };
+}
+async function registerPageSession(tabId, page) {
+  if (page.managed) {
+    const registered = await registerManagedPage(tabId, page);
+    return { ...page, conversationId: registered.conversationId ?? page.conversationId };
+  }
+  if (!page.conversationId) return page;
+  let identity;
+  try {
+    identity = await httpJson("GET", `/v1/sessions/${encodeURIComponent(page.conversationId)}/inspect`);
+  } catch (e) {
+    // New manual chats have no registry row yet. Existing canonical identities
+    // must be verified, and a network failure must not fall back to another ID.
+    if (e.status === 404 && page.session === page.conversationId) return page;
+    throw e;
+  }
+  if (identity?.conversationId !== page.conversationId || identity.creationStatus !== "created" ||
+      typeof identity.session !== "string") throw new Error("session_identity_unavailable");
+  if (identity.session === page.session) return page;
+  if (page.session !== page.conversationId || identity.session !== identity.sessionRef ||
+      !/^sr_[A-Za-z0-9_-]{1,120}$/.test(identity.session)) throw new Error("session_identity_conflict");
+  const restored = await sendTabMessage(tabId, {
+    type: "configure-session-identity", expectedSession: page.session,
+    session: identity.session, conversationId: page.conversationId,
+  }, PAGE_STATE_SENDMSG_TIMEOUT_MS, "restore session identity");
+  if (restored?.error || restored?.session !== identity.session ||
+      restored.conversationId !== page.conversationId || restored.managed) {
+    throw new Error(restored?.error ?? "session_identity_changed");
+  }
+  return restored;
 }
 let creationPolling = false;
 let discoveryPolling = false;
@@ -327,6 +358,7 @@ async function rememberTabSession(tabId, session) {
     stopDispatchLoop(previous);
   }
   tabSessionCache.set(tabId, session);
+  verifiedTabSessions.add(tabId);
   saved[tabId] = session;
   });
 }
@@ -340,6 +372,7 @@ async function forgetTabSession(tabId) {
   return mutateStorageMap("tab_session_map", saved => {
   const session = tabSessionCache.get(tabId) ?? saved[tabId];
   tabSessionCache.delete(tabId);
+  verifiedTabSessions.delete(tabId);
   delete saved[tabId];
   if (session && dispatchLoops.get(session)?.tabId === tabId) stopDispatchLoop(session);
   });
@@ -1210,12 +1243,10 @@ async function startDispatchLoop(session, tabId) {
 }
 
 async function restoreDispatchLoops() {
-  const saved = await getStorage("tab_session_map", {});
   const tabs = await listChatGPTTabs();
   for (const tab of tabs) {
     if (!tab.id) continue;
-    let session = tabSessionCache.get(tab.id) ?? saved[tab.id];
-    if (!session || session.startsWith("sr_")) session = await getTabSession(tab.id, { forceFresh: true });
+    const session = await getTabSession(tab.id, { forceFresh: true });
     if (!session) continue;
     if (offlineSessions.has(session)) continue;
     startDispatchLoop(session, tab.id).catch((e) =>
@@ -1887,6 +1918,15 @@ async function recoverInflightForTab(msg, tabId) {
   const epochs = await captureTaskEpochs();
   const task = await httpJson("GET", `/v1/tasks/${msg.taskId}`);
   const session = task.session;
+  let conversationChanged = msg.conversationChanged === true;
+  if (session.startsWith("sr_")) {
+    // Page-load recovery may run before its initial alias registration finishes.
+    // Verify the current page after normalization instead of treating that
+    // earlier UUID/ref comparison as proof of navigation to another chat.
+    const currentSession = await getTabSession(tabId, { forceFresh: true });
+    if (!currentSession) return { action: "wait", status: task.status };
+    conversationChanged = currentSession !== session;
+  }
   const record = {
     baseline: msg.baseline,
     deliveryPhase: msg.deliveryPhase ?? msg.phase,
@@ -1909,7 +1949,7 @@ async function recoverInflightForTab(msg, tabId) {
   }
 
   let action = classifyRecoveryAction(task, record);
-  if (msg.conversationChanged) {
+  if (conversationChanged) {
     action = hasSendFence(record, task) ? "fail-uncertain" : "defer";
   }
 
@@ -2044,12 +2084,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
  if (type === "session-hello") {
    if (sender.tab?.id && msg.session) {
      (async () => {
-       const registered = msg.managed ? await registerManagedPage(sender.tab.id, msg) : { status: "ok" };
-       await rememberTabSession(sender.tab.id, msg.session);
-        void startDispatchLoop(msg.session, sender.tab.id).catch((e) =>
+       const registered = await registerPageSession(sender.tab.id, msg);
+       await rememberTabSession(sender.tab.id, registered.session);
+        void startDispatchLoop(registered.session, sender.tab.id).catch((e) =>
           console.warn("[relay sw] hello dispatch loop failed", e),
         );
-        sendResponse({ status: "ok", conversationId: registered.conversationId ?? null });
+        sendResponse({ status: "ok", conversationId: registered.managed ? registered.conversationId ?? null : null });
       })().catch((e) => sendResponse({ error: e.message }));
    } else {
      sendResponse({ error: "missing session or tab" });

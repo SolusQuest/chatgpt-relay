@@ -548,11 +548,34 @@
     sessionStorage.setItem("gpt_relay_managed", JSON.stringify({ ...m, boundConversation: m.boundConversation ?? old?.boundConversation }));
     reportSid();
   }
+  function configureSessionIdentity(msg) {
+    const conversationId = routeConversation();
+    const currentSession = getSessionId();
+    if (!conversationId || msg.conversationId !== conversationId || managedSessionForRoute() ||
+        !/^sr_[A-Za-z0-9_-]{1,120}$/.test(msg.session ?? "") ||
+        (currentSession !== msg.expectedSession && currentSession !== msg.session)) {
+      throw new Error("session_identity_changed");
+    }
+    const saved = boundSessionIdentity();
+    if (saved?.conversationId === conversationId && saved.session !== msg.session) {
+      throw new Error("session_identity_conflict");
+    }
+    sessionStorage.setItem("gpt_relay_bound_session", JSON.stringify({ conversationId, session: msg.session }));
+    reportSid();
+  }
+  function boundSessionIdentity() {
+    try { return JSON.parse(sessionStorage.getItem("gpt_relay_bound_session") ?? "null"); }
+    catch { return null; }
+  }
   function getSessionId() {
     const managed = managedSessionForRoute();
     if (managed && managedRouteMatches()) return managed.sessionRef;
     const m = location.pathname.match(/\/c\/([a-f0-9-]+)/);
-    if (m) return m[1];
+    if (m) {
+      const bound = boundSessionIdentity();
+      return bound?.conversationId === m[1] && /^sr_[A-Za-z0-9_-]{1,120}$/.test(bound.session ?? "")
+        ? bound.session : m[1];
+    }
     let sid = sessionStorage.getItem("gpt_relay_session_id");
     if (!sid) {
       sid = (crypto.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`);
@@ -1153,6 +1176,9 @@
           }
         } else if (msg.type === "configure-session") {
           configureManagedSession(msg.managed);
+          sendResponse(sessionMetadata());
+        } else if (msg.type === "configure-session-identity") {
+          configureSessionIdentity(msg);
           sendResponse(sessionMetadata());
         } else if (msg.type === "discover-projects") {
           const projects = [];

@@ -98,6 +98,14 @@ test("bound creation survives first-task failure and legacy/ref aliases share me
   const view = (await api(`/v1/tasks/${next.taskId}`)).body;
   assert.equal(view.sessionRef, r);
   assert.equal(view.conversationId, conversationId);
+  const byRef = (await api(`/v1/sessions/${r}/inspect`)).body;
+  const byConversation = (await api(`/v1/sessions/${conversationId}/inspect`)).body;
+  assert.equal(byRef.session, r);
+  assert.equal(byConversation.session, r);
+  assert.equal(byRef.sessionRef, byConversation.sessionRef);
+  assert.equal(byRef.conversationId, byConversation.conversationId);
+  assert.equal(byRef.activeTaskId, byConversation.activeTaskId);
+  assert.equal(byRef.queuedTasks, byConversation.queuedTasks);
 }));
 
 test("unknown open cannot be reclaimed or replayed but late binding can establish the session", async () => fixture(async ({ api }: any) => {

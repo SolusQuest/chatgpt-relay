@@ -82,6 +82,148 @@ test("snapshot reason distinguishes ready pages from unreachable pages", async (
   assert.equal(reports[1].reason, "page_unreachable");
 });
 
+test("reopened ref-created chats normalize page and worker identity before the send fence", async () => {
+  const w = await worker();
+  const result = await vm.runInContext(`(async()=>{
+    const conversationId='6ac0da0c-f304-83e8-ac0f-25235ca1d760';
+    let page={session:conversationId,conversationId,managed:null,projectId:null};
+    const calls=[];
+    chrome.tabs.sendMessage=async(tabId,msg)=>{
+      calls.push(msg.type);
+      if(msg.type==='configure-session-identity') page={...page,session:msg.session};
+      return page;
+    };
+    httpJson=async(method,url)=> url.includes('/inspect')
+      ? {session:'sr_original',sessionRef:'sr_original',conversationId,creationStatus:'created'}
+      : {taskId:'task',session:'sr_original',status:'in_progress',sendAttemptedAt:1};
+    attachPendingFromTask=async()=>true;
+    const session=await getTabSession(7,{forceFresh:true});
+    return {session,page,calls};
+  })()`, w.context);
+  assert.equal(result.session, "sr_original");
+  assert.equal(result.page.session, "sr_original");
+  assert.ok(result.calls.includes("configure-session-identity"));
+  assert.equal(w.storage.tab_session_map[7], "sr_original");
+  assert.equal((await w.message({ type: "send-attempted", taskId: "task", baseline: {} })).status, "fenced");
+});
+
+for (const scenario of ["new-manual", "network-error", "wrong-conversation", "wrong-ref", "navigation", "configuration-error", "hello"]) {
+  test(`reopened conversation registration handles ${scenario}`, async () => {
+    const w = await worker();
+    w.context.identityScenario = scenario;
+    w.context.identityDispatched = null;
+    const result = await vm.runInContext(`(async()=>{
+      const conversationId='6ac0da0c-f304-83e8-ac0f-25235ca1d760';
+      const original={session:conversationId,conversationId,managed:null};
+      let configured=0,dispatched=null;
+      chrome.tabs.sendMessage=async(tabId,msg)=>{
+        if(msg.type==='configure-session-identity') {
+          configured++;
+          if(identityScenario==='configuration-error') return {error:'session_identity_changed'};
+          if(identityScenario==='navigation') return {...original,conversationId:'different'};
+          return {...original,session:msg.session};
+        }
+        return original;
+      };
+      httpJson=async()=>{
+        if(identityScenario==='new-manual') throw Object.assign(new Error('missing'),{status:404});
+        if(identityScenario==='network-error') throw new Error('offline');
+        return {session:'sr_original',sessionRef:identityScenario==='wrong-ref'?'sr_other':'sr_original',
+          conversationId:identityScenario==='wrong-conversation'?'other':conversationId,creationStatus:'created'};
+      };
+      startDispatchLoop=async(session)=>{dispatched=session;identityDispatched=session;};
+      if(identityScenario==='hello') return {original,configured,dispatched};
+      const session=await getTabSession(7,{forceFresh:true});
+      return {session,configured,dispatched};
+    })()`, w.context);
+    if (scenario === "hello") {
+      const response = await w.message({ type: "session-hello", ...result.original });
+      assert.equal(response.status, "ok");
+      assert.equal(w.storage.tab_session_map[7], "sr_original");
+      assert.equal(vm.runInContext("identityDispatched", w.context), "sr_original");
+    } else if (scenario === "new-manual") {
+      assert.equal(result.session, "6ac0da0c-f304-83e8-ac0f-25235ca1d760");
+      assert.equal(result.configured, 0);
+    } else {
+      assert.equal(result.session, null);
+      assert.equal(w.storage.tab_session_map?.[7], undefined);
+    }
+  });
+}
+
+test("canonical restoration resolves an early recovery mismatch without failing or replaying the task", async () => {
+  const w = await worker();
+  const result = await vm.runInContext(`(async()=>{
+    const calls=[];
+    getTabSession=async()=> 'sr_original';
+    httpJson=async(method,url)=>{
+      calls.push(url);
+      return {taskId:'task',session:'sr_original',status:'in_progress',sendAttemptedAt:1};
+    };
+    attachPendingFromTask=async()=>true;
+    pollPendingReplies=async()=>{};
+    startDispatchLoop=async()=>{};
+    const result=await recoverInflightForTab({taskId:'task',conversationChanged:true,
+      baseline:{userCount:0},phase:'accepted'},7);
+    return {result,calls};
+  })()`, w.context);
+  assert.equal(result.result.action, "reattached");
+  assert.deepEqual(Array.from(result.calls), ["/v1/tasks/task"]);
+});
+
+for (const entry of ["cached-lookup", "restore-loops"]) {
+  test(`worker restart normalizes persisted conversation IDs before ${entry}`, async () => {
+    const w = await worker();
+    w.storage.tab_session_map = { 7: "6ac0da0c-f304-83e8-ac0f-25235ca1d760" };
+    w.context.identityEntry = entry;
+    const result = await vm.runInContext(`(async()=>{
+      const conversationId='6ac0da0c-f304-83e8-ac0f-25235ca1d760';
+      let page={session:conversationId,conversationId,managed:null};
+      let started=null;
+      await loadTabSessionCache();
+      chrome.tabs.query=async()=>[{id:7}];
+      chrome.tabs.sendMessage=async(tabId,msg)=>{
+        if(msg.type==='configure-session-identity') page={...page,session:msg.session};
+        return page;
+      };
+      httpJson=async()=>({session:'sr_original',sessionRef:'sr_original',conversationId,creationStatus:'created'});
+      startDispatchLoop=async(session)=>{started=session;};
+      if(identityEntry==='restore-loops') await restoreDispatchLoops();
+      else started=await getTabSession(7);
+      return {started,page};
+    })()`, w.context);
+    assert.equal(result.started, "sr_original");
+    assert.equal(result.page.session, "sr_original");
+    assert.equal(w.storage.tab_session_map[7], "sr_original");
+  });
+}
+
+for (const current of [null, "sr_different"]) {
+  test(`ref recovery preserves strict identity checks when page identity is ${current ?? "unavailable"}`, async () => {
+    const w = await worker();
+    w.context.currentIdentity = current;
+    const result = await vm.runInContext(`(async()=>{
+      const calls=[];
+      getTabSession=async()=>currentIdentity;
+      httpJson=async(method,url)=>{
+        calls.push([method,url]);
+        return {taskId:'task',session:'sr_original',status:method==='POST'?'failed':'in_progress',sendAttemptedAt:1};
+      };
+      clearRecoveredTask=async()=>{};
+      const result=await recoverInflightForTab({taskId:'task',conversationChanged:false,phase:'accepted'},7);
+      return {result,calls};
+    })()`, w.context);
+    if (current === null) {
+      assert.equal(result.result.action, "wait");
+      assert.equal(result.calls.length, 1);
+    } else {
+      assert.equal(result.result.action, "clear");
+      assert.equal(result.result.error, "submission_outcome_unknown");
+      assert.ok(result.calls.some((call: [string, string]) => call[0] === "POST" && call[1].endsWith("/complete")));
+    }
+  });
+}
+
 test("worker persists the creation open fence before opening one tab", async () => {
   const w = await worker();
   assert.equal(w.operations.filter(x => x === "open-tab").length, 1);

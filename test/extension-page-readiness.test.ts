@@ -442,6 +442,41 @@ test("worker configuration restores the stable ref when the initial URL marker w
   assert.equal(await h.sessionId(), "sr_configured");
 });
 
+test("a reopened conversation restores its canonical identity without creation credentials", async () => {
+  const h = createHarness();
+  const conversationId = await h.sessionId();
+  const request = { type: "configure-session-identity", expectedSession: conversationId,
+    session: "sr_original", conversationId };
+  const restored = await h.message(request);
+  assert.equal(restored.session, "sr_original");
+  assert.equal(restored.managed, null);
+  assert.equal((await h.message(request)).session, "sr_original", "concurrent registration is idempotent");
+  assert.equal(await h.sessionId(), "sr_original");
+  assert.equal((h.sentMessages.at(-1) as any).session, "sr_original");
+  h.state.pathname = "/c/6ac0da0c-f304-83e8-ac0f-25235ca1d760";
+  assert.equal(await h.sessionId(), "6ac0da0c-f304-83e8-ac0f-25235ca1d760");
+  assert.ok((await h.message(request)).error, "a delayed response cannot bind another conversation");
+  h.state.pathname = `/c/${conversationId}`;
+  assert.equal(await h.sessionId(), "sr_original");
+  assert.ok((await h.message({ ...request, session: "sr_conflicting" })).error);
+});
+
+for (const fault of ["invalid-ref", "wrong-conversation", "wrong-current-session", "unbound-creation"]) {
+  test(`canonical identity restoration rejects ${fault}`, async () => {
+    const h = createHarness(fault === "unbound-creation" ? { managed: {
+      sessionRef: "sr_creating", token: "token", owner: "browser", projectId: null,
+    } } : {});
+    const currentSession = await h.sessionId();
+    const conversationId = h.state.pathname.split("/").at(-1);
+    const response = await h.message({ type: "configure-session-identity",
+      expectedSession: fault === "wrong-current-session" ? "other" : currentSession,
+      conversationId: fault === "wrong-conversation" ? "different" : conversationId,
+      session: fault === "invalid-ref" ? "invalid" : "sr_original" });
+    assert.ok(response.error);
+    assert.equal(await h.sessionId(), currentSession);
+  });
+}
+
 test("project conversation path reports its conversation ID and re-registers on same-ID navigation", async () => {
   const harness = createHarness();
   const id = "6ab53993-e114-83ee-9b06-3859506fe3e2";
