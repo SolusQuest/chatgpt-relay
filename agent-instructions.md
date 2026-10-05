@@ -19,6 +19,7 @@ gpt-relay is a local SQLite-backed queue between an agent and the user's signed-
 - Use the task-specific session supplied by the user or already established for this execution chain. When none exists, follow the workflow's [mode-aware session selection](./workflows/README.md#relay-session-selection): ask early in `default`, create and notify without a confirmation checkpoint in `auto`. An explicit request for a new session already authorizes creation. Never choose an idle, recent, or previous-task session.
 - Reuse that session across every relay phase and round in the task.
 - Review remote PRs only after commit, push, and draft-PR publication. The final verdict must apply to the exact pushed head.
+- Use the active workflow's submission policy. The PR workflow [defaults to parallel CI and relay review, with evidence-based waiting](./workflows/agent-ready-issue-to-pr.md#review-submission-and-ci-scheduling); disclose passed and pending validation in the prompt. A relay verdict does not replace the workflow's final CI and handoff gates.
 - User authorization owns product decisions and final merge. Agent-relay agreement cannot replace it.
 - Relay findings are review inputs, not authoritative requirements. The agent owns the evidence-based applicability, scope, proportionality, and [problem-level remediation](./workflows/review-convergence.md#problem-level-remediation) decision under [`review-convergence.md`](./workflows/review-convergence.md); do not patch the literal comment or implement a generally useful recommendation mechanically when it is unnecessary for the current project stage or artifact.
 - Follow the active workflow's `default` or `auto` mode and its [`review-convergence.md`](./workflows/review-convergence.md) budget. Never add rounds because the mode is `auto`, treat exhausted budget as approval, or ask relay separately whether auto execution may continue.
@@ -68,17 +69,18 @@ Assume an existing session can access user-authorized GitHub URLs and retains th
 
 ## Artifact review
 
-For a PR, send the remote URL and exact head:
+For a PR, send the remote URL, exact head, and current validation evidence:
 
 ```text
 Act as a strict code reviewer for this PR.
 
-List required changes first. If no blocking issue remains, state that it is safe
-to request human review and list remaining risks. Do not promote a general best
-practice to a blocker without current applicability evidence.
+List required changes first. If no blocking issue remains in the reviewed code and available evidence, state that and list remaining risks. Do not promote a general best practice to a blocker without current applicability evidence.
+Pending checks are unverified. If missing evidence prevents a review conclusion, identify the specific necessary proof; do not infer a code failure merely from ordinary pending CI. The workflow owns final readiness after its required checks and feedback gates complete.
 
 PR: https://github.com/<owner>/<repo>/pull/<number>
 Head: <sha>
+Validation passed: <checks, target-path execution, and evidence references>
+Validation pending: <checks or execution proof still outstanding>
 ```
 
 For an unpublished issue, send the complete draft rather than a summary:

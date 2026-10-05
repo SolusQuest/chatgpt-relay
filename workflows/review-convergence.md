@@ -12,13 +12,21 @@ A bounded artifact review allows at most three full submissions:
 
 A submission consumes a round only when relay returns a substantive review of the requested artifact. URL-access failure, pause, captcha, transport failure, clearly truncated output, or an off-topic response is an execution failure; follow [`agent-instructions.md`](../agent-instructions.md) recovery rules and never use this distinction to retry a paused or rate-limited session automatically.
 
-An active workflow may define a convergence round as that relay submission plus synchronized non-relay gates for the same artifact revision, such as CI and GitHub feedback. Those gates do not create separate relay budgets. The workflow owns their completion barrier and cutoff; findings from every declared source share one ledger and one continuation decision.
+An active workflow may define a convergence round as that relay submission plus non-relay gates for the same artifact revision, such as CI and GitHub feedback. Those gates do not create separate relay budgets. The workflow owns submission timing, correction and completion barriers, and feedback cutoffs; findings from every declared source share one ledger and one continuation decision.
 
 Ask the initial review for the complete set of currently identifiable blockers. The second submission includes the current artifact, finding ledger, revision summary, and the relevant artifact versions or diff. Relay must reconcile prior finding IDs rather than silently rename or reopen them. The third submission uses the workflow's final-convergence prompt and is not another unrestricted restart.
 
 Do not reset the budget because relay introduces a later finding, the artifact changes, a deterministic correction is made, or the workflow uses `auto`. A new full review cycle requires the explicit condition stated by the active workflow or direct user authorization; carry the prior ledger forward and record why the cycle changed.
 
 Never start a fourth unrestricted review. The limit bounds re-review; it never makes a real blocker non-blocking or turns exhausted budget into approval.
+
+## Revision evidence and workflow readiness
+
+Bind each submission, result, and verification record to its exact artifact revision or head. A relay verdict describes the reviewed artifact and available evidence; it does not by itself satisfy the workflow's CI, execution-proof, publication, or handoff gates. Pending verification is unverified, not a pass or proof of failure. The active workflow decides which evidence must precede review and which may arrive afterward.
+
+Where the active workflow permits replacing a candidate before all verification completes, record the old revision as superseded and retain its submitted task IDs, observed results, pending or cancelled verification, and finding lineage. A substantive relay review still consumes its round even if CI later fails or the revision is superseded. Supersession or cancellation never refunds a round, resets the ledger, resolves a blocker, or turns incomplete evidence into approval.
+
+Attach late findings to their original source revision, then verify their applicability to the current revision and carry unresolved problems forward under the same IDs. Evidence from an older revision cannot establish that a correction works on the current revision. The active workflow owns the observation cutoff and any required current-revision revalidation; supersession does not authorize indefinite monitoring or bypass an unresolved risk.
 
 ## Applicability and proportionality
 
