@@ -790,10 +790,13 @@ async function processSessionControls() {
   } catch (err) { dlog("session controls", err); }
   finally {
     controlPollRunning = false;
-    setTimeout(() => void processSessionControls(), 5000);
   }
 }
-void processSessionControls();
+async function pollSessionControls() {
+  await processSessionControls();
+  setTimeout(() => void pollSessionControls(), 5000);
+}
+void pollSessionControls();
 
 async function reportTaskProgress(taskId, phase) {
   return httpJson("POST", `/internal/tasks/${taskId}/progress`, { phase }).then(() => true).catch((e) => {

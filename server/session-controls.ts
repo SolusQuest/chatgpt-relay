@@ -33,6 +33,7 @@ export class SessionControls {
   view(row: ControlRow) {
     return { operationId: row.id, session: row.session, kind: row.kind, taskId: row.task_id,
       instanceId: row.owner, tabId: row.tab < 0 ? null : row.tab,
+      suspended: this.store.isSuspended(row.session),
       state: row.state, createdAt: row.created_at, expiresAt: row.expires_at, error: row.error,
       errorInfo: row.error ? errorInfo(row.error, row.task_id ? this.store.getTask(row.task_id) ?? undefined : undefined) : null,
       result: row.result ? JSON.parse(row.result) : null };
@@ -77,6 +78,7 @@ export class SessionControls {
         requestedInstance: body.instanceId ?? null };
     } else {
       if (snapshot?.pageStatus !== "observed" || snapshot.page.protocol !== 1) throw new ControlError("page_identity_unavailable");
+      if (snapshot.browser.status === "ambiguous") throw new ControlError("page_ambiguous");
       owner = snapshot.page.owner; tab = snapshot.page.tabId;
       if (body.kind === "close") {
         const instance = this.diagnostics.instances.list().find(i => i.instanceId === owner && !i.stale);
@@ -112,7 +114,9 @@ export class SessionControls {
     if (!row || row.owner !== body?.owner || row.token !== body?.token) throw new ControlError("control_ownership_mismatch");
     if (!["claimed", "executing"].includes(row.state)) return this.view(row);
     if (!["succeeded", "blocked", "unknown"].includes(body.state)) throw new ControlError("invalid_control_state", 400);
-    const result = JSON.stringify(body.result ?? null);
+    const previous = JSON.parse(row.result ?? "null");
+    const result = JSON.stringify(row.kind === "close" && previous?.suspended === true
+      ? { ...previous, ...body.result } : body.result ?? null);
     if (result.length > 4000) throw new ControlError("control_result_too_large", 400);
     this.db.prepare("UPDATE session_controls SET state=?, error=?, result=? WHERE id=?")
       .run(body.state, typeof body.error === "string" ? body.error.slice(0, 150) : null,

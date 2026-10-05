@@ -10,7 +10,9 @@ export function errorInfo(message: string, task?: Task) {
     task.sendAttemptedAt !== null ? "uncertain" : "not_attempted";
   const nextAction = code === "composer_changed" || code === "composer_not_clean" ? "inspect_session_and_preserve_draft" :
     code === "page_identity_unavailable" || code === "reload_extension_and_page" ? "run_doctor" :
-    code === "control_timeout" || code === "refresh_outcome_unknown" ? "inspect_session_and_operation_do_not_repeat" :
+    code === "control_timeout" || /^(refresh|open|close)_outcome_unknown$/.test(code) ? "inspect_session_and_operation_do_not_repeat" :
+    code === "instance_ambiguous" ? "inspect_browser_instances_and_select_instance" :
+    code === "instance_unavailable" || code === "instance_generation_changed" || code === "control_unsupported" ? "run_doctor" :
     deliveryState === "uncertain" || deliveryState === "acknowledged" ? "inspect_trace_and_recover_original_task" : "inspect_session_and_task_trace";
   return { code, message, deliveryState,
     // A failure alone never authorizes replay; active/preparing work can still race an observer.

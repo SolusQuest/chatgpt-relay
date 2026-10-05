@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import type { AddressInfo } from "node:net";
 import { createApp } from "../server/app.js";
 import { loadConfig } from "../server/config.js";
+import { listBrowserInstances, inspectSession, submitSessionControl, getOperation } from "../client/agent-client.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
@@ -280,4 +281,44 @@ test("maintenance CLI suspends, diagnoses and tracks an idempotent refresh opera
   const bad = await runCli([...args, "--force"]);
   assert.equal(bad.code, 1);
   assert.equal(JSON.parse(bad.stderr).errorInfo.code, "client_error");
+});
+
+test("CLI and client open and close accept both identities and preserve idempotency and suspension", async () => {
+  const session = "6ac0da0c-f304-83e8-ac0f-25235ca1d760";
+  const owner = "page-controls-cli";
+  const post = async (route: string, body: unknown) => {
+    const response = await fetch(`${baseUrl}${route}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    assert.ok(response.ok, await response.clone().text());
+    return response.json() as Promise<any>;
+  };
+  await post("/internal/heartbeat", { session });
+  await post("/internal/browser-inventory", { owner, generation: 1, revision: 1, controls: ["open", "close"], tabs: [] });
+  const ref = (await inspectSession(session, baseUrl)).sessionRef;
+  const opened = await runCli(["sessions", "open", "--session-ref", ref, "--instance", owner, "--operation-id", "cli-open-existing"]);
+  assert.equal(opened.code, 0, opened.stderr);
+  assert.equal(JSON.parse(opened.stdout).instanceId, owner);
+  const retried = await submitSessionControl({ kind: "open", session, operationId: "cli-open-existing", instanceId: owner }, baseUrl);
+  assert.equal(retried.operationId, "cli-open-existing");
+  assert.equal((await listBrowserInstances(baseUrl)).find(i => i.instanceId === owner)!.tabs.length, 0);
+  const command = (await post("/internal/session-controls/claim", { owner })).command;
+  await post(`/internal/session-controls/${command.operationId}/finish`, { owner, token: command.token, state: "succeeded", result: { action: "page_reused" } });
+  await post("/internal/browser-inventory", { owner, generation: 1, revision: 2, controls: ["open", "close"], tabs: [{ tabId: 7, conversationId: session }] });
+  await post("/internal/session-snapshots", { owner, generation: 1, tabId: 7, session, protocol: 1, ready: true, generating: false, composerClean: true });
+  const closed = await runCli(["sessions", "close", "--session", session, "--operation-id", "cli-close-existing"]);
+  assert.equal(closed.code, 0, closed.stderr);
+  const close = (await post("/internal/session-controls/claim", { owner })).command;
+  await post(`/internal/session-controls/${close.operationId}/fence`, { owner, token: close.token, generation: 1, documentId: "original" });
+  const blockedContinue = await runCli(["sessions", "continue", "--session-ref", ref]);
+  assert.equal(blockedContinue.code, 1);
+  await post(`/internal/session-controls/${close.operationId}/finish`, { owner, token: close.token, state: "blocked", error: "composer_not_clean" });
+  const operation = await getOperation(close.operationId, baseUrl);
+  assert.equal(operation.suspended, true);
+  assert.equal(operation.result!.suspended, true);
+  const repeatClose = await runCli(["sessions", "close", "--session-ref", ref, "--operation-id", close.operationId]);
+  assert.equal(JSON.parse(repeatClose.stdout).state, "blocked");
+  for (const args of [
+    ["sessions", "open", "--session", session, "--session-ref", ref],
+    ["sessions", "close", "--session", session, "--instance", owner],
+    ["sessions", "open", "--session", session, "--force"],
+  ]) assert.equal((await runCli(args)).code, 1);
 });

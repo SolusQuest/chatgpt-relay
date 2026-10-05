@@ -54,12 +54,19 @@ async function cmdHealth(): Promise<number> {
 }
 
 async function cmdSessions(args: string[] = []): Promise<number> {
-  if (["inspect", "suspend", "continue", "refresh"].includes(args[0] ?? "")) {
-    validateControlOptions(args.slice(1), ["--session", "--session-ref", ...(args[0] === "refresh" ? ["--operation-id", "--recover-task"] : [])]);
+  if (["inspect", "suspend", "continue", "refresh", "open", "close"].includes(args[0] ?? "")) {
+    validateControlOptions(args.slice(1), ["--session", "--session-ref",
+      ...(["refresh", "open", "close"].includes(args[0]!) ? ["--operation-id"] : []),
+      ...(args[0] === "refresh" ? ["--recover-task"] : []), ...(args[0] === "open" ? ["--instance"] : [])]);
     const flag = args.includes("--session-ref") ? "--session-ref" : "--session";
     const i = args.indexOf(flag);
     if (i < 0 || !args[i + 1] || args.includes("--session-ref") && args.includes("--session"))
-      throw new Error("usage: sessions inspect|suspend|continue|refresh --session-ref REF | --session ID");
+      throw new Error("usage: sessions inspect|suspend|continue|refresh|open|close --session-ref REF | --session ID");
+    if (args[0] === "open" || args[0] === "close") {
+      const instance = args.indexOf("--instance");
+      return submitControl({ kind: args[0], session: args[i + 1],
+        ...(instance >= 0 ? { instanceId: args[instance + 1] } : {}) }, args);
+    }
     if (args[0] === "refresh") {
       const recovery = args.indexOf("--recover-task");
       if (recovery >= 0 && !args[recovery + 1]) throw new Error("missing recovery task ID");
@@ -437,6 +444,9 @@ commands:
   sessions                 list active ChatGPT sessions
   sessions inspect|suspend|continue --session-ref REF (or --session ID)
   sessions refresh --session-ref REF [--recover-task TASK_ID] [--operation-id ID]
+  sessions open --session-ref REF [--instance INSTANCE_ID] [--operation-id ID]
+  sessions close --session-ref REF [--operation-id ID]
+                           all session controls also accept --session ID
   doctor [--session-ref REF]  diagnose service, extension and observed DOM
   tasks trace TASK_ID       read durable lifecycle events
   tasks recover|stop TASK_ID [--operation-id ID]

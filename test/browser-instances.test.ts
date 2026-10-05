@@ -35,3 +35,21 @@ test("complete inventories distinguish missing tabs, script loss, stale instance
     assert.throws(() => diagnostics.instances.report({ ...inventory, tabs: [{ tabId: 7, conversationId: "invalid" }] }));
   } finally { db.close(); }
 });
+
+test("legacy Project routes are retained only with responsive matching conversation evidence", () => {
+  const db = openDatabase(":memory:");
+  try {
+    const store = new TaskStore(db, loadConfig());
+    store.touchSession(conversationId);
+    const diagnostics = new SessionDiagnostics(db, store);
+    const projectId = "g-p-" + "a".repeat(32);
+    const report = { owner: "browser", tabId: 7, session: conversationId, conversationId, projectId };
+    diagnostics.report(report);
+    assert.equal(store.registry.get(conversationId)!.project, null);
+    diagnostics.report({ ...report, protocol: 1, conversationId: "other" });
+    assert.equal(store.registry.get(conversationId)!.project, null);
+    diagnostics.report({ ...report, protocol: 1 });
+    assert.equal(store.registry.get(conversationId)!.project, projectId);
+    assert.equal(diagnostics.inspect(conversationId)!.projectId, projectId);
+  } finally { db.close(); }
+});

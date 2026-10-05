@@ -175,3 +175,36 @@ test("an old page operation cannot execute against a new worker generation", () 
     assert.equal(store.isSuspended(id), false);
   } finally { db.close(); }
 });
+
+test("browser inventory blocks refresh when a second matching tab has no page script", () => {
+  const db = openDatabase(":memory:");
+  try {
+    const store = new TaskStore(db, loadConfig());
+    const id = "6ac0da0c-f304-83e8-ac0f-25235ca1d760";
+    store.touchSession(id);
+    const diagnostics = new SessionDiagnostics(db, store);
+    diagnostics.instances.report({ owner: "edge", generation: 1, revision: 1, controls: ["open", "close"],
+      tabs: [{ tabId: 7, conversationId: id }, { tabId: 8, conversationId: id }] });
+    diagnostics.report({ owner: "edge", generation: 1, tabId: 7, session: id, protocol: 1, ready: true, composerClean: true, generating: false });
+    const controls = new SessionControls(db, store, diagnostics);
+    assert.throws(() => controls.create({ kind: "refresh", operationId: "refresh-ambiguous", session: id }), /page_ambiguous/);
+    assert.equal(store.isSuspended(id), false);
+  } finally { db.close(); }
+});
+
+test("legacy control schema upgrades without losing an executing fence", () => {
+  const db = openDatabase(":memory:");
+  try {
+    db.exec(`CREATE TABLE session_controls (id TEXT PRIMARY KEY, session TEXT NOT NULL, owner TEXT NOT NULL, tab INTEGER NOT NULL,
+      kind TEXT NOT NULL, task_id TEXT, state TEXT NOT NULL, token TEXT NOT NULL, created_at INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL, error TEXT, result TEXT);`);
+    db.prepare("INSERT INTO session_controls VALUES (?,?,?,?,?,?,?,?,?,?,?,?)").run("legacy-open", "legacy", "edge", 7,
+      "refresh", null, "executing", "token", Date.now(), Date.now() + 120000, null, JSON.stringify({ beforeDocumentId: "original" }));
+    const store = new TaskStore(db, loadConfig());
+    const diagnostics = new SessionDiagnostics(db, store);
+    const controls = new SessionControls(db, store, diagnostics);
+    assert.equal(controls.claim("edge")!.state, "executing");
+    assert.equal(controls.claim("edge")!.result.beforeDocumentId, "original");
+    assert.equal(controls.fence("legacy-open", { owner: "edge", token: "token", documentId: "different" }).execute, false);
+  } finally { db.close(); }
+});

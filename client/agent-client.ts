@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID, createHash } from "node:crypto";
 import { http, HttpError } from "./http.js";
+export { submitSessionControl, getOperation, inspectSession, listBrowserInstances } from "./session-controls.js";
+export type { SessionControlRequest, SessionControlOperation, SessionInspection, BrowserInstanceView, ControlKind } from "./session-controls.js";
 
 const DEFAULT_BASE = process.env.GPT_RELAY_URL ?? "http://127.0.0.1:8765";
 const pendingDir = () => process.env.GPT_RELAY_PENDING_DIR ??

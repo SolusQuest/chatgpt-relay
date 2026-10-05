@@ -139,6 +139,8 @@ gpt-relay sessions suspend --session-ref <ref>
 gpt-relay sessions continue --session-ref <ref>
 gpt-relay tasks recover <task-id>
 gpt-relay sessions refresh --session-ref <ref>
+gpt-relay sessions open --session-ref <ref>
+gpt-relay sessions close --session <conversation-id>
 gpt-relay tasks stop <task-id>
 gpt-relay operations <operation-id>
 gpt-relay tasks --last 20
@@ -151,6 +153,10 @@ gpt-relay review --session <session-id> --stdin
 ## API summary
 
 Maintenance commands return JSON. `suspend` stops new claims while existing work continues; queued tasks retain their original expiry. `continue` releases only that dispatch suspension. Safety `pause`/`resume` remain separate.
+
+All session maintenance commands accept either `--session-ref <ref>` or `--session <id>`, exactly one per command. `open` reuses or opens an already bound conversation in a background tab; it requires the extension to be online, even when no ChatGPT tab is open. Use `doctor` to inspect instance identifiers and add `--instance <id>` to Open when selection is ambiguous. `close` requires a unique idle responsive page with a clean composer and suspends dispatch before removal. It preserves the session and queued work. After reopening, inspect the page and explicitly use `sessions continue` to resume suspended work. Open does not send a message, and Close does not request Stop. Both return operation IDs and use the same durable execution and result inspection rules as Refresh.
+
+Doctor and inspection distinguish fresh instance inventory, missing tabs and unreachable page scripts. Instance heartbeats do not require a ChatGPT page, and expire after 90 seconds; stale heartbeat evidence cannot distinguish a closed browser from a disabled extension. Page evidence expires after 30 seconds. New page controls require the updated server and extension; updating source files alone does not activate the capability in an already running service.
 
 `inspect` uses page observations with a 30-second freshness limit and explicitly reports missing or ambiguous pages. `doctor` exits 2 when attention is required; null selector capabilities mean unobserved. `trace` persists lifecycle events without prompt/reply content; tasks predating trace installation report `completeHistory: false`.
 
@@ -173,9 +179,10 @@ Restart the relay server, reload the Edge extension and refresh ChatGPT pages af
 | `GET` | `/v1/sessions` | List active sessions |
 | `GET` | `/v1/sessions/:id/inspect` | Read server and fresh page state |
 | `GET` | `/v1/doctor?session=:id` | Diagnose extension/page compatibility |
+| `GET` | `/v1/browser-instances` | Read extension instance heartbeat and complete tab inventories |
 | `GET` | `/v1/tasks/:id/trace` | Read persistent lifecycle timeline |
 | `POST` | `/v1/sessions/:id/suspend` or `/continue` | Hold/release new task claims |
-| `POST` | `/v1/session-controls` | Request recover, refresh or stop |
+| `POST` | `/v1/session-controls` | Request open, close, recover, refresh or stop |
 | `GET` | `/v1/operations/:id` | Read control operation status |
 | `POST` | `/v1/sessions/:id/pause` | Pause a session |
 | `POST` | `/v1/sessions/:id/resume` | Resume a session |
