@@ -4,7 +4,7 @@ These files orchestrate multi-stage work that may use gpt-relay. Use `agent-inst
 
 ## Invocation
 
-For issue-to-PR work:
+For a full issue-to-PR composition:
 
 ```text
 Workflow: issue-to-pr | agent-ready-issue-to-pr
@@ -13,6 +13,19 @@ Issue: <url>
 Relay session: <optional existing session ID or sessionRef>
 Relay Project: <optional Project ID/name, or no-project, for a new session>
 ```
+
+For a standalone stage, including one delegated to a different agent:
+
+```text
+Workflow: design | plan | implementation
+Mode: default | auto
+Issue: <url or complete issue text>
+Stage handoff: <artifact path/reference or complete record, required for implementation>
+Relay session: <existing task-specific session ID or sessionRef when established>
+Relay Project: <optional Project ID/name, or no-project, when no session is established>
+```
+
+A standalone stage stops at its own terminal outcome. A full composition consumes intermediate stage handoffs and continues its authorized stages to the existing PR outcome. Invoking a standalone stage does not authorize its downstream stages. Do not add a routine user approval checkpoint just because a composition crosses a stage or agent boundary.
 
 For milestone issue-graph publication:
 
@@ -28,6 +41,44 @@ Close refinement parent: yes | no
 ```
 
 If mode is omitted, use `default`. Record the selected mode before the first workflow phase, preserve it across composed workflows, and never change it without the user.
+
+## Stage handoffs and delegation
+
+[`design.md`](./design.md), [`plan.md`](./plan.md), and [`implementation.md`](./implementation.md) own the existing stage rules. The two issue-to-PR entries compose them in the original order:
+
+| Entry | Composition | Terminal outcome |
+|---|---|---|
+| `issue-to-pr` | Design → Plan → Implementation | `READY_FOR_HUMAN_REVIEW` or `BLOCKED_HANDOFF` |
+| `agent-ready-issue-to-pr` | Plan → Implementation | `READY_FOR_HUMAN_REVIEW` or `BLOCKED_HANDOFF` |
+| `design` | Decision discovery → contract review → publication/readback | `DESIGN_READY` or `BLOCKED_HANDOFF` |
+| `plan` | Readiness → implementation/test plan → plan review | `PLAN_READY` or `BLOCKED_HANDOFF` |
+| `implementation` | Reviewed plan → code/tests → PR convergence/handoff | `READY_FOR_HUMAN_REVIEW` or `BLOCKED_HANDOFF` |
+
+`DESIGN_READY` and `PLAN_READY` record existing stage completion conditions. They add no review submission, user approval gate, or downstream authority. Review verdicts such as `READY` and `CORRECT` retain their artifact-specific meanings under [`review-convergence.md`](./review-convergence.md); a verdict alone is not a complete stage handoff.
+
+The invoking project may assign stages to different agents or choose models and reasoning settings. These workflows define responsibilities and continuity; the project owns delegation mechanics and model selection. The invoker consumes each applicable handoff, continues only the authorized composition, and returns one consolidated final or blocked outcome.
+
+Read the active entry or stage and its **Required shared rules**. Read the linked shared-rule sections relevant to the invocation rather than treating the workflow catalog as a reading list. **Boundary references** and other stage/composition links are conditional: load them when routing, running or delegating the referenced stage, taking an authorized fallback, or handling a return to that stage. A link alone does not require recursively reading upstream, downstream, or full-composition procedures. The coordinator loads a stage when it becomes active or is delegated; consuming an applicable handoff does not require repeating the producing stage's procedure.
+
+A delegated stage agent needs its current stage document, shared rules, relevant repository/contract sources, and complete handoff artifacts. The composition's identity, authority, and return point travel in the handoff; the agent reads the full entry only if it also coordinates that composition. Deferred reading does not omit any rule required for the active stage or weaken handoff validation.
+
+Persist the handoff using the target project's existing artifact conventions. Provide complete content or accessible references, not only a chat summary. Include:
+
+| Field | Required content |
+|---|---|
+| Execution identity | Repository and issue identity; workspace/worktree and branch when selected; invoking composition or standalone stage; current phase and completion/blocker status |
+| Authority and mode | User-authorized scope and actions, exclusions and unresolved user decisions, and inherited `default` or `auto` mode |
+| Relay identity | The same task-specific session ID or `sessionRef`, and submitted/pending task IDs needed to observe original work without replay |
+| Artifacts and baseline | Exact issue, draft, and plan revisions as applicable, plus repository baseline and relevant working-tree state; readable content or references for each |
+| Decisions and verification | Project constraint profile, resolved decisions, dependencies, assumptions, acceptance/test mapping and validation requirements where established, review results and correction evidence, and the agent-owned continuation decision |
+| Review continuity | Stable finding ledger with artifact/head lineage, each established contract/plan/PR cycle and consumed/remaining rounds, discovery usage where applicable, and targeted-closure usage when established |
+| Fallback and next action | Whether the one-time readiness fallback was used and its origin/authority; risks, deferred work, blockers, and the authorized next stage or return point |
+
+Only established fields need values: Design need not invent a plan, PR, or implementation branch. A receiving agent verifies the relevant sources and state, reuses completed work while it remains applicable, and acts on concrete changed evidence under the owning stage's rules. Missing or inconsistent required handoff evidence is unknown readiness; reconcile it from authoritative artifacts and original task records before dependent work. Do not manufacture approval or start another review cycle to compensate for lost context.
+
+Design contract review, Plan review, and integrated PR convergence keep their existing artifact-specific budgets. Passing one stage's review does not consume or replenish another stage's budget. A stage, agent, model, or chat change, standalone invocation, delegation, composition, or resume never resets a cycle, renames findings, drops pending tasks, creates another Relay session, or expands user authority. Inherit an established task session even when the new invocation omits it.
+
+Plan owns the one-time [automatic readiness fallback](./plan.md#automatic-readiness-fallback). Before implementation starts, it runs only Design starting at Phase 1 through contract review, publication, and remote readback to `DESIGN_READY`, then returns to the existing Plan stage; a blocked Design propagates its blocked outcome. Readiness failure must satisfy the original authority, availability, unused-fallback, and remaining-budget conditions; missing authority, external dependencies, Relay failures, and exhausted budgets do not become fallback triggers. Implementation deviations and user-authorized PR re-entry retain their existing stage rules.
 
 ## Relay session selection
 
@@ -64,11 +115,14 @@ Repeated or unsupported findings, severity wording, style preferences, repositor
 
 | File | Purpose |
 |---|---|
-| [`issue-to-pr.md`](./issue-to-pr.md) | Rough issue → decision discovery → reviewed issue contract → mode-aware publication → shared implementation workflow |
-| [`agent-ready-issue-to-pr.md`](./agent-ready-issue-to-pr.md) | Frozen agent-ready issue → reviewed plan → implementation → remote draft PR → integrated CI/GitHub/relay convergence → handoff and post-handoff feedback re-entry |
+| [`issue-to-pr.md`](./issue-to-pr.md) | Full composition: rough issue → Design → Plan → Implementation → PR handoff |
+| [`agent-ready-issue-to-pr.md`](./agent-ready-issue-to-pr.md) | Full composition: frozen agent-ready issue → Plan → Implementation → PR handoff and authorized feedback re-entry |
+| [`design.md`](./design.md) | Standalone decision discovery, issue contract review, and mode-aware publication/readback → `DESIGN_READY` |
+| [`plan.md`](./plan.md) | Standalone readiness, implementation/test planning, and plan review; owns one-time readiness fallback → `PLAN_READY` |
+| [`implementation.md`](./implementation.md) | Reviewed plan → code/tests → remote draft PR → integrated CI/GitHub/relay convergence → exact-head handoff and authorized feedback re-entry |
 | [`milestone-to-issue-graph.md`](./milestone-to-issue-graph.md) | Authoritative milestone design → bounded tracker/leaf batch reviews → idempotent GitHub issue-graph publication → exact remote verification and refinement handoff |
 | [`review-convergence.md`](./review-convergence.md) | Shared bounded-review budget, finding ledger, later-finding, and continuation protocol |
 
 ## Authoring rule
 
-Keep workflow files stage-specific. Reference relay mechanics and shared convergence rules instead of repeating them; state user checkpoints, termination conditions, and downstream handoffs explicitly; never duplicate implementation or PR gates already owned by another workflow.
+Keep workflow files stage-specific. Separate required shared rules from conditional boundary references so a delegated stage does not preload the full composition. Reference relay mechanics and shared convergence rules instead of repeating them; state user checkpoints, termination conditions, and downstream handoffs explicitly; never duplicate implementation or PR gates already owned by another workflow.
