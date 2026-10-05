@@ -72,7 +72,7 @@ export class SessionControls {
       if (!instance.controls.includes("open")) throw new ControlError("control_unsupported");
       const tabs = instance.tabs.filter(t => t.conversationId === ref.conversation);
       if (tabs.length > 1) throw new ControlError("page_ambiguous");
-      owner = instance.instanceId; tab = tabs[0]?.tabId ?? -1;
+      owner = instance.instanceId; tab = -1;
       target = { generation: instance.generation, conversationId: ref.conversation, projectId: ref.project,
         requestedInstance: body.instanceId ?? null };
     } else {
@@ -117,6 +117,16 @@ export class SessionControls {
     this.db.prepare("UPDATE session_controls SET state=?, error=?, result=? WHERE id=?")
       .run(body.state, typeof body.error === "string" ? body.error.slice(0, 150) : null,
         result, id);
+    return this.view(this.row(id)!);
+  }
+  recordTab(id: string, body: any) {
+    this.expire();
+    const row = this.row(id);
+    if (!row || row.owner !== body?.owner || row.token !== body?.token) throw new ControlError("control_ownership_mismatch");
+    if (row.kind !== "open" || row.state !== "executing" || !Number.isSafeInteger(body.tabId) || body.tabId < 0)
+      throw new ControlError("invalid_tab_checkpoint");
+    if (row.tab >= 0 && row.tab !== body.tabId) throw new ControlError("control_tab_changed");
+    this.db.prepare("UPDATE session_controls SET tab=? WHERE id=?").run(body.tabId, id);
     return this.view(this.row(id)!);
   }
   fence(id: string, body: any) {
@@ -166,6 +176,7 @@ export function controlsRouter(controls: SessionControls) {
   });
   router.post("/internal/session-controls/:id/finish", (req, res) => res.json(controls.finish(String(req.params.id), req.body)));
   router.post("/internal/session-controls/:id/fence", (req, res) => res.json(controls.fence(String(req.params.id), req.body)));
+  router.post("/internal/session-controls/:id/record-tab", (req, res) => res.json(controls.recordTab(String(req.params.id), req.body)));
   router.use((err: unknown, _req: any, res: any, next: any) => {
     if (err instanceof ControlError) return res.status(err.status).json({ error: err.code });
     next(err);

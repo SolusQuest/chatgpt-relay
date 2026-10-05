@@ -277,6 +277,24 @@ function modernMessage(role: "user" | "assistant", id: string, text: string, key
   return { unit, marker };
 }
 
+test("close preflight rejects changed documents, drafts and local in-flight work", async () => {
+  const h = createHarness();
+  h.state.readyState = "complete";
+  h.state.users = [element("original-user")];
+  const page = await h.pageState();
+  const request = { type: "check-close", expectedSession: page.session, documentId: page.documentId };
+  h.state.now += 5000;
+  assert.equal((await h.message(request)).closeAllowed, true);
+  assert.equal((await h.message({ ...request, documentId: "different" })).error, "session_identity_changed");
+  h.state.input!.textContent = "keep my draft";
+  assert.equal((await h.message(request)).error, "composer_not_clean");
+  h.state.input!.textContent = "";
+  await h.pageState(); h.state.now += 5000;
+  h.seedInflight({ taskId: "original-task", session: page.session, phase: "accepted" });
+  assert.equal((await h.message(request)).error, "page_not_idle");
+  assert.equal(h.state.reloads, 0);
+});
+
 test("refresh validates identity and the latest composer before reloading", async () => {
   const h = createHarness();
   h.state.readyState = "complete";

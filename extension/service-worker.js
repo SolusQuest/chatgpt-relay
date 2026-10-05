@@ -208,6 +208,44 @@ function creationOwner() {
   })();
   return ownerPromise;
 }
+
+let inventoryGenerationPromise;
+function inventoryGeneration() {
+  inventoryGenerationPromise ??= (async () => {
+    const previous = await getStorage("browser_inventory_generation", 0);
+    const generation = Number.isSafeInteger(previous) ? previous + 1 : 1;
+    await setStorage("browser_inventory_generation", generation);
+    return generation;
+  })();
+  return inventoryGenerationPromise;
+}
+function tabRoute(tab) {
+  try {
+    const url = new URL(tab.pendingUrl || tab.url);
+    if (url.origin !== "https://chatgpt.com") return null;
+    const match = url.pathname.match(/^(?:\/g\/(g-[A-Za-z0-9-]+))?\/c\/([a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12})\/?$/i);
+    const project = match?.[1]?.match(/^(g-p-[a-f0-9]{32})(?:-|$)/i)?.[1] ?? match?.[1] ?? null;
+    return { conversationId: match?.[2] ?? null, projectId: project?.toLowerCase() ?? null };
+  } catch { return null; }
+}
+let inventoryRevision = 0;
+let inventoryRunning = null;
+function reportBrowserInventory() {
+  if (inventoryRunning) return inventoryRunning;
+  inventoryRunning = (async () => {
+    const owner = await creationOwner(), generation = await inventoryGeneration();
+    const tabs = (await listChatGPTTabs()).filter(tab => tab.id != null).map(tab => ({
+      tabId: tab.id, ...tabRoute(tab), loading: tab.status === "loading", discarded: tab.discarded ?? null,
+    }));
+    await httpJson("POST", "/internal/browser-inventory", { owner, generation, revision: ++inventoryRevision,
+      version: chrome.runtime.getManifest?.().version ?? null, controls: ["open", "close"], tabs }, 5000);
+  })().finally(() => { inventoryRunning = null; });
+  return inventoryRunning;
+}
+async function pollBrowserInventory() {
+  try { await reportBrowserInventory(); } catch (error) { dlog("browser inventory", error); }
+  finally { setTimeout(() => void pollBrowserInventory(), 10000); }
+}
 async function creationAction(meta, action, extra = {}) {
   return httpJson("POST", `/internal/session-creations/${encodeURIComponent(meta.sessionRef)}/${action}`,
     { owner: await creationOwner(), token: meta.token, ...extra });
@@ -484,7 +522,10 @@ async function getPageState(tabId) {
 }
 
 // Independent of task dispatch: a busy conversation must remain diagnosable.
+let snapshotsRunning = false;
 async function reportSessionSnapshots() {
+  if (snapshotsRunning) return;
+  snapshotsRunning = true;
   try {
     const owner = await creationOwner();
     const tabs = await chrome.tabs.query({ url: "https://chatgpt.com/*" });
@@ -495,7 +536,8 @@ async function reportSessionSnapshots() {
       const state = await getPageState(tab.id).catch(() => null);
       if (state && state.session !== session) return;
       await httpJson("POST", "/internal/session-snapshots", {
-        owner, tabId: tab.id, session, protocol: state?.controlProtocol ?? null,
+        owner, generation: await inventoryGeneration(), tabId: tab.id, session, protocol: state?.controlProtocol ?? null,
+        conversationId: state ? tabRoute(tab)?.conversationId : null, projectId: state ? tabRoute(tab)?.projectId : null,
         version: chrome.runtime.getManifest?.().version ?? null,
         ready: state?.ready ?? null, generating: state?.generating ?? null,
         composerClean: state?.composerClean ?? null, reason: state ? state.reason ?? null : "page_unreachable",
@@ -504,11 +546,107 @@ async function reportSessionSnapshots() {
     }));
     for (const report of reports) if (report.status === "rejected") dlog("page snapshot failed", report.reason);
   } catch (err) { dlog("session snapshots", err); }
-  finally { setTimeout(() => void reportSessionSnapshots(), 10000); }
+  finally { snapshotsRunning = false; }
 }
-void reportSessionSnapshots();
+async function pollSessionSnapshots() {
+  await reportSessionSnapshots();
+  setTimeout(() => void pollSessionSnapshots(), 10000);
+}
+void pollSessionSnapshots();
+void pollBrowserInventory();
+
+function controlRouteMatches(tab, target) {
+  const route = tabRoute(tab);
+  return route?.conversationId === target.conversationId &&
+    (target.projectId == null || route.projectId === target.projectId);
+}
+async function verifyOpenPage(command, tabId, created) {
+  const deadline = Math.min(command.expiresAt, Date.now() + 30000);
+  while (Date.now() < deadline) {
+    const tab = await chrome.tabs.get(tabId).catch(() => null);
+    if (!tab || !controlRouteMatches(tab, command.target)) throw new Error("session_identity_changed");
+    const session = await getTabSession(tabId, { forceFresh: true });
+    if (session === command.session) {
+      const state = await getPageState(tabId).catch(() => null);
+      if (state?.session === session && state.documentId) {
+        await reportBrowserInventory();
+        return { action: created ? "page_opened" : "page_reused", tabId,
+          documentId: state.documentId, relayReady: state.ready === true };
+      }
+    }
+    await delay(500);
+  }
+  throw new Error("open_outcome_unknown");
+}
+async function executeOpenControl(command) {
+  const generation = await inventoryGeneration();
+  const tabs = await listChatGPTTabs();
+  const marker = `#relay-open=${encodeURIComponent(command.operationId)}`;
+  if (command.state === "executing") {
+    // An execution fence never permits a second create, even if the first call
+    // or its tab checkpoint was interrupted. A marked tab can prove the action.
+    const recorded = command.tabId != null ? tabs.find(tab => tab.id === command.tabId && generation === command.target.generation) : null;
+    const marked = tabs.filter(tab => tab.url?.endsWith(marker) && controlRouteMatches(tab, command.target));
+    const tab = recorded ?? (marked.length === 1 ? marked[0] : null);
+    if (!tab) throw new Error("open_outcome_unknown");
+    return verifyOpenPage(command, tab.id, true);
+  }
+  if (generation !== command.target.generation) throw new Error("instance_generation_changed");
+  const matches = tabs.filter(tab => controlRouteMatches(tab, command.target));
+  if (matches.length > 1) throw new Error("page_ambiguous");
+  if (matches.length === 1) return verifyOpenPage(command, matches[0].id, false);
+  await reportBrowserInventory();
+  command.executionFenced = true;
+  const fence = await httpJson("POST", `/internal/session-controls/${encodeURIComponent(command.operationId)}/fence`,
+    { owner: command.owner, token: command.token, generation });
+  if (!fence.execute) throw new Error("open_outcome_unknown");
+  if (Date.now() >= command.expiresAt) throw new Error("open_outcome_unknown");
+  const project = command.target.projectId ? `/g/${encodeURIComponent(command.target.projectId)}` : "";
+  const tab = await chrome.tabs.create({ url: `https://chatgpt.com${project}/c/${command.target.conversationId}${marker}`, active: false });
+  if (tab.id == null) throw new Error("open_outcome_unknown");
+  command.tabId = tab.id;
+  await httpJson("POST", `/internal/session-controls/${encodeURIComponent(command.operationId)}/record-tab`,
+    { owner: command.owner, token: command.token, tabId: tab.id });
+  return verifyOpenPage(command, tab.id, true);
+}
+async function executeCloseControl(command) {
+  const generation = await inventoryGeneration();
+  if (generation !== command.target.generation)
+    throw new Error(command.state === "executing" ? "close_outcome_unknown" : "instance_generation_changed");
+  let tab = await chrome.tabs.get(command.tabId).catch(() => null);
+  if (command.state === "executing") {
+    if (!tab) { await reportBrowserInventory(); return { action: "page_closed", suspended: true, tabId: command.tabId }; }
+    // Do not repeat removal after an uncertain fence.
+    throw new Error("close_outcome_unknown");
+  }
+  if (!tab || !controlRouteMatches(tab, command.target)) throw new Error("session_identity_changed");
+  const matches = (await listChatGPTTabs()).filter(candidate => controlRouteMatches(candidate, command.target));
+  if (matches.length !== 1) throw new Error("page_ambiguous");
+  if (await getTabSession(command.tabId, { forceFresh: true }) !== command.session) throw new Error("session_identity_changed");
+  const state = await getPageState(command.tabId);
+  if (state.session !== command.session || !state.documentId) throw new Error("page_identity_unavailable");
+  if (state.composerClean !== true) throw new Error("composer_not_clean");
+  if (!state.ready || state.generating) throw new Error("page_not_idle");
+  await reportBrowserInventory();
+  command.executionFenced = true;
+  const fence = await httpJson("POST", `/internal/session-controls/${encodeURIComponent(command.operationId)}/fence`,
+    { owner: command.owner, token: command.token, generation, documentId: state.documentId });
+  if (!fence.execute) throw new Error("close_outcome_unknown");
+  tab = await chrome.tabs.get(command.tabId).catch(() => null);
+  if (!tab || !controlRouteMatches(tab, command.target)) throw Object.assign(new Error("session_identity_changed"), { definitelyBlocked: true });
+  const check = await sendTabMessage(command.tabId, { type: "check-close", expectedSession: command.session,
+    documentId: state.documentId }, PAGE_STATE_SENDMSG_TIMEOUT_MS, "check-close");
+  if (check?.error || check?.closeAllowed !== true) throw Object.assign(new Error(check?.error ?? "page_identity_unavailable"), { definitelyBlocked: true });
+  if (Date.now() >= command.expiresAt) throw new Error("close_outcome_unknown");
+  await chrome.tabs.remove(command.tabId);
+  if (await chrome.tabs.get(command.tabId).catch(() => null)) throw new Error("close_outcome_unknown");
+  await reportBrowserInventory();
+  return { action: "page_closed", suspended: true, tabId: command.tabId };
+}
 
 async function executeSessionControl(command) {
+  if (command.kind === "open") return executeOpenControl(command);
+  if (command.kind === "close") return executeCloseControl(command);
   if (command.kind === "refresh") return executeRefreshControl(command);
   if (command.kind === "stop") return executeStopControl(command);
   if (command.kind !== "recover") throw new Error("unsupported_control");
@@ -645,7 +783,7 @@ async function processSessionControls() {
     try { outcome = { state: "succeeded", result: await executeSessionControl(command) }; }
     catch (e) {
       const uncertain = !e.definitelyBlocked && (command.executionFenced || command.state === "executing");
-      outcome = { state: uncertain || e.message === "refresh_outcome_unknown" ? "unknown" : "blocked", error: e.message };
+      outcome = { state: uncertain || /^(refresh|open|close)_outcome_unknown$/.test(e.message) ? "unknown" : "blocked", error: e.message };
     }
     await httpJson("POST", `/internal/session-controls/${encodeURIComponent(command.operationId)}/finish`,
       { owner, token: command.token, ...outcome });
@@ -2024,6 +2162,9 @@ async function ensureAlarms() {
 
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === POLL_ALARM_NAME) {
+    void processSessionControls();
+    void reportSessionSnapshots();
+    void reportBrowserInventory().catch(error => dlog("browser inventory", error));
     void processSessionCreations();
     void reconcileInflight();
     void pollPendingReplies();

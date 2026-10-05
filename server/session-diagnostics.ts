@@ -3,6 +3,7 @@ import type { Db } from "./db.js";
 import type { TaskStore } from "./task-store.js";
 import { createRequire } from "node:module";
 import { BrowserInstances, browserInstancesRouter } from "./browser-instances.js";
+import { projectKey } from "./session-registry.js";
 
 const serverVersion: string = createRequire(import.meta.url)("../package.json").version;
 
@@ -20,6 +21,11 @@ export class SessionDiagnostics {
         !Number.isSafeInteger(body.tabId) || body.tabId < 0 || typeof body.session !== "string" ||
         !this.store.registry.get(body.session)) throw new Error("invalid_snapshot");
     const bool = (x: unknown) => typeof x === "boolean" ? x : null;
+    const ref = this.store.registry.get(body.session)!;
+    // Legacy manual chats did not store their Project. Learn it only from a
+    // responsive page that confirms the already registered conversation.
+    if (!ref.initial_task && body.protocol === 1 && body.conversationId === ref.conversation && projectKey(body.projectId))
+      this.db.prepare("UPDATE session_refs SET project=? WHERE ref=? AND project IS NULL").run(projectKey(body.projectId), ref.ref);
     // Whitelist fields: composer text, task prompts, URLs and credentials never leave the page.
     const payload = { owner: body.owner, tabId: body.tabId,
       generation: Number.isSafeInteger(body.generation) ? body.generation : null,

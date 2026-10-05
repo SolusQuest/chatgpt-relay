@@ -1211,6 +1211,12 @@
             capabilities: { composer: !!findInput(),
               userMessages: getUserMessages().length > 0 ? true : null,
               assistantMessages: getAssistantMessages().length > 0 ? true : null } });
+        } else if (msg.type === "check-close") {
+          const state = getPageReadiness();
+          if (msg.expectedSession !== state.session || msg.documentId !== documentId) throw new Error("session_identity_changed");
+          if (state.composerClean !== true) throw new Error("composer_not_clean");
+          if (!state.ready || state.generating || readInflight()?.taskId) throw new Error("page_not_idle");
+          sendResponse({ closeAllowed: true });
         } else if (msg.type === "refresh-page") {
           const state = getPageReadiness();
           if (msg.expectedSession !== state.session || msg.documentId !== documentId) throw new Error("session_identity_changed");

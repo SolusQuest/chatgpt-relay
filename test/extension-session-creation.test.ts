@@ -63,6 +63,94 @@ async function worker(commandState = "claimed", existing = false, discovery = fa
     message:(msg:any,tabId=7)=>new Promise<any>(resolve=>bridge(msg,{tab:{id:tabId}},resolve)) };
 }
 
+test("instance inventory reports without page scripts, including an empty complete inventory", async () => {
+  const w = await worker();
+  const reports = await vm.runInContext(`(async()=>{
+    const reports=[];
+    chrome.tabs.query=async()=>[];
+    chrome.tabs.sendMessage=async()=>{throw new Error('must not probe a page');};
+    httpJson=async(method,url,body)=>{reports.push({url,body});return {};};
+    await reportBrowserInventory();
+    chrome.tabs.query=async()=>[{id:7,url:'https://chatgpt.com/g/g-p-'+ 'a'.repeat(32) +'-name/c/6ac0da0c-f304-83e8-ac0f-25235ca1d760?secret=PRIVATE',status:'loading'}];
+    await reportBrowserInventory();
+    return reports;
+  })()`, w.context);
+  assert.equal(reports[0].body.tabs.length, 0);
+  assert.equal(reports[1].body.tabs[0].projectId, "g-p-" + "a".repeat(32));
+  assert.equal(reports[1].body.tabs[0].loading, true);
+  assert.ok(reports[1].body.revision > reports[0].body.revision);
+  assert.ok(!JSON.stringify(reports).includes("PRIVATE"));
+});
+
+for (const mode of ["new", "reused", "resume-marked", "resume-missing", "ambiguous", "old-generation", "project"]) {
+  test(`open existing conversation preserves identity and does not replay: ${mode}`, async () => {
+    const w = await worker();
+    const result = await vm.runInContext(`(async()=>{
+      const id='6ac0da0c-f304-83e8-ac0f-25235ca1d760', mode=${JSON.stringify(mode)};
+      const generation=await inventoryGeneration();
+      const target={generation:mode==='old-generation'?generation-1:generation,conversationId:id,projectId:mode==='project'?'g-p-'+'a'.repeat(32):null};
+      const command={operationId:'open-existing',owner:'browser',token:'token',session:'sr_original',target,
+        state:mode.startsWith('resume')?'executing':'claimed',tabId:null,expiresAt:Date.now()+1000};
+      let created=0, sends=0, checkpoint=0;
+      const url='https://chatgpt.com/c/'+id;
+      let tabs=mode==='reused'?[{id:7,url}]:mode==='ambiguous'?[{id:7,url},{id:8,url}]:
+        mode==='resume-marked'?[{id:7,url:url+'#relay-open=open-existing'}]:[];
+      chrome.tabs.query=async()=>tabs;
+      chrome.tabs.get=async(tabId)=>{const tab=tabs.find(t=>t.id===tabId);if(!tab)throw new Error('missing');return tab;};
+      chrome.tabs.create=async options=>{created++;const tab={id:9,...options};tabs.push(tab);return tab;};
+      chrome.tabs.sendMessage=async()=>{sends++;throw new Error('unexpected prompt dispatch');};
+      getTabSession=async()=> 'sr_original';
+      getPageState=async()=>({session:'sr_original',documentId:'original',ready:true});
+      httpJson=async(method,url,body)=>{if(url.endsWith('/record-tab'))checkpoint++;return {execute:true};};
+      try {const outcome=await executeOpenControl(command);return {created,sends,checkpoint,outcome,tabs};}
+      catch(error){return {created,sends,checkpoint,error:error.message};}
+    })()`, w.context);
+    assert.equal(result.sends, 0);
+    assert.equal(result.created, mode === "new" || mode === "project" ? 1 : 0);
+    if (mode === "resume-missing") assert.equal(result.error, "open_outcome_unknown");
+    else if (mode === "ambiguous") assert.equal(result.error, "page_ambiguous");
+    else if (mode === "old-generation") assert.equal(result.error, "instance_generation_changed");
+    else {
+      assert.equal(result.error, undefined);
+      assert.equal(result.outcome.relayReady, true);
+      if (result.created) {
+        assert.equal(result.checkpoint, 1);
+        assert.equal(result.tabs[0].active, false);
+      }
+      if (mode === "project") assert.ok(result.tabs[0].url.includes("/g/g-p-"));
+    }
+  });
+}
+
+for (const mode of ["idle", "draft", "generating", "draft-after-fence", "navigation", "resume-present", "resume-missing", "old-generation", "ambiguous"]) {
+  test(`close checks fresh page evidence and never repeats removal: ${mode}`, async () => {
+    const w = await worker();
+    const result = await vm.runInContext(`(async()=>{
+      const id='6ac0da0c-f304-83e8-ac0f-25235ca1d760',mode=${JSON.stringify(mode)};
+      const generation=await inventoryGeneration();
+      const command={operationId:'close-existing',owner:'browser',token:'token',session:'sr_original',
+        target:{generation:mode==='old-generation'?generation-1:generation,conversationId:id,projectId:null},
+        state:mode.startsWith('resume')?'executing':'claimed',tabId:7,expiresAt:Date.now()+1000};
+      let removed=0,fenced=0;
+      let tabs=mode==='resume-missing'?[]:[{id:7,url:'https://chatgpt.com/c/'+id}];
+      if(mode==='ambiguous')tabs.push({id:8,url:'https://chatgpt.com/c/'+id});
+      chrome.tabs.query=async()=>tabs;
+      chrome.tabs.get=async(tabId)=>{const tab=tabs.find(t=>t.id===tabId);if(!tab)throw new Error('missing');return tab;};
+      chrome.tabs.remove=async(tabId)=>{removed++;tabs=tabs.filter(t=>t.id!==tabId);};
+      getTabSession=async()=> 'sr_original';
+      getPageState=async()=>({session:'sr_original',documentId:'original',ready:true,composerClean:mode!=='draft',generating:mode==='generating'});
+      chrome.tabs.sendMessage=async()=>mode==='draft-after-fence'?{error:'composer_not_clean'}:{closeAllowed:true};
+      httpJson=async(method,url,body)=>{if(url.endsWith('/fence')){fenced++;if(mode==='navigation')tabs[0].url='https://chatgpt.com/';}return {execute:true};};
+      try{return {outcome:await executeCloseControl(command),removed,fenced};}
+      catch(error){return {error:error.message,removed,fenced};}
+    })()`, w.context);
+    assert.equal(result.removed, mode === "idle" ? 1 : 0);
+    if (mode === "idle" || mode === "resume-missing") assert.equal(result.outcome.action, "page_closed");
+    else assert.ok(result.error);
+    if (mode === "draft" || mode === "generating") assert.equal(result.fenced, 0);
+  });
+}
+
 test("snapshot reason distinguishes ready pages from unreachable pages", async () => {
   const w = await worker();
   const reports = await vm.runInContext(`(async()=>{
