@@ -259,6 +259,7 @@ function respondStoreError(res: Response, err: unknown): Response {
       invalid_transition: 409,
       unsafe_retry_after_send_attempt: 409,
       duplicate_request: 409,
+      control_in_progress: 409,
     };
     return res.status(codeMap[err.code]).json({ error: err.code, message: err.message });
   }

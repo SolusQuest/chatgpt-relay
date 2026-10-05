@@ -93,3 +93,85 @@ test("refresh holds claims, rejects drafts and active work, and fences execution
     assert.equal(store.getTask(queued.id)!.requeueCount, 0);
   } finally { db.close(); }
 });
+
+test("open accepts both aliases, selects a unique instance without pages and survives uncertain requests", () => {
+  const db = openDatabase(":memory:");
+  try {
+    const store = new TaskStore(db, loadConfig());
+    const id = "6ac0da0c-f304-83e8-ac0f-25235ca1d760";
+    store.touchSession(id);
+    const diagnostics = new SessionDiagnostics(db, store);
+    const controls = new SessionControls(db, store, diagnostics);
+    const body = { operationId: "open-existing-1", kind: "open", session: id };
+    assert.throws(() => controls.create(body), /instance_unavailable/);
+    diagnostics.instances.report({ owner: "edge", generation: 1, revision: 1, controls: ["open", "close"], tabs: [] });
+    const operation = controls.create(body);
+    assert.equal(operation.tabId, null);
+    assert.equal(operation.instanceId, "edge");
+    assert.equal(controls.create({ ...body, session: store.registry.get(id)!.ref }).operationId, body.operationId);
+    assert.throws(() => controls.create({ ...body, instanceId: "edge" }), /operation_id_conflict/);
+    const command = controls.claim("edge")!;
+    const evidence = { owner: "edge", token: command.token, generation: 1 };
+    assert.equal(controls.fence(command.operationId, evidence).execute, true);
+    assert.equal(new SessionControls(db, store, diagnostics).fence(command.operationId, evidence).execute, false);
+    controls.finish(command.operationId, { ...evidence, state: "unknown" });
+    diagnostics.instances.report({ owner: "other", generation: 1, revision: 1, controls: ["open"], tabs: [] });
+    assert.throws(() => controls.create({ ...body, operationId: "open-existing-2" }), /instance_ambiguous/);
+    const explicit = controls.create({ ...body, operationId: "open-existing-2", instanceId: "other" });
+    assert.equal(explicit.instanceId, "other");
+    store.touchSession("not-a-conversation");
+    assert.throws(() => controls.create({ ...body, operationId: "open-existing-3", session: "not-a-conversation" }), /conversation_not_bound/);
+  } finally { db.close(); }
+});
+
+test("close rejects drafts, gates dispatch and durably suspends it only at the execution fence", () => {
+  const db = openDatabase(":memory:");
+  try {
+    const store = new TaskStore(db, loadConfig());
+    const id = "6ac0da0c-f304-83e8-ac0f-25235ca1d760";
+    store.touchSession(id);
+    const diagnostics = new SessionDiagnostics(db, store);
+    let controls = new SessionControls(db, store, diagnostics);
+    const report = { owner: "edge", generation: 1, tabId: 7, session: id, protocol: 1, ready: true, composerClean: false, generating: false };
+    diagnostics.instances.report({ owner: "edge", generation: 1, revision: 1, controls: ["close"], tabs: [{ tabId: 7, conversationId: id }] });
+    diagnostics.report(report);
+    const body = { operationId: "close-existing-1", kind: "close", session: store.registry.get(id)!.ref };
+    assert.throws(() => controls.create(body), /composer_not_clean/);
+    diagnostics.report({ ...report, composerClean: true });
+    controls.create(body);
+    const queued = store.createTask({ session: id, text: "preserved" });
+    assert.equal(store.claimNextTask(id), null);
+    assert.equal(store.isSuspended(id), false);
+    assert.throws(() => store.suspendDispatch(id, false), /Close must finish/);
+    const command = controls.claim("edge")!;
+    const evidence = { owner: "edge", token: command.token, generation: 1, documentId: "original" };
+    assert.equal(controls.fence(command.operationId, evidence).execute, true);
+    assert.equal(store.isSuspended(id), true);
+    controls = new SessionControls(db, store, diagnostics);
+    assert.equal(controls.fence(command.operationId, evidence).execute, false);
+    controls.finish(command.operationId, { ...evidence, state: "succeeded", result: { action: "page_closed", suspended: true } });
+    assert.equal(store.getTask(queued.id)!.status, "queued");
+    assert.equal(store.claimNextTask(id), null);
+    assert.equal(controls.create({ ...body, session: id }).state, "succeeded");
+    store.suspendDispatch(id, false);
+    assert.equal(store.claimNextTask(id)!.id, queued.id);
+  } finally { db.close(); }
+});
+
+test("an old page operation cannot execute against a new worker generation", () => {
+  const db = openDatabase(":memory:");
+  try {
+    const store = new TaskStore(db, loadConfig());
+    const id = "6ac0da0c-f304-83e8-ac0f-25235ca1d760";
+    store.touchSession(id);
+    const diagnostics = new SessionDiagnostics(db, store);
+    const controls = new SessionControls(db, store, diagnostics);
+    const report = { owner: "edge", generation: 1, revision: 1, controls: ["open"], tabs: [] };
+    diagnostics.instances.report(report);
+    controls.create({ operationId: "open-generation", kind: "open", session: id });
+    const command = controls.claim("edge")!;
+    diagnostics.instances.report({ ...report, generation: 2 });
+    assert.throws(() => controls.fence(command.operationId, { owner: "edge", token: command.token, generation: 2 }), /instance_generation_changed/);
+    assert.equal(store.isSuspended(id), false);
+  } finally { db.close(); }
+});

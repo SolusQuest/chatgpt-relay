@@ -201,7 +201,9 @@ export class TaskStoreError extends Error {
       | "task_not_found"
       | "invalid_transition"
       | "unsafe_retry_after_send_attempt"
-      | "duplicate_request",
+      | "duplicate_request"
+      | "control_in_progress",
+      // Reserved for maintenance gates that cannot be released during execution.
   ) {
     super(message);
   }
@@ -802,6 +804,9 @@ export class TaskStore {
 
   suspendDispatch(id: string, suspended: boolean) {
     id = this.registry.resolve(id);
+    if (!suspended && this.db.prepare(`SELECT id FROM session_controls WHERE session=? AND kind='close'
+      AND state IN ('queued','claimed','executing') AND expires_at > ?`).get(id, Date.now()))
+      throw new TaskStoreError("Close must finish before dispatch can continue", "control_in_progress");
     this.db.prepare(`INSERT INTO session_dispatch_gate VALUES (?, ?)
       ON CONFLICT(session) DO UPDATE SET suspended=excluded.suspended`).run(id, suspended ? 1 : 0);
     this.emitter.emit(`session:${id}`);

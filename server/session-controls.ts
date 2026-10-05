@@ -4,6 +4,7 @@ import type { Db } from "./db.js";
 import type { TaskStore } from "./task-store.js";
 import type { SessionDiagnostics } from "./session-diagnostics.js";
 import { errorInfo } from "./error-info.js";
+import { CONVERSATION_ID } from "./browser-instances.js";
 
 export function installControls(db: Db) {
   db.exec(`CREATE TABLE IF NOT EXISTS session_controls (
@@ -11,11 +12,13 @@ export function installControls(db: Db) {
     kind TEXT NOT NULL, task_id TEXT, state TEXT NOT NULL, token TEXT NOT NULL,
     created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, error TEXT, result TEXT);
     CREATE INDEX IF NOT EXISTS idx_controls_session ON session_controls(session, state);`);
+  const columns = db.prepare("PRAGMA table_info(session_controls)").all() as { name: string }[];
+  if (!columns.some(column => column.name === "target_json")) db.exec("ALTER TABLE session_controls ADD COLUMN target_json TEXT");
 }
 interface ControlRow {
   id: string; session: string; owner: string; tab: number; kind: string;
   task_id: string | null; state: string; token: string; created_at: number;
-  expires_at: number; error: string | null; result: string | null;
+  expires_at: number; error: string | null; result: string | null; target_json: string | null;
 }
 export class ControlError extends Error {
   constructor(public code: string, public status = 409) { super(code); }
@@ -29,6 +32,7 @@ export class SessionControls {
   }
   view(row: ControlRow) {
     return { operationId: row.id, session: row.session, kind: row.kind, taskId: row.task_id,
+      instanceId: row.owner, tabId: row.tab < 0 ? null : row.tab,
       state: row.state, createdAt: row.created_at, expiresAt: row.expires_at, error: row.error,
       errorInfo: row.error ? errorInfo(row.error, row.task_id ? this.store.getTask(row.task_id) ?? undefined : undefined) : null,
       result: row.result ? JSON.parse(row.result) : null };
@@ -36,32 +40,63 @@ export class SessionControls {
   create(body: any) {
     this.expire();
     if (typeof body?.operationId !== "string" || !/^[a-zA-Z0-9_-]{8,100}$/.test(body.operationId) ||
-        !["recover", "refresh", "stop"].includes(body.kind) ||
-        (body.kind === "refresh" && typeof body.session !== "string") ||
-        (body.taskId != null && typeof body.taskId !== "string")) throw new ControlError("invalid_control", 400);
+        !["recover", "refresh", "stop", "open", "close"].includes(body.kind) ||
+        (["refresh", "open", "close"].includes(body.kind) && typeof body.session !== "string") ||
+        (body.taskId != null && typeof body.taskId !== "string") ||
+        (["open", "close"].includes(body.kind) && body.taskId != null) ||
+        (body.instanceId != null && (body.kind !== "open" || typeof body.instanceId !== "string" || !body.instanceId || body.instanceId.length > 200))) throw new ControlError("invalid_control", 400);
     const task = body.taskId ? this.store.getTask(body.taskId) : null;
     if (body.taskId && !task) throw new ControlError("task_not_found", 404);
-    const ref = this.store.registry.get(body.kind !== "refresh" ? task?.session ?? "" : body.session ?? "");
+    const ref = this.store.registry.get(["recover", "stop"].includes(body.kind) ? task?.session ?? "" : body.session ?? "");
     if (!ref) throw new ControlError("session_not_found", 404);
     const session = ref.canonical;
     if (task && task.session !== session) throw new ControlError("task_session_mismatch");
     const old = this.row(body.operationId);
     if (old) {
-      if (old.session !== session || old.kind !== body.kind || old.task_id !== (body.taskId ?? null)) throw new ControlError("operation_id_conflict");
+      if (old.session !== session || old.kind !== body.kind || old.task_id !== (body.taskId ?? null) ||
+          (JSON.parse(old.target_json ?? "{} ").requestedInstance ?? null) !== (body.instanceId ?? null)) throw new ControlError("operation_id_conflict");
       return this.view(old);
     }
     if (task && (task.sendAttemptedAt == null || !["in_progress", "recovering"].includes(task.status))) throw new ControlError("task_not_recoverable");
-    if (body.kind !== "refresh" && !task) throw new ControlError("task_not_found", 404);
+    if (["recover", "stop"].includes(body.kind) && !task) throw new ControlError("task_not_found", 404);
     const snapshot = this.diagnostics.inspect(session);
-    if (snapshot?.pageStatus !== "observed" || snapshot.page.protocol !== 1) throw new ControlError("page_identity_unavailable");
-    if (body.kind === "refresh") {
+    let owner: string, tab: number, target: any = null;
+    if (body.kind === "open") {
+      if (!ref.conversation || !CONVERSATION_ID.test(ref.conversation)) throw new ControlError("conversation_not_bound");
+      const all = this.diagnostics.instances.list();
+      const previousOwners = [...new Set(snapshot!.pages.map(p => p.owner))];
+      const preferred = body.instanceId ?? ref.owner ?? (previousOwners.length === 1 ? previousOwners[0] : null);
+      const candidates = all.filter(i => !i.stale && (preferred == null || i.instanceId === preferred));
+      if (candidates.length !== 1) throw new ControlError(candidates.length ? "instance_ambiguous" : "instance_unavailable");
+      const instance = candidates[0]!;
+      if (!instance.controls.includes("open")) throw new ControlError("control_unsupported");
+      const tabs = instance.tabs.filter(t => t.conversationId === ref.conversation);
+      if (tabs.length > 1) throw new ControlError("page_ambiguous");
+      owner = instance.instanceId; tab = tabs[0]?.tabId ?? -1;
+      target = { generation: instance.generation, conversationId: ref.conversation, projectId: ref.project,
+        requestedInstance: body.instanceId ?? null };
+    } else {
+      if (snapshot?.pageStatus !== "observed" || snapshot.page.protocol !== 1) throw new ControlError("page_identity_unavailable");
+      owner = snapshot.page.owner; tab = snapshot.page.tabId;
+      if (body.kind === "close") {
+        const instance = this.diagnostics.instances.list().find(i => i.instanceId === owner && !i.stale);
+        if (!instance?.controls.includes("close")) throw new ControlError("control_unsupported");
+        if (snapshot.browser.tabs.length !== 1) throw new ControlError("page_ambiguous");
+        target = { generation: instance.generation, conversationId: ref.conversation, projectId: ref.project };
+      }
+    }
+    if (["refresh", "close"].includes(body.kind)) {
+      if (!snapshot) throw new ControlError("page_identity_unavailable");
       if (snapshot.activeTaskId !== (task?.id ?? null)) throw new ControlError("session_busy");
       if (snapshot.page.composerClean !== true) throw new ControlError("composer_not_clean");
       if (!task && (snapshot.page.generating !== false || snapshot.page.ready !== true)) throw new ControlError("page_not_idle");
     }
     if (this.db.prepare("SELECT id FROM session_controls WHERE session=? AND state IN ('queued','claimed','executing')").get(session)) throw new ControlError("control_in_progress");
-    this.db.prepare("INSERT INTO session_controls VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, NULL, NULL)")
-      .run(body.operationId, session, snapshot.page.owner, snapshot.page.tabId, body.kind, task?.id ?? null, randomUUID(), Date.now(), Date.now() + 120_000);
+    this.db.prepare(`INSERT INTO session_controls
+      (id,session,owner,tab,kind,task_id,state,token,created_at,expires_at,error,result,target_json)
+      VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, NULL, NULL, ?)`)
+      .run(body.operationId, session, owner, tab, body.kind, task?.id ?? null, randomUUID(), Date.now(), Date.now() + 120_000,
+        target ? JSON.stringify(target) : null);
     return this.view(this.row(body.operationId)!);
   }
   claim(owner: string) {
@@ -69,7 +104,7 @@ export class SessionControls {
     const row = this.db.prepare("SELECT * FROM session_controls WHERE owner=? AND state IN ('queued','claimed','executing') ORDER BY created_at LIMIT 1").get(owner) as unknown as ControlRow | undefined;
     if (!row) return null;
     if (row.state === "queued") this.db.prepare("UPDATE session_controls SET state='claimed' WHERE id=?").run(row.id);
-    return { ...this.view(this.row(row.id)!), owner, tabId: row.tab, token: row.token };
+    return { ...this.view(this.row(row.id)!), owner, token: row.token, target: JSON.parse(row.target_json ?? "null") };
   }
   finish(id: string, body: any) {
     this.expire();
@@ -89,16 +124,30 @@ export class SessionControls {
     const row = this.row(id);
     if (!row || row.owner !== body?.owner || row.token !== body?.token) throw new ControlError("control_ownership_mismatch");
     if (row.state !== "claimed") return { ...this.view(row), execute: false };
-    if (!["refresh", "stop"].includes(row.kind)) throw new ControlError("control_has_no_side_effect_fence");
-    if (typeof body.documentId !== "string" || body.documentId.length > 100 || !body.documentId) throw new ControlError("invalid_document_id", 400);
+    if (!["refresh", "stop", "open", "close"].includes(row.kind)) throw new ControlError("control_has_no_side_effect_fence");
+    if (row.kind !== "open" && (typeof body.documentId !== "string" || body.documentId.length > 100 || !body.documentId)) throw new ControlError("invalid_document_id", 400);
+    const target = JSON.parse(row.target_json ?? "null");
+    if (target) {
+      const instance = this.diagnostics.instances.list().find(i => i.instanceId === row.owner && !i.stale);
+      // A restarted worker must obtain a new operation, after inspecting this one.
+      // Never apply an old numeric tab ID to a new browser/worker generation.
+      if (!instance || instance.generation !== target.generation || body.generation !== target.generation) throw new ControlError("instance_generation_changed");
+    }
     if (row.kind === "stop" && body.submittedUserMessageId != null &&
         (typeof body.submittedUserMessageId !== "string" || !body.submittedUserMessageId || body.submittedUserMessageId.length > 200))
       throw new ControlError("invalid_submitted_user_message_id", 400);
     const active = this.store.listTasks({ session: row.session, status: ["in_progress", "recovering"] })[0];
-    if ((active?.id ?? null) !== row.task_id) throw new ControlError("active_task_changed");
-    this.db.prepare("UPDATE session_controls SET state='executing', result=? WHERE id=?")
-      .run(JSON.stringify({ beforeDocumentId: body.documentId,
-        ...(row.kind === "stop" && body.submittedUserMessageId ? { submittedUserMessageId: body.submittedUserMessageId } : {}) }), id);
+    if (row.kind !== "open" && (active?.id ?? null) !== row.task_id) throw new ControlError("active_task_changed");
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (row.kind === "close") this.store.suspendDispatch(row.session, true);
+      this.db.prepare("UPDATE session_controls SET state='executing', result=? WHERE id=?")
+        .run(JSON.stringify({ ...(body.documentId ? { beforeDocumentId: body.documentId } : {}),
+          ...(row.kind === "open" ? { action: "opening_page" } : {}),
+          ...(row.kind === "close" ? { suspended: true } : {}),
+          ...(row.kind === "stop" && body.submittedUserMessageId ? { submittedUserMessageId: body.submittedUserMessageId } : {}) }), id);
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
     return { ...this.view(this.row(id)!), execute: true };
   }
 }
