@@ -58,7 +58,7 @@ Each node records at least:
 - Stable ID and stable hidden body marker.
 - Title, native issue type, milestone, and direct parent stable ID.
 - Semantic body source.
-- Direct `blocked_by` stable IDs.
+- Direct `blocked_by` stable IDs and a concrete blocking reason for each, reflected in the semantic body source.
 - Scope, non-goals, path ownership, acceptance criteria, and validation summary.
 - Owning review unit and any cross-unit contract dependencies.
 
@@ -67,6 +67,22 @@ Stable IDs never depend on GitHub issue numbers and match `^[A-Z][A-Z0-9]*(?:-[A
 The publication receipt is a separate versioned JSON document whose `schemaVersion` is `issue-graph-receipt/v1`. It records the workflow identity, source review digests, materialization digest, stable ID to repository/issue number/node ID/URL mapping, declared substitutions, the last observed remote revision and managed-field snapshot, every attempted mutation and readback, and completion state. For every issue or completion-comment creation it also records a durable create intent containing the object kind, marker, exact body hash, repository and parent identity, intended title/type/milestone/parent fields where applicable, attempt state, timestamps, returned identity, and recovery evidence. Exact-title lookup is only a bootstrap fallback and multiple matches are a hard failure.
 
 The manifest and receipt must remain valid JSON with their declared `schemaVersion`, stable identities, references, digests, and publication mapping. RFC 8785 canonicalization, a repository-pinned JSON Schema, and a reusable validator are recommended consistency tools, not execution gates. When those tools are unavailable, use one deterministic serializer for the entire workflow, encode UTF-8 without BOM with one final LF, hash the exact stored bytes, record the serialization method, and validate the required fields, enums, IDs, paths, and references. Persist receipt progress promptly after remote mutations; atomic replacement and retention of the previous revision are preferred when the environment supports them, but their absence alone does not block `auto` execution because stable-marker recovery remains mandatory.
+
+### Execution parallelism and dependency rationale
+
+Assess execution parallelism across the whole milestone when choosing leaf boundaries and dependency edges. Preserve meaningful independent work wherever the pinned design authority, independent acceptance, valid intermediate states, and ownership constraints allow it. Fine-grained leaves alone do not establish useful parallelism, and no fixed minimum concurrency is required.
+
+Every `blocked_by` edge must explain why the successor requires the predecessor's accepted result or a concrete safety or ownership prerequisite. Target the earliest independently acceptable result that actually unblocks the successor; do not make an entire tracker a prerequisite when only one of its leaves is required. Tracker membership, issue numbering, manifest order, and sequential review or publication do not establish execution dependencies. A shared path justifies a blocking edge only when the required edits cannot safely be separated or assigned non-overlapping ownership; record that constraint.
+
+Before retaining a long serial stretch, consider narrowing overly broad prerequisites, separating independent outcomes or path ownership, and making a stable common contract available earlier so independent implementations can proceed before their integration gate. Each resulting leaf must still satisfy the independent-acceptance and atomicity rules. Do not introduce placeholder outcomes, remove required validation, or exceed the pinned design authority to widen the graph.
+
+Record a concise parallelism audit in the local validation report, using stable IDs and identifying:
+
+- The longest blocking chain, major shared prerequisites, and integration gates that dominate sequencing.
+- Representative groups of meaningful leaves that can proceed concurrently once their actual prerequisites are satisfied, where those opportunities persist or disappear through the milestone, and any shared-path or validation-resource constraints. A few short side branches or one wide fan-out do not establish sustained parallelism.
+- Avoidable serialization corrected in the draft, concrete reasons for the remaining serial bottlenecks, and significant opportunities considered but not adopted.
+
+Mark assumptions that depend on provisional leaf detail. Chain length and candidate parallel groups describe graph structure; they do not establish elapsed time or a staffing commitment. Require the assessment and justification of material serial bottlenecks, while accepting low parallelism when the constraints are justified. Optional further optimization remains advisory under the shared applicability and proportionality rules.
 
 ### Review-field ownership and invalidation
 
@@ -77,12 +93,14 @@ The graph manifest identifies the semantic review owner of every field. A comple
 | Repository, milestone, refinement parent, design authority, graph depth, and tracker set | `trackers` |
 | Tracker stable ID, title, native type, parent, outcome boundary, and ownership envelope | `trackers` |
 | Leaf stable ID, tracker parent, native type, coarse outcome, and ownership envelope | `trackers` |
-| Exact cross-tracker dependency edges | `trackers` |
+| Exact cross-tracker dependency edges and their blocking reasons | `trackers` |
 | Leaf title, semantic body, detailed scope and non-goals, exact paths, acceptance criteria, and validation commands | `leaves:<tracker-stable-id>` |
-| Dependency edges whose endpoints are both leaves of the same tracker | `leaves:<tracker-stable-id>` |
+| Dependency edges whose endpoints are both leaves of the same tracker and their blocking reasons | `leaves:<tracker-stable-id>` |
 | Remote issue identities, declared substitutions, materialized hashes, and observed remote topology | `final-remote-graph` as verification evidence only |
 
-A leaf unit may refine its owned fields without invalidating `trackers` only while the result remains inside the frozen coarse outcome and ownership envelope. Changing a leaf identity, parent, type, coarse outcome, ownership envelope, or cross-tracker edge invalidates `trackers` and every already-reviewed affected leaf unit. Changing an intra-tracker edge or another leaf-owned field invalidates that leaf unit and any already-reviewed unit that declared it as a frozen dependency. `final-remote-graph` never owns product semantics and cannot authorize a scope, ownership, acceptance, or dependency change.
+A leaf unit may refine its owned fields without invalidating `trackers` only while the result remains inside the frozen coarse outcome and ownership envelope. Changing a leaf identity, parent, type, coarse outcome, ownership envelope, cross-tracker edge, or that edge's blocking reason invalidates `trackers` and every already-reviewed affected leaf unit. Changing an intra-tracker edge, its blocking reason, or another leaf-owned field invalidates that leaf unit and any already-reviewed unit that declared it as a frozen dependency. `final-remote-graph` never owns product semantics and cannot authorize a scope, ownership, acceptance, or dependency change.
+
+The parallelism audit is derived review evidence. Refresh it when leaf boundaries, dependencies, their blocking reasons, or path ownership change. Apply the existing review-unit invalidation rules to the changed semantic fields; refreshing derived evidence alone does not freeze provisional context or create another review unit.
 
 ## Review units and convergence
 
@@ -122,7 +140,7 @@ Complete the re-entry wave before dependent materialization or final-graph revie
 Store visible workflow artifacts in a task-specific working directory outside the issue bodies. Preserve at least:
 
 - Authority record and permission record.
-- Graph manifest and local validation report.
+- Graph manifest and local validation report, including the parallelism audit.
 - Complete tracker and leaf body sources.
 - Per-unit review snapshot manifest, Relay prompts, task IDs, replies, finding ledger, revision summary, verdict, and continuation decision.
 - Publication receipt and stable-ID materialization map.
@@ -165,9 +183,11 @@ Draft all tracker bodies and enough leaf outlines to audit tracker coverage and 
 - Every parent and dependency endpoint exists in the manifest.
 - Every leaf has exactly one tracker parent and the configured maximum depth is respected.
 - The dependency graph is acyclic and has an executable order.
+- Every blocking edge has a concrete prerequisite or ownership reason; hierarchy and drafting or publication order have not introduced unsupported dependencies.
 - Tracker coverage has no unowned leaf and no overlapping responsibility without an explicit handoff.
 - Every leaf satisfies the smallest independently acceptable unit, focused-PR, and split rules; any retained grouping of candidate outcomes has a concrete acceptance or atomicity reason.
 - Shared paths have a declared owner and sequencing edge where required.
+- The whole-graph parallelism audit satisfies the execution-parallelism contract, with provisional assumptions distinguished from frozen constraints and material serial bottlenecks justified.
 - Titles do not collide with each other or with multiple remote issues.
 - Bodies contain no undeclared symbolic GitHub issue-number substitutions.
 - The manifest and any existing receipt satisfy their versioned contract, reference integrity, normalized-path, enum, field-ownership, and canonical-digest rules.
@@ -179,19 +199,19 @@ Local validation is a precondition for Relay review, not a substitute for it. Sa
 The `trackers` review snapshot contains:
 
 - Invocation, authority record, project constraint profile, and permission record.
-- Complete graph manifest with explicit field ownership/status and the local validation report.
+- Complete graph manifest with explicit field ownership/status and the local validation report, including the whole-graph parallelism audit.
 - Complete tracker bodies.
-- All leaf outlines needed to evaluate tracker coverage, overlap, leaf granularity, and split boundaries.
+- All leaf outlines needed to evaluate tracker coverage, overlap, leaf granularity, split boundaries, and meaningful parallel work.
 - Relevant issue templates and cross-repository contracts that materially constrain publication.
 
-The Relay prompt must identify the exact review unit and `reviewDigest`; distinguish tracker-owned frozen fields from leaf-owned provisional context; request stable blocker IDs; require a complete review of tracker coverage, scope, ownership envelopes, sequencing, graph validity, cross-tracker dependencies, and leaf partitioning into the smallest independently acceptable units under the split rules; and return exactly one artifact-specific verdict:
+The Relay prompt must identify the exact review unit and `reviewDigest`; distinguish tracker-owned frozen fields from leaf-owned provisional context; request stable blocker IDs; require a complete review of tracker coverage, scope, ownership envelopes, sequencing, graph validity, cross-tracker dependencies and their blocking reasons, whole-milestone execution parallelism under the declared assumptions, and leaf partitioning into the smallest independently acceptable units under the split rules; and return exactly one artifact-specific verdict:
 
 ```text
 TRACKER_BATCH_READY
 TRACKER_BATCH_NOT_READY
 ```
 
-The actual prompt sent to Relay must also communicate the shared applicability, finding-lineage, and final-convergence contract sufficiently for the remote reviewer; a local Markdown link alone is not context. Do not duplicate the Relay task lifecycle or agent continuation rules in this workflow.
+The actual prompt sent to Relay must also communicate the shared applicability, finding-lineage, and final-convergence contract sufficiently for the remote reviewer. Include the execution-parallelism contract and its distinction between unsupported serialization, justified low parallelism, and optional optimization, without imposing a minimum concurrency. A local Markdown link alone is not context. Do not duplicate the Relay task lifecycle or agent continuation rules in this workflow.
 
 Run the unit through the shared three-round convergence protocol. When the continuation decision is `CONTINUE`, freeze the tracker review snapshot and digest. Otherwise return the selected mode's checkpoint or `BLOCKED_HANDOFF` without publishing trackers.
 
@@ -241,10 +261,10 @@ Read every tracker back and compare the remote body with the materialized file, 
 Process trackers in the manifest's declared order. For each tracker:
 
 1. Draft the complete bodies for all of its direct leaves.
-2. Fill only fields owned by `leaves:<tracker-stable-id>`, preserve every frozen tracker-owned field, update the manifest revision and local graph validation, and prepare a split audit mapping tracker outcomes to leaves, focused PRs, path owners, dependencies, acceptance criteria, and validation commands. Include any acceptance or atomicity constraint used to justify keeping candidate outcomes together.
-3. Build the `leaves:<tracker-stable-id>` review snapshot with the frozen tracker contract, complete current graph manifest, all leaf bodies in the unit, the split audit, and every cross-unit contract required to judge them.
+2. Fill only fields owned by `leaves:<tracker-stable-id>`, preserve every frozen tracker-owned field, update the manifest revision and local graph validation, and prepare a split audit mapping tracker outcomes to leaves, focused PRs, path owners, dependencies and their blocking reasons, acceptance criteria, and validation commands. Include any acceptance or atomicity constraint used to justify keeping candidate outcomes together. Refresh the whole-graph parallelism audit as exact paths and intra-tracker dependencies replace provisional assumptions.
+3. Build the `leaves:<tracker-stable-id>` review snapshot with the frozen tracker contract, complete current graph manifest, all leaf bodies in the unit, the split audit, refreshed parallelism audit, and every cross-unit contract required to judge them.
 4. Generate and record the unit `reviewDigest`.
-5. Ask Relay to review the leaf-owned fields against the frozen tracker outcome and ownership envelope and recheck leaf granularity against the smallest independently acceptable unit and split rules. It must report a required split that changes frozen tracker-owned fields, or any other proven tracker-owned or cross-tracker contradiction, as an explicit cross-unit blocker rather than silently redesigning the tracker contract. Request the complete blocker set with stable unit-scoped IDs and exactly one verdict:
+5. Ask Relay to review the leaf-owned fields against the frozen tracker outcome and ownership envelope, recheck leaf granularity against the smallest independently acceptable unit and split rules, and verify dependency reasons and the updated parallelism audit against the detailed outcomes, path ownership, and validation constraints. It must report a required split or parallelism correction that changes frozen tracker-owned fields, or any other proven tracker-owned or cross-tracker contradiction, as an explicit cross-unit blocker rather than silently redesigning the tracker contract. Apply the execution-parallelism contract without imposing a minimum concurrency or treating optional optimization as a blocker. Request the complete blocker set with stable unit-scoped IDs and exactly one verdict:
 
 ```text
 <TRACKER_STABLE_ID>_LEAF_BATCH_READY
@@ -300,10 +320,13 @@ The `final-remote-graph` review snapshot contains:
 - Frozen unit manifests, digests, Relay task IDs, verdicts, continuation decisions, and finding-ledger summary.
 - Stable-ID to remote-identity publication receipt.
 - Complete actual parent-child and dependency topology.
+- Final parallelism audit derived from the frozen graph, retaining planning assumptions and justified serial bottlenecks.
 - Remote verification report and `materializationDigest`.
 - Proposed completion comment and proposed refinement-parent state transition.
 
 This unit reviews the actual remote result. It checks publication lineage, graph parity, cycles, unexpected relationships, verification sufficiency, completion-record truthfulness, and closure authority. It must not restart tracker or leaf design, reopen resolved findings without new authoritative evidence, or treat optional execution improvements as publication blockers.
+
+Parallelism review in this unit is limited to consistency with the frozen design and its audit. It does not introduce another graph-optimization gate after publication.
 
 Request stable `GRAPH-*` blocker IDs and exactly one verdict:
 
