@@ -3,176 +3,105 @@
 **Required shared rules**:
 
 - Relay mechanics: [`agent-instructions.md`](../agent-instructions.md)
-- Execution modes and session selection: [execution modes](./README.md#execution-modes) and [session selection](./README.md#relay-session-selection)
-- Stage handoffs and reference loading: [stage handoffs and delegation](./README.md#stage-handoffs-and-delegation)
-- Review protocol: [`review-convergence.md`](./review-convergence.md)
+- [Execution modes](./README.md#execution-modes), [session selection](./README.md#relay-session-selection), and [stage handoffs/reference loading](./README.md#stage-handoffs-and-delegation)
+- Review protocol and prompt base: [`review-convergence.md`](./review-convergence.md)
 
 **Boundary references — read only when applicable**:
 
-- [`plan.md`](./plan.md): when selecting or invoking Plan. Producing a standalone `DESIGN_READY` handoff does not require reading the downstream stage.
-- [`issue-to-pr.md`](./issue-to-pr.md): when coordinating that full composition. A delegated Design agent inherits its invocation context and authority through the handoff.
+- [`plan.md`](./plan.md): selecting/invoking Plan; a standalone handoff requires no downstream procedure.
+- [`issue-to-pr.md`](./issue-to-pr.md): coordinating the full composition; delegated Design inherits invocation/authority through its handoff.
 
 ## Purpose and routing
 
-Use this stage to turn a placeholder, rough draft, or ambiguous problem report into an explicit agent-ready issue contract, review it, and publish it through the selected mode's checkpoint. Design owns the existing decision-discovery and issue-refinement process; the stage name adds no separate architecture document or additional review gate.
+Turn a rough or ambiguous issue into a reviewed, published agent-ready contract. Design owns decision discovery and refinement; it adds no architecture document or review gate. Route settled issues to [Plan](./plan.md) from actual repository/issue context, not labels. Exclude trivial edits, exploration without an implementation contract, and work where the user declines refinement or Relay.
 
-Use [`plan.md`](./plan.md) directly when scope, non-goals, acceptance criteria, dependencies, and product decisions are already settled. Do not use this stage for trivial edits, exploratory learning without an implementation contract, or when the user explicitly declines refinement or relay. Route from the actual issue and repository context, not labels.
-
-A standalone invocation ends at `DESIGN_READY` or `BLOCKED_HANDOFF`. A composing workflow consumes `DESIGN_READY` and continues its authorized downstream stages without adding a user checkpoint. `DESIGN_READY` reports a published, read-back agent-ready issue; it is not a PR readiness verdict or authorization to implement.
+Standalone Design ends at `DESIGN_READY` or `BLOCKED_HANDOFF`. Compositions continue authorized stages without another checkpoint. `DESIGN_READY` requires publication/readback and grants neither implementation authority nor PR readiness.
 
 ## Preconditions
 
-- The full issue is available by URL or complete text.
-- Repository instructions and relevant product, architecture, and contract sources are accessible.
-- The user authorized refinement, publication under the selected mode, and relay review.
-- Resolve or inherit the task-specific session using the shared [session-selection rule](./README.md#relay-session-selection), and require it to be usable before each submission.
-- Record or inherit the execution mode and [stage handoff](./README.md#stage-handoffs-and-delegation). Preserve any existing contract-review cycle, ledger, plan-review budget, and fallback-used record.
+- Complete issue URL/text and accessible repository instructions, product, architecture, and contract sources.
+- Authority for refinement, mode-aware publication, and Relay review.
+- Resolve/inherit mode, task-specific session, and shared handoff; require a usable session before each submission. Preserve established contract cycles, ledgers, plan budgets, and fallback usage.
 
 ## Phase 1 — Independent decision discovery
 
-Identify every material decision required for an implementable issue contract.
+Use `agent-instructions.md`'s independent-discussion barriers:
 
-Use the independent-discussion barriers from `agent-instructions.md`:
+1. Submit facts/issue URL first, asking Relay for blocking decisions and relevant project-stage facts.
+2. Inspect the repository and persist the agent's own decision list and evidence-based [constraint profile](./review-convergence.md#applicability-and-proportionality) before reading the reply.
+3. Compare shared, agent-only, Relay-only, and conflicting points; verify repository claims and discuss material gaps.
 
-1. Submit the issue or accessible URL to relay first and request an independent list of blocking decision points plus the project-stage facts needed to judge them.
-2. Before reading the reply, inspect the repository and persist the agent's own decision list and project constraint profile to a visible draft.
-3. Compare overlap, agent-only points, relay-only points, and substantive conflicts.
-4. Verify repository claims and discuss only material gaps.
+Cover scope/non-goals, testable acceptance, public contracts/compatibility, migration/rollout, failure/operations, security/privacy/performance, dependencies/sequencing, and relevant naming. The profile is a concise evidence summary of dimensions affecting this contract, not a new design document or a reason to add unsupported release-grade machinery.
 
-Cover scope and non-goals, testable acceptance criteria, public contracts and compatibility, migration or rollout, failure and operational constraints, security/privacy/performance, dependencies, sequencing, and naming where relevant.
+Stop when drafting has no blocking decision, another round adds no substance, or only wording/optional follow-ups remain. Allow at most three discussion follow-ups, including in `auto`.
 
-The project constraint profile is a concise evidence summary, not a new design document. Record only dimensions that can change the current contract: release state and milestone purpose; real or committed near-term consumers and deployments; persisted production data or long-lived artifacts; compatibility/versioning commitments; reversibility and failure cost; and security, privacy, or regulatory boundaries. Use it to select the minimum sufficient durability for the current stage. Do not introduce release-grade versioning, migration, deprecation, compatibility, or operational machinery merely because it is generally useful.
-
-Stop when no unresolved decision blocks drafting, another round adds no substantive point, or remaining differences are wording or optional follow-ups. Use at most three discussion follow-up rounds; `auto` does not add more.
-
-User-owned product, policy, UX, public-contract, and scope trade-offs cannot be silently resolved unless the user explicitly delegated that boundary. Batch unresolved decisions and substantive disagreements into one checkpoint in `default`; in `auto`, resolve repository facts and deterministic in-scope choices from evidence, then return one `BLOCKED_HANDOFF` if an authority blocker or absolute disagreement remains.
+Undelegated product, policy, UX, public-contract, and scope trade-offs remain user-owned. Batch unresolved decisions/disagreements into one `default` checkpoint. In `auto`, resolve facts and deterministic in-scope choices from evidence, then return one `BLOCKED_HANDOFF` for remaining authority blockers or absolute disagreement.
 
 ## Phase 2 — Draft and review the issue contract
 
-Create a visible local draft using the target repository's issue template. Include:
+Create a visible local draft from the target repository's issue template: problem/motivation; scope/exclusions/non-goals; concrete testable acceptance; dependencies/sequencing; evidence-based lifecycle/compatibility posture and currently applicable migration/security/operations; risks/deferred work; resolved implementation decisions. Required user decisions must take Phase 1's outcome, never hide under “open questions.”
 
-1. Problem and motivation.
-2. Scope, exclusions, and non-goals.
-3. Concrete, testable acceptance criteria.
-4. Dependencies and sequencing.
-5. The evidence-based lifecycle/compatibility posture and only the compatibility, migration, security, and operational requirements applicable now.
-6. Risks and deferred follow-ups.
-7. Resolved decisions that prevent implementation ambiguity.
-
-Never hide a required user decision under “open questions.” Route it through the mode-aware Phase 1 outcome.
+For both prompts below, prepend the shared [review prompt base](./review-convergence.md#review-prompt-assembly) as actual text. The second submission includes the complete current body, ledger, and revision summary.
 
 ### Initial review
 
 ```text
-Act as a strict product and engineering reviewer for this refined issue body.
-
-Return the complete set of currently identifiable blockers. Check scope,
-non-goals, executable acceptance criteria, dependencies, risks, compatibility,
-and unresolved decisions. For each blocker, cite the issue section or
-authoritative source, explain the implementation ambiguity or failure, and give
-the minimum correction.
-
-Evaluate applicability before severity. A general best practice is a blocker
-only when required by the current contract or repository policy, or omission
-causes a concrete current failure for a real consumer, persisted artifact,
-security boundary, or release commitment. State that basis, affected exposure,
-failure, why this issue must address it now, and why a simpler reversible
-measure is insufficient.
-
-Also identify requirements in the draft that impose release-grade versioning,
-migration, compatibility, deprecation, or operations without current evidence;
-recommend the minimum sufficient alternative. Project maturity is evidence, not
-a blanket exemption.
-
-Separate blockers from wording, style, optional enhancements, and follow-up
-work. If no blocker remains, state that the issue is agent-ready.
+Act as a strict product and engineering reviewer of this refined issue.
+Return all currently identifiable blockers in scope, non-goals, executable
+acceptance, dependencies, risks, compatibility, and unresolved decisions.
+Cite the issue section or authoritative source and explain the implementation
+ambiguity/failure. State when the issue is agent-ready.
 
 Issue or placeholder: <url if available>
-
---- project constraint profile ---
-<evidence and unknowns>
-
---- refined issue draft ---
-<complete draft>
+Project constraint profile: <evidence and unknowns>
+Refined issue draft: <complete text>
 ```
 
-Apply the three-round budget and stable finding ledger from `review-convergence.md`. For later findings:
-
-- `critical-late-finding` requires the exact issue section or source, resulting ambiguity or failure, affected acceptance criterion or contract boundary, and why this issue must resolve it.
-- `user-decision` identifies a material trade-off outside agent authority.
-- `late-nonblocking` and `out-of-scope` are recorded as exclusions, deferred work, or remaining risk.
-
-The agent independently applies the shared applicability test to every relay finding. A repeated general recommendation without new authority or failure evidence does not reopen a rejected or deferred finding. If the draft's explicit frozen requirement is materially disproportionate, record one contract-applicability challenge rather than silently weakening it.
-
-The second submission includes the complete current body, ledger, and revision summary.
+Use shared budgets, applicability, and finding lineage. A `critical-late-finding` requires its exact section/source, resulting ambiguity/failure, affected acceptance or contract boundary, and why this issue must resolve it. `user-decision` identifies an unauthorized material trade-off; record other non-blocking work as exclusions, deferred work, or risk. Challenge materially disproportionate frozen requirements through the shared contract-applicability rule.
 
 ### Third submission — final contract convergence
 
 ```text
-This is the final contract-convergence review. Do not restart product discovery,
-reopen resolved findings without evidence, or add optional scope.
-
-Review only unresolved ledger findings, revision regressions, new authoritative
-evidence, and proven critical late findings. For each blocker, give its stable
-ID, classification, exact source, concrete implementation failure, why it blocks
-an agent-ready contract, current applicability evidence, and the minimum
-sufficient correction or user decision. A generic best practice without a real
-current exposure and failure is non-blocking.
+This is final contract convergence. Do not restart discovery or full review,
+reopen resolved findings without evidence, or add optional scope. Review only
+unresolved findings, blocker regressions, new authoritative evidence, and proven
+critical late findings. Cite each blocker's exact section/source and affected
+acceptance criterion or contract boundary; explain why it prevents an agent-ready
+contract, retain its ID/classification, and give the correction or user decision.
 
 Return exactly one verdict:
 - READY: no admissible contract blocker remains.
 - CORRECT: only deterministic contract-local corrections remain.
 - ESCALATE: a user-owned decision or fundamental re-draft is required.
-
 Do not request another full review.
 
 Issue or placeholder: <url if available>
-
---- project constraint profile ---
-<evidence and unknowns>
-
---- finding ledger ---
-<complete ledger>
-
---- revision summary ---
-<changes since the previous round>
-
---- refined issue draft ---
-<complete draft>
+Project constraint profile: <evidence and unknowns>
+Finding ledger: <complete ledger>
+Revision summary: <changes since previous round>
+Refined issue draft: <complete text>
 ```
 
-After the third response, apply the shared continuation protocol:
+Apply shared continuation: `READY` proceeds; `CORRECT` permits minimum verified contract-local corrections and ledger update without unrestricted re-review. User decisions/absolute disagreement take one `default` checkpoint or `auto` blocked handoff. Fundamental re-draft requires user agreement in `default` and no automatic reset in `auto`.
 
-- `READY` → proceed to Phase 3.
-- `CORRECT` → make and verify the minimum contract-local correction, update the ledger, then proceed without another unrestricted review.
-- User-owned decision or absolute disagreement → one checkpoint in `default`, or `BLOCKED_HANDOFF` in `auto`.
-- Fundamental re-draft → require user agreement in `default`; do not reset automatically in `auto`.
-
-The budget belongs to the current contract revision cycle. Only a user-requested or user-authorized material contract change starts a new cycle; carry the ledger and record the reason. Editorial changes do not reset it.
+Only a user-requested/authorized material contract change starts a new contract cycle; retain ledger/reason. Editorial changes do not reset it.
 
 ## Phase 3 — Mode-aware publication
 
 ### `default`
 
-Present the exact reviewed or deterministically corrected body, review status, and remaining risks.
-
-- Approved → publish with a body file while preserving unrelated metadata.
-- Editorial request → apply it, verify unchanged semantics, and present the exact body again without resetting review.
-- Material contract request → record a new authorized cycle and return to Phase 1 or 2.
-- Aborted → leave the draft, ledger, and decision record available.
+Present the exact reviewed or verified corrected body, review status, and risks. Approval permits body-file publication while preserving unrelated metadata. Editorial requests require semantic verification and exact-body presentation again; material requests record an authorized new cycle and return to Phase 1/2. Abort preserves draft, ledger, and decision record.
 
 ### `auto`
 
-Publish with a body file without routine exact-body approval only when no `user-decision`, authority blocker, absolute disagreement, or agent-verified contract blocker remains; the body stays within stated intent and authorized scope; and deterministic post-review corrections and risks are recorded. Otherwise do not publish the material change and return one `BLOCKED_HANDOFF`.
+Publish with a body file without routine approval only when scope/intent/authority hold, no user decision, authority blocker, absolute disagreement, or verified contract blocker remains, and post-review corrections/risks are recorded. Otherwise return one `BLOCKED_HANDOFF` without publishing the material change.
 
-After publication, read the remote issue back and verify rendered body, links, checklists, issue type, milestone, and every intentionally changed field. Correct publication errors without changing the approved or pre-authorized contract.
+Read back the remote body, links, checklists, issue type, milestone, and intentionally changed fields. Correct publication errors without changing the approved/pre-authorized contract.
 
 ## Phase 4 — Stage handoff
 
-The remote issue is now authoritative. Return `DESIGN_READY` only after contract review and continuation, mode-aware publication, and remote readback have passed. Preserve the exact published issue revision, resolved decisions, project constraint profile, review evidence and continuation decision, finding ledger, consumed review rounds, risks, and deferred work in the shared [handoff record](./README.md#stage-handoffs-and-delegation).
+The read-back remote issue becomes authoritative. Return `DESIGN_READY` only after review/continuation, mode-aware publication, and verification pass. Persist the shared [handoff](./README.md#stage-handoffs-and-delegation), including exact published revision, decisions/profile, review/correction evidence, continuation, ledger/budgets, risks, and deferred work.
 
-When entered through Plan's [automatic readiness fallback](./plan.md#automatic-readiness-fallback), carry the originating phase, fallback-used record, repository/issue and workspace/branch identity, existing plan, all stage budgets, and evidence back to the invoking Plan stage. Resume with the remaining applicable budget; this return does not authorize a new plan cycle or another automatic fallback.
+When entered through Plan's [fallback](./plan.md#automatic-readiness-fallback), return its origin/phase, fallback-used record, repository/issue/workspace/branch, existing plan, all budgets, and evidence to the original Plan stage. Use remaining budgets; no new plan cycle or automatic second fallback.
 
-For standalone use, stop after the handoff. In a composition, return to the caller for its next stage, using the same session and mode and preserving the approved or pre-authorized scope. Do not repeat refinement or invoke the full issue-to-PR composition from this stage.
-
-If blocked, follow the selected mode's consolidated checkpoint or `BLOCKED_HANDOFF` rule and preserve the draft, ledger, remaining budgets, and evidence. Never let agent-relay agreement replace user product authority, silently expand scope, retry relay automatically after pause/captcha, or duplicate downstream PR rules here.
+Standalone use stops here; composition returns to its authorized caller with the same session/mode/scope, without repeated refinement or restarting `issue-to-pr`. Blocked outcomes preserve draft, ledger, budgets, and evidence under the shared mode rules.

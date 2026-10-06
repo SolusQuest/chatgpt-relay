@@ -1,93 +1,95 @@
 # Bounded review convergence
 
-This is the shared protocol for workflow phases that declare a bounded relay review. It defines round accounting, finding lineage, and continuation rules. Each workflow still owns its artifact-specific prompt, evidence standard, verdicts, checkpoints, and any targeted closure procedure.
+Shared rules for bounded Relay review: round accounting, finding lineage, applicability, and continuation. Each workflow owns its artifact-specific evidence, verdicts, checkpoints, submission timing, and targeted closure exceptions.
 
 ## Review budget
 
-A bounded artifact review allows at most three full submissions:
+Allow at most three full substantive submissions: initial comprehensive review, correction/regression review, and final convergence. Never start a fourth unrestricted review or treat exhausted budget as approval.
 
-1. Initial comprehensive review.
-2. Correction and regression review.
-3. Final convergence review.
+A round is consumed only by a substantive review of the requested artifact. Access failure, pause, captcha, transport failure, clearly truncated output, and off-topic replies are execution failures under [`agent-instructions.md`](../agent-instructions.md); this distinction never permits automatic retry of paused or rate-limited sessions.
 
-A submission consumes a round only when relay returns a substantive review of the requested artifact. URL-access failure, pause, captcha, transport failure, clearly truncated output, or an off-topic response is an execution failure; follow [`agent-instructions.md`](../agent-instructions.md) recovery rules and never use this distinction to retry a paused or rate-limited session automatically.
+Where a workflow combines Relay with CI or GitHub feedback, all declared sources share one ledger and continuation decision; non-Relay gates create no separate review budget. The workflow defines correction/completion barriers and feedback cutoffs.
 
-An active workflow may define a convergence round as that relay submission plus non-relay gates for the same artifact revision, such as CI and GitHub feedback. Those gates do not create separate relay budgets. The workflow owns submission timing, correction and completion barriers, and feedback cutoffs; findings from every declared source share one ledger and one continuation decision.
-
-Ask the initial review for the complete set of currently identifiable blockers. The second submission includes the current artifact, finding ledger, revision summary, and the relevant artifact versions or diff. Relay must reconcile prior finding IDs rather than silently rename or reopen them. The third submission uses the workflow's final-convergence prompt and is not another unrestricted restart.
-
-Do not reset the budget because relay introduces a later finding, the artifact changes, a deterministic correction is made, or the workflow uses `auto`. A new full review cycle requires the explicit condition stated by the active workflow or direct user authorization; carry the prior ledger forward and record why the cycle changed.
-
-Never start a fourth unrestricted review. The limit bounds re-review; it never makes a real blocker non-blocking or turns exhausted budget into approval.
+The initial submission requests all currently identifiable blockers. The second includes the current artifact, complete ledger, revision summary, and relevant versions or diff, and reconciles prior IDs. The third uses final convergence scope. Later findings, artifact changes, deterministic corrections, and `auto` never reset a cycle. A new cycle requires the active workflow's explicit condition or direct user authorization; retain the ledger and record the reason.
 
 ## Revision evidence and workflow readiness
 
-Bind each submission, result, and verification record to its exact artifact revision or head. A relay verdict describes the reviewed artifact and available evidence; it does not by itself satisfy the workflow's CI, execution-proof, publication, or handoff gates. Pending verification is unverified, not a pass or proof of failure. The active workflow decides which evidence must precede review and which may arrive afterward.
+Bind submissions, results, and verification to exact artifact revisions or heads. A Relay verdict does not satisfy CI, execution-proof, publication, or handoff gates. Pending proof is unverified, neither a pass nor evidence of failure; the workflow determines what must precede review.
 
-Where the active workflow permits replacing a candidate before all verification completes, record the old revision as superseded and retain its submitted task IDs, observed results, pending or cancelled verification, and finding lineage. A substantive relay review still consumes its round even if CI later fails or the revision is superseded. Supersession or cancellation never refunds a round, resets the ledger, resolves a blocker, or turns incomplete evidence into approval.
+When the workflow permits early candidate replacement, mark the old revision superseded and retain task IDs, results, pending/cancelled verification, and finding lineage. Its substantive review still consumes a round even if CI fails. Supersession and cancellation never refund rounds, reset the ledger, resolve blockers, or approve incomplete evidence.
 
-Attach late findings to their original source revision, then verify their applicability to the current revision and carry unresolved problems forward under the same IDs. Evidence from an older revision cannot establish that a correction works on the current revision. The active workflow owns the observation cutoff and any required current-revision revalidation; supersession does not authorize indefinite monitoring or bypass an unresolved risk.
+Attach late findings to their source revision, verify current applicability, and carry unresolved problems under the same IDs. Old-revision evidence cannot prove a current correction. Follow the workflow's observation cutoff and revalidation rules; do not monitor indefinitely or bypass unresolved risk.
 
 ## Applicability and proportionality
 
-Before admitting any agent, relay, CI, or GitHub finding as a blocker, the agent must establish:
+Before admitting any agent, Relay, CI, or GitHub finding as a blocker, establish:
 
-1. **Authority** — the current issue, repository policy, approved design, user instruction, or another binding source requires it; or verified evidence proves a correctness, security, privacy, data, or operational failure.
-2. **Current exposure** — identify the real current or committed near-term consumer, persisted artifact, interoperability boundary, deployment, release commitment, or protected asset affected now; a hypothetical future consumer is insufficient.
-3. **Concrete failure** — state what fails if the requirement is omitted in the current artifact.
-4. **Timing and scope** — explain why the current issue, plan, or PR must address it rather than a later release gate or follow-up.
-5. **Minimum sufficient measure** — explain why a simpler, reversible, or narrower solution is insufficient.
+1. **Authority**: a binding issue, policy, design, user instruction, or verified correctness/security/privacy/data/operational failure.
+2. **Current exposure**: a real current or committed near-term consumer, persisted artifact, interoperability boundary, deployment, release commitment, or protected asset; hypothetical future use is insufficient.
+3. **Concrete failure**: what fails if the requirement is omitted.
+4. **Timing and scope**: why this artifact must address it now rather than at a later gate or follow-up.
+5. **Minimum sufficient measure**: why a simpler, reversible, or narrower correction is insufficient.
 
-Assess project maturity from repository and user evidence: release state, real consumers, persisted production data, compatibility/versioning commitments, reversibility, failure cost, security or regulatory boundaries, and the current milestone's purpose. A maturity label is neither proof of exposure nor a blanket exemption. A pre-release project may still need a small internal format discriminator or safety invariant, but it does not inherit full release-grade versioning, migration, deprecation, or operational machinery without evidence.
+Record or refresh a concise **project constraint profile** from repository and user evidence: release state and milestone purpose; current/committed near-term consumers and deployments; production data or long-lived artifacts; compatibility/versioning commitments; reversibility and failure cost; security, privacy, and regulatory boundaries. Include only dimensions affecting the current decision. Maturity is evidence, neither exposure proof nor a blanket exemption: pre-release work may need a small format discriminator or safety invariant without full release-grade versioning, migration, deprecation, or operations.
 
-A generally sound best practice that fails this test is not a current blocker. Mark it `deferred`, `out-of-scope`, or `rejected` with evidence and, when useful, record the release condition that would make it applicable. Relay may challenge the agent's assessment, but repetition or stronger wording is not new evidence. If an explicit frozen contract itself appears materially disproportionate, do not silently ignore or reinterpret it; record one contract-applicability challenge and use the active workflow's user-decision rule.
+Best practices failing this test are `deferred`, `out-of-scope`, or `rejected`, with evidence and useful future activation conditions. Repetition or stronger wording is not new evidence. If a frozen requirement is materially disproportionate, record one contract-applicability challenge and use the workflow's user-decision rule; never silently ignore or reinterpret it.
+
+## Review prompt assembly
+
+For workflow prompts that reference this base, include the following text in the actual submitted prompt, followed by the stage's review instructions, required inputs, evidence, and exact verdict set. A local link alone does not give Relay these rules.
+
+```text
+Evaluate applicability before severity. A blocker requires a binding contract
+or policy, or a verified current failure. Give its stable ID, authoritative
+basis, current exposure, concrete failure, why this artifact must address it
+now, and minimum sufficient correction; explain why a simpler reversible
+measure is insufficient. A generic best practice is not a blocker.
+
+Use the project constraint profile as evidence, not a blanket exemption.
+Identify unsupported release-grade versioning, migration, compatibility,
+deprecation, abstraction, or operations and propose the minimum sufficient
+alternative. Separate blockers from wording, style, optional hardening, and
+follow-ups. Reconcile prior IDs; do not reopen resolved, rejected, or deferred
+findings without new evidence.
+```
+
+An initial review requests the complete blocker set. Final convergence reviews only unresolved ledger findings, blocker-level revision regressions, new authoritative evidence, and proven critical late findings; it never restarts broad review or requests another full submission. Include the stage's critical-late-finding evidence requirements, complete current artifact or accessible remote exact revision, constraint profile, validation evidence, and round-specific ledger/summary/diff. Independent discussion and targeted closure use their own narrower instructions.
 
 ## Finding ledger
 
-After the initial response, maintain stable finding IDs and record:
+Maintain stable IDs after the initial response:
 
 | Field | Required content |
 |---|---|
-| Classification | Why the finding is admissible and blocking or non-blocking |
-| Basis | Acceptance criterion, contract, code path, test, CI result, or other authoritative source |
-| Applicability | `required-now`, `defer`, or `not-applicable`; blockers and disputed findings include current exposure, concrete failure, timing, and scope evidence |
-| Problem model | Violated invariant or root cause, affected in-scope surface, and whether the reported location is isolated or representative |
-| Minimum sufficient measure | For `required-now`, the narrowest adequate correction; otherwise why no current change is required and, when useful, the future activation condition |
+| Classification | Why admissible and blocking/non-blocking |
+| Basis | Authoritative criterion, contract, code, test, CI result, or other source |
+| Applicability | `required-now`, `defer`, or `not-applicable`; blockers/disputes include exposure, failure, timing, and scope |
+| Problem model | Violated invariant/root cause, affected in-scope surface, and isolated versus representative location |
+| Minimum sufficient measure | Narrowest adequate correction, or reason no current change is required and useful future activation condition |
 | Status | `open`, `resolved`, `rejected`, `deferred`, or `disputed` |
-| Artifact lineage | Reviewed revision or head and, when applicable, correction revision or head |
+| Artifact lineage | Reviewed revision/head and applicable correction revision/head |
 | Disposition | Agent action and verification evidence |
 
-Classify a finding first raised after the initial review as:
+Classify later findings as `revision-regression` (latest revision caused it), `new-evidence` (authoritative evidence not reasonably available earlier), `critical-late-finding` (discoverable earlier, now proven required-contract violation or severe failure under the workflow's high proof burden), `late-nonblocking` (optional or low-impact work), `out-of-scope`, or, where supported, `user-decision` (material trade-off outside agent authority).
 
-- `revision-regression` — directly introduced by the latest revision.
-- `new-evidence` — supported by authoritative evidence not reasonably available earlier.
-- `critical-late-finding` — discoverable earlier, but now proven to violate the artifact's required contract or create a severe failure. It must satisfy the workflow's high burden of proof.
-- `late-nonblocking` — a preference, optional hardening, low-impact risk, or follow-up that is not required for the current gate.
-- `out-of-scope` — valid work not required for the current artifact to be correct.
-- `user-decision` — when supported by the phase, a product or material trade-off the agent is not authorized to settle.
-
-Timing alone neither admits nor waives a blocker. Verify relay claims against authoritative repository evidence and apply the applicability test independently. Fix a real in-scope blocker with the minimum sufficient measure, record or defer non-blocking work, reject unsupported or context-inapplicable claims with evidence, and never expand scope silently.
+Timing neither admits nor waives a blocker. Verify Relay claims locally, independently apply applicability, fix real in-scope blockers with the minimum sufficient measure, and record/defer/reject other claims with evidence. Never silently expand scope.
 
 ## Problem-level remediation
 
-Before correcting an admitted finding, analyze the underlying problem rather than patching only the literal location described by the comment. Identify the violated invariant or root cause, reproduce or trace the concrete failure, and inspect the in-scope code paths, input classes, state transitions, and sibling artifacts governed by the same mechanism. Group findings that are different manifestations of the same cause into one correction set.
+Before correcting an admitted finding, identify the violated invariant/root cause, reproduce or trace the failure, and inspect in-scope paths, input classes, state transitions, and sibling artifacts governed by the same mechanism. Group same-cause manifestations into one correction set rather than patching only the literal commented location.
 
-The correction must address the evidenced problem class at the minimum sufficient scope. Verification must cover the reported trigger and representative same-cause cases where applicable.
-
-“Comprehensive” does not authorize unrestricted refactoring or scope expansion. Related work outside the current artifact's authority or scope must be recorded as `deferred` or `out-of-scope` with supporting evidence.
+Correct the evidenced problem class at minimum sufficient scope. Verify the reported trigger and representative same-cause cases. Record related work outside authority/scope as `deferred` or `out-of-scope`; comprehensive analysis does not authorize unrestricted refactoring.
 
 ## Final convergence and continuation
 
-The final convergence review considers only unresolved ledger findings, blocker-level regressions caused by the latest revision, new authoritative evidence, and proven critical late findings. It must use the workflow's exact verdict set.
+Use the workflow's exact final verdict set and the restricted final scope above. The agent makes the semantic continuation decision:
 
-After the final response, the agent makes the semantic decision:
+- No verified admissible blocker: continue through remaining workflow gates.
+- Deterministic correction explicitly permitted by the workflow: correct, verify, and update the ledger without another unrestricted review.
+- Authority blocker or absolute disagreement: selected mode's consolidated checkpoint or `BLOCKED_HANDOFF`.
+- Fundamental redesign or fresh broad review: the workflow's escalation rule; no automatic reset.
 
-- No agent-verified admissible blocker remains → continue.
-- A real blocker has a deterministic correction explicitly permitted by the workflow → make the minimum correction, verify it, update the ledger, and continue without another unrestricted review.
-- An authority blocker or absolute disagreement remains → use the selected execution mode's consolidated checkpoint or `BLOCKED_HANDOFF`.
-- Fundamental problems require a fresh broad review or artifact redesign → do not reset automatically; use the active workflow's escalation rule.
-
-In `auto`, do not send relay a separate request asking whether execution may continue. Record:
+In `auto`, record the following without asking Relay separately whether execution may continue:
 
 ```text
 Decision: CONTINUE | BLOCKED_HANDOFF
@@ -100,4 +102,4 @@ Evidence: <authoritative source or reproduction>
 Next action: <action>
 ```
 
-Execution mode changes checkpoint behavior, not review rigor. A real accepted blocker is fixed without a routine user checkpoint; an unsupported preference does not block; and an unresolved authority blocker, absolute disagreement, or required clean-verdict failure ends in one consolidated `BLOCKED_HANDOFF` rather than an automatic budget extension.
+Mode changes checkpoints, not rigor. Fix accepted blockers without routine approval; unsupported preferences do not block. Unresolved authority, absolute disagreement, or inability to obtain a required clean verdict produces one consolidated `BLOCKED_HANDOFF`, never automatic budget extension.
