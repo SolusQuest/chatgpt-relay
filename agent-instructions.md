@@ -1,6 +1,6 @@
 # gpt-relay agent guide
 
-gpt-relay connects an agent to the user's signed-in ChatGPT through a local SQLite queue. Prefer the root `gpt-relay` CLI (`http://127.0.0.1:8765`); use HTTP for implementation/debugging or behavior the CLI lacks. [Workflows](./workflows/README.md) own orchestration, [`api.md`](./api.md) owns HTTP/environment details, and [`task-lifecycle.md`](./task-lifecycle.md) owns the full state machine.
+gpt-relay connects an agent to the user's signed-in ChatGPT through a SQLite queue. Prefer the root `gpt-relay` CLI and its established backend binding; use HTTP for implementation/debugging or behavior the CLI lacks. [Workflows](./workflows/README.md) own orchestration, [`api.md`](./api.md) owns HTTP/environment details, and [`task-lifecycle.md`](./task-lifecycle.md) owns the full state machine.
 
 ## Core rules
 
@@ -19,6 +19,8 @@ gpt-relay sessions inspect --session-ref <ref>
 ```
 
 Resolve/inherit identity before substantial work. Confirm reachability, selected session availability, no pause, and no unexpected active task. An absent/paused supplied session blocks execution, not permission to substitute. See **New-session mode** only when creation is needed; [diagnostics/controls](#diagnose-and-control-an-existing-session) and catalog maintenance are otherwise conditional.
+
+Preserve the task's backend as well as its session. `bind` displays client configuration; `bind <host:port>` verifies and saves a server. Temporary `--server <address>` or `--local` overrides take precedence over `GPT_RELAY_URL` and saved binding. An unavailable binding never falls back to another server. With no configured backend, ordinary commands bind only a unique discovery result; zero or multiple results require an explicit choice. Do not clear or replace a task's binding merely to find an available session. `resume` retains foreign-backend or missing-task pending records without resubmitting; select their original server explicitly when observing them. `start` launches a foreground server independently of client binding. See [backend usage](./README.md#separate-cli-and-server-computers).
 
 An existing task conversation retains its supplied project context and can access user-authorized GitHub URLs. Do not repeatedly resend background/full diffs unless inaccessible or misunderstood. Add complete relevant authorized material when available; missing authorization or sensitive context follows the mode's blocker rule. A new conversation needs its goal/scope, repository/material URLs, revision, and evidence. Supply relevant `AGENTS.md` content/source when Relay cannot access it; new chats inherit no earlier conversation history.
 

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID, createHash } from "node:crypto";
 import { http, HttpError } from "./http.js";
+import { probeBackend, normalizeUrl, BackendError } from "./backend.js";
 export { submitSessionControl, getOperation, inspectSession, listBrowserInstances } from "./session-controls.js";
 export type { SessionControlRequest, SessionControlOperation, SessionInspection, BrowserInstanceView, ControlKind } from "./session-controls.js";
 
@@ -26,6 +27,7 @@ export interface ReviewOptions {
   waitChunkMs?: number;
   clientRequestId?: string;
   baseUrl?: string;
+  serverId?: string;
   wait?: boolean;
   signal?: AbortSignal;
 }
@@ -116,33 +118,43 @@ interface PendingRecord {
   requestOnly?: boolean;
   requestHash?: string;
   baseUrl?: string;
+  serverId?: string;
+  storageKey?: string;
 }
 
 function ensurePendingDir(): void {
   fs.mkdirSync(pendingDir(), { recursive: true });
 }
 function pendingFile(taskId: string): string {
+  if (!/^[A-Za-z0-9_-]{1,200}$/.test(taskId)) throw new Error("invalid pending record key");
   return path.join(pendingDir(), `${taskId}.json`);
+}
+function recordKey(rec: Pick<PendingRecord, "taskId" | "serverId">): string {
+  return rec.serverId ? `${createHash("sha256").update(rec.serverId).digest("hex").slice(0, 16)}_${rec.taskId}` : rec.taskId;
+}
+function removeRecord(rec: PendingRecord): void {
+  try { fs.unlinkSync(pendingFile(rec.storageKey ?? recordKey(rec))); } catch { /* Already removed. */ }
 }
 export function writePending(rec: PendingRecord): void {
   ensurePendingDir();
-  fs.writeFileSync(pendingFile(rec.taskId), JSON.stringify(rec));
+  const { storageKey: _, ...persisted } = rec;
+  fs.writeFileSync(pendingFile(recordKey(rec)), JSON.stringify(persisted));
 }
-export function clearPending(taskId: string): void {
-  try {
-    fs.unlinkSync(pendingFile(taskId));
-  } catch {
-    /* ignore */
-  }
+export function clearPending(taskId: string, serverId?: string): void {
+  const records = listPending().filter(rec => rec.taskId === taskId && (!serverId || rec.serverId === serverId));
+  if (!serverId && records.length > 1) throw new BackendError("pending_ambiguous", "pending task belongs to multiple backends; specify its server identity");
+  for (const rec of records) removeRecord(rec);
 }
 export function listPending(): PendingRecord[] {
   if (!fs.existsSync(pendingDir())) return [];
   return fs
     .readdirSync(pendingDir())
     .filter((f) => f.endsWith(".json"))
-    .map((f) => {
+    .map((f): PendingRecord | null => {
       try {
-        return JSON.parse(fs.readFileSync(path.join(pendingDir(), f), "utf8")) as PendingRecord;
+        const rec = JSON.parse(fs.readFileSync(path.join(pendingDir(), f), "utf8")) as PendingRecord;
+        if (typeof rec.taskId !== "string" || typeof rec.session !== "string" || typeof rec.textPreview !== "string") return null;
+        return { ...rec, storageKey: path.basename(f, ".json") };
       } catch {
         return null;
       }
@@ -164,6 +176,7 @@ async function submitTask(
   if (opts.clientRequestId) body.clientRequestId = opts.clientRequestId;
   return http.post<{ taskId: string; status: string; encodingWarning?: string; encodingFixed?: string }>(opts.newSession ? "/v1/sessions" : "/v1/tasks", body, {
     baseUrl,
+    serverId: opts.serverId,
     timeoutMs: 10_000,
     signal: opts.signal,
   });
@@ -171,7 +184,7 @@ async function submitTask(
 
 export async function waitForTask(
   taskId: string,
-  opts: { baseUrl?: string; timeoutMs?: number; waitChunkMs?: number; signal?: AbortSignal } = {},
+  opts: { baseUrl?: string; serverId?: string; timeoutMs?: number; waitChunkMs?: number; signal?: AbortSignal } = {},
 ): Promise<TaskView> {
   const baseUrl = opts.baseUrl ?? DEFAULT_BASE;
   const overallTimeout = opts.timeoutMs ?? 10 * 60_000;
@@ -182,6 +195,7 @@ export async function waitForTask(
     const wait = Math.min(chunk, remaining);
     const t = await http.get<TaskView>(`/v1/tasks/${taskId}?wait=${wait}`, {
       baseUrl,
+      serverId: opts.serverId,
       timeoutMs: wait + 5_000,
       signal: opts.signal,
     });
@@ -203,27 +217,30 @@ export async function review(
     throw new Error("invalid clientRequestId");
   }
   opts = { ...opts, clientRequestId: opts.clientRequestId ?? randomUUID() };
+  const backend = await probeBackend(opts.baseUrl ?? DEFAULT_BASE, { expectedId: opts.serverId, allowLegacy: true });
+  opts = { ...opts, baseUrl: backend.baseUrl, serverId: backend.serverId };
   const identity = opts.sessionRef ?? opts.session!;
   const requestHash = createHash("sha256").update(JSON.stringify({ text, project: opts.projectId,
     newSession: !!opts.newSession, timeout: opts.taskTimeoutMs })).digest("hex");
   const requestKey = `request_${createHash("sha256").update(JSON.stringify([
-    opts.baseUrl ?? DEFAULT_BASE, identity, opts.clientRequestId])).digest("hex")}`;
+    opts.serverId ?? opts.baseUrl ?? DEFAULT_BASE, identity, opts.clientRequestId])).digest("hex")}`;
   const old = listPending().find(r => r.taskId === requestKey);
   if (old?.requestHash && old.requestHash !== requestHash) throw new Error("clientRequestId pending payload conflict");
   const record: PendingRecord = { taskId: requestKey, session: identity, sessionRef: opts.sessionRef,
+    serverId: opts.serverId,
     newSession: opts.newSession, requestOnly: true, requestHash, baseUrl: opts.baseUrl ?? DEFAULT_BASE,
     submittedAt: started, textPreview: text.slice(0, 80), clientRequestId: opts.clientRequestId };
   ensurePendingDir();
-  try { fs.writeFileSync(pendingFile(requestKey), JSON.stringify(record), { flag: "wx", flush: true }); }
+  try { fs.writeFileSync(pendingFile(recordKey(record)), JSON.stringify(record), { flag: "wx", flush: true }); }
   catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-    const reserved = JSON.parse(fs.readFileSync(pendingFile(requestKey), "utf8")) as PendingRecord;
+    const reserved = JSON.parse(fs.readFileSync(pendingFile(recordKey(record)), "utf8")) as PendingRecord;
     if (reserved.requestHash !== requestHash) throw new Error("clientRequestId pending payload conflict");
   }
   let submitted: Awaited<ReturnType<typeof submitTask>>;
   try { submitted = await submitTask(text, opts); }
   catch (e) {
-    if (e instanceof HttpError && [400, 404, 409, 413].includes(e.status)) clearPending(requestKey);
+    if (e instanceof HttpError && [400, 404, 409, 413].includes(e.status)) clearPending(requestKey, opts.serverId);
     throw e;
   }
   const { taskId } = submitted;
@@ -243,18 +260,19 @@ export async function review(
     textPreview: text.slice(0, 80),
     clientRequestId: opts.clientRequestId ?? null,
   });
-  clearPending(requestKey);
+  clearPending(requestKey, opts.serverId);
   if (opts.wait === false) {
     return { taskId, status: submitted.status, sessionRef: opts.sessionRef, clientRequestId: opts.clientRequestId! };
   }
   try {
     const t = await waitForTask(taskId, {
       baseUrl: opts.baseUrl,
+      serverId: opts.serverId,
       timeoutMs: opts.waitTimeoutMs ?? opts.timeoutMs,
       waitChunkMs: opts.waitChunkMs,
       signal: opts.signal,
     });
-    if (!shouldKeepPendingForLateReply(t)) clearPending(taskId);
+    if (!shouldKeepPendingForLateReply(t)) clearPending(taskId, opts.serverId);
     return {
       taskId: t.taskId,
       status: t.status as ReviewResult["status"],
@@ -270,9 +288,10 @@ export async function review(
   }
 }
 
-export async function listSessions(baseUrl = DEFAULT_BASE): Promise<SessionView[]> {
+export async function listSessions(baseUrl = DEFAULT_BASE, serverId?: string): Promise<SessionView[]> {
   const r = await http.get<{ sessions: SessionView[] }>("/v1/sessions", {
     baseUrl,
+    serverId,
     timeoutMs: 5_000,
   });
   return r.sessions;
@@ -281,10 +300,12 @@ export async function listSessions(baseUrl = DEFAULT_BASE): Promise<SessionView[
 export async function getTask(
   taskId: string,
   baseUrl = DEFAULT_BASE,
+  serverId?: string,
 ): Promise<TaskView | null> {
   try {
     return await http.get<TaskView>(`/v1/tasks/${taskId}`, {
       baseUrl,
+      serverId,
       timeoutMs: 5_000,
     });
   } catch (err) {
@@ -296,17 +317,20 @@ export async function getTask(
 export async function cancelTask(
   taskId: string,
   baseUrl = DEFAULT_BASE,
+  serverId?: string,
 ): Promise<TaskView> {
   return http.del<TaskView>(`/v1/tasks/${taskId}`, {
     baseUrl,
+    serverId,
     timeoutMs: 5_000,
   });
 }
 
-export async function healthCheck(baseUrl = DEFAULT_BASE): Promise<boolean> {
+export async function healthCheck(baseUrl = DEFAULT_BASE, serverId?: string): Promise<boolean> {
   try {
     const r = await http.get<{ status: string }>("/health", {
       baseUrl,
+      serverId,
       timeoutMs: 3_000,
     });
     return r.status === "ok";
@@ -318,22 +342,34 @@ export async function healthCheck(baseUrl = DEFAULT_BASE): Promise<boolean> {
 /** Return the latest status for every pending task and remove terminal records. */
 export async function resumePending(
   baseUrl = DEFAULT_BASE,
-): Promise<{ record: PendingRecord; task: TaskView | null }[]> {
-  const out: { record: PendingRecord; task: TaskView | null }[] = [];
-  for (const rec of listPending()) {
+  serverId?: string,
+): Promise<{ record: PendingRecord; task: TaskView | null; reason?: string }[]> {
+  const records = listPending();
+  if (!records.length) return [];
+  const backend = await probeBackend(baseUrl, { expectedId: serverId, allowLegacy: true });
+  baseUrl = backend.baseUrl;
+  serverId = backend.serverId;
+  const out: { record: PendingRecord; task: TaskView | null; reason?: string }[] = [];
+  for (const rec of records) {
+    let belongs = rec.serverId ? rec.serverId === serverId : false;
+    if (!rec.serverId && rec.baseUrl) {
+      try { belongs = normalizeUrl(rec.baseUrl) === baseUrl; } catch { /* Keep records with an unknown origin. */ }
+    }
+    if (!belongs) {
+      out.push({ record: rec, task: null, reason: "other_backend" }); continue;
+    }
     let t: TaskView | null;
     if (rec.requestOnly) {
-      if (rec.baseUrl && rec.baseUrl !== baseUrl) { out.push({ record: rec, task: null }); continue; }
       const query = new URLSearchParams({ clientRequestId: rec.clientRequestId!, limit: "1", include_text: "1" });
       query.set(rec.sessionRef ? "sessionRef" : "session", rec.session);
       try {
         if (rec.newSession && rec.sessionRef) {
           // The ref identifies creation, including retries with a different message key.
           const session = await http.get<{ initialTaskId: string | null }>(
-            `/v1/sessions/${encodeURIComponent(rec.sessionRef)}`, { baseUrl, timeoutMs: 5000 });
-          t = session.initialTaskId ? await getTask(session.initialTaskId, baseUrl) : null;
+            `/v1/sessions/${encodeURIComponent(rec.sessionRef)}`, { baseUrl, serverId, timeoutMs: 5000 });
+          t = session.initialTaskId ? await getTask(session.initialTaskId, baseUrl, serverId) : null;
         } else {
-          const found = await http.get<{ tasks: TaskView[] }>(`/v1/tasks?${query}`, { baseUrl, timeoutMs: 5000 });
+          const found = await http.get<{ tasks: TaskView[] }>(`/v1/tasks?${query}`, { baseUrl, serverId, timeoutMs: 5000 });
           t = found.tasks[0] ?? null;
         }
       } catch (e) {
@@ -341,19 +377,22 @@ export async function resumePending(
         t = null;
       }
       if (!t) { out.push({ record: rec, task: null }); continue; }
-      const recovered = { ...rec, taskId: t.taskId, requestOnly: false };
-      writePending(recovered);
-      clearPending(rec.taskId);
-      Object.assign(rec, recovered);
-    } else t = await getTask(rec.taskId, baseUrl);
+    } else t = await getTask(rec.taskId, baseUrl, serverId);
     if (!t) {
-      // The server no longer has the task, for example after moving machines.
-      clearPending(rec.taskId);
-      out.push({ record: rec, task: null });
+      out.push({ record: rec, task: null, reason: "not_found_retained" });
       continue;
     }
+    if (![t.session, t.sessionRef, t.conversationId].includes(rec.session) ||
+        (!rec.newSession && rec.clientRequestId && t.clientRequestId !== rec.clientRequestId) ||
+        (t.text !== undefined && !t.text.startsWith(rec.textPreview))) {
+      out.push({ record: rec, task: null, reason: "task_identity_mismatch" }); continue;
+    }
+    if (rec.requestOnly || !rec.serverId && serverId) {
+      const migrated = { ...rec, storageKey: undefined, serverId, baseUrl, taskId: t.taskId, requestOnly: false };
+      writePending(migrated); removeRecord(rec); Object.assign(rec, migrated);
+    }
     if (TERMINAL.has(t.status) && !shouldKeepPendingForLateReply(t)) {
-      clearPending(rec.taskId);
+      removeRecord(rec);
     }
     out.push({ record: rec, task: t });
   }

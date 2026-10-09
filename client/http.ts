@@ -4,6 +4,7 @@ export interface HttpOptions {
   baseUrl: string;
   timeoutMs?: number;
   signal?: AbortSignal;
+  serverId?: string;
 }
 
 async function request<T>(
@@ -21,12 +22,21 @@ async function request<T>(
   try {
     const res = await fetch(`${opts.baseUrl}${url}`, {
       method,
-      headers: body !== undefined ? { "Content-Type": "application/json" } : {},
+      headers: { ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+        ...(opts.serverId ? { "X-Gpt-Relay-Server-Id": opts.serverId } : {}) },
+      redirect: "error",
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal: controller.signal,
     });
     const text = await res.text();
-    const json = text ? (JSON.parse(text) as unknown) : null;
+    if (opts.serverId && res.headers.get("X-Gpt-Relay-Server-Id") !== opts.serverId) {
+      throw new HttpError("backend identity changed", 409, "backend_identity_mismatch");
+    }
+    let json: unknown = null;
+    if (text) {
+      try { json = JSON.parse(text); }
+      catch (error) { if (res.ok) throw error; }
+    }
     if (!res.ok) {
       const err = json as { error?: string; message?: string; errorInfo?: unknown } | null;
       throw new HttpError(

@@ -25,12 +25,14 @@ private repository data in a report.
 
 ## Trust boundaries
 
-gpt-relay is designed as a local tool:
+gpt-relay is designed for local use or a trusted LAN:
 
 - The server binds to `127.0.0.1` by default and has no authentication layer.
 - Prompts, replies, session identifiers, and task state are stored in a local
   SQLite database.
 - Pending CLI records are stored in the user's local data directory.
+- Client bindings and pending records track stable server identity. This protects against accidental backend replacement, and does not authenticate a server or client.
+- Non-loopback servers announce identity and port through LAN mDNS unless disabled. Discovery verifies the HTTP identity API before selecting a server.
 - The browser extension can read and interact with supported ChatGPT pages and
   communicate with the configured relay URL.
 - Submitted task content is sent through the user's ChatGPT web session and is

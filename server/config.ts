@@ -33,13 +33,19 @@ function envStr(name: string, fallback: string): string {
   return raw != null && raw !== "" ? raw : fallback;
 }
 
+function listenerPort(): number {
+  const raw = process.env.GPT_RELAY_PORT;
+  const port = raw == null || raw === "" ? 8765 : Number(raw);
+  return Number.isInteger(port) && port >= 0 && port <= 65535 ? port : 8765;
+}
+
 // Default data directory: ~/.gpt-relay
 const DEFAULT_DATA_DIR = path.join(os.homedir(), ".gpt-relay");
 
 export function loadConfig(): Config {
   const dataDir = envStr("GPT_RELAY_DATA_DIR", DEFAULT_DATA_DIR);
   return {
-    port: envInt("GPT_RELAY_PORT", 8765),
+    port: listenerPort(),
     host: envStr("GPT_RELAY_HOST", "127.0.0.1"),
     dataDir,
     dbFile: envStr("GPT_RELAY_DB_FILE", path.join(dataDir, "gpt-relay.db")),

@@ -13,18 +13,30 @@ import { createProjectDiscoveryRouter } from "./project-discovery.js";
 import { SessionDiagnostics, diagnosticsRouter } from "./session-diagnostics.js";
 import { SessionControls, controlsRouter } from "./session-controls.js";
 import { errorInfo } from "./error-info.js";
+import { serverIdentity } from "./identity.js";
+import type { ServerInfo } from "../shared/backend.js";
 
 export interface AppHandle {
   app: express.Express;
   store: TaskStore;
+  identity: ServerInfo;
+  closeDatabase: () => void;
   stopMaintenance: () => void;
 }
 
 export function createApp(config: Config): AppHandle {
   const db = openDatabase(config.dbFile);
   const store = new TaskStore(db, config);
+  const identity = serverIdentity(db);
 
   const app = express();
+  app.use((req, res, next) => {
+    res.setHeader("X-Gpt-Relay-Server-Id", identity.serverId);
+    const expected = req.get("X-Gpt-Relay-Server-Id");
+    if (expected && expected !== identity.serverId) return res.status(409).json({ error: "backend_identity_mismatch" });
+    next();
+  });
+  app.get("/v1/server", (_req, res) => res.json(identity));
   app.use((_req, res, next) => {
     const json = res.json.bind(res);
     res.json = ((body: any) => {
@@ -89,5 +101,5 @@ export function createApp(config: Config): AppHandle {
 
   const stopMaintenance = () => clearInterval(timer);
 
-  return { app, store, stopMaintenance };
+  return { app, store, identity, stopMaintenance, closeDatabase: () => db.close() };
 }

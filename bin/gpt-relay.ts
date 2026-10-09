@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // bin/gpt-relay.ts
-// gpt-relay CLI: start/health/tasks/show/cancel/sessions/resume/review。
+// gpt-relay server launcher and backend-aware client commands.
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
@@ -15,13 +15,56 @@ import {
   review,
 } from "../client/agent-client.js";
 import { http, HttpError } from "../client/http.js";
+import { BackendError, probeBackend, type Backend } from "../client/backend.js";
+import { readBinding, saveBinding, clearBinding } from "../client/backend-config.js";
+import { resolveBackend, type BackendOptions } from "../client/backend-resolver.js";
+import { discoverBackends, uniqueBackend } from "../client/discovery.js";
+import { parseGlobalOptions, validateBusinessArgs } from "../client/cli-options.js";
+import { createInterface } from "node:readline/promises";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
 const require = createRequire(import.meta.url);
 const TSX_LOADER = pathToFileURL(require.resolve("tsx")).href;
 const PORT = Number(process.env.GPT_RELAY_PORT ?? 8765);
-const BASE = process.env.GPT_RELAY_URL ?? `http://127.0.0.1:${PORT}`;
+let BASE = process.env.GPT_RELAY_URL ?? `http://127.0.0.1:${PORT}`;
+let SERVER_ID: string | undefined;
+
+async function cmdBind(args: string[], options: BackendOptions): Promise<number> {
+  if (new Set(args).size !== args.length) throw new BackendError("invalid_arguments", "duplicate bind option");
+  if (options.server || args.some(a => a.startsWith("--") && !["--clear", "--json"].includes(a))) throw new BackendError("invalid_arguments", "usage: bind [address | --local | --clear] [--json]");
+  const addresses = args.filter(a => !a.startsWith("--"));
+  if (addresses.length > 1 || Number(addresses.length > 0) + Number(!!options.local) + Number(args.includes("--clear")) > 1) throw new BackendError("invalid_arguments", "choose exactly one bind target or --clear");
+  if (args.includes("--clear")) { await clearBinding(); console.log(JSON.stringify({ cleared: true })); return 0; }
+  if (!options.local && !addresses.length) {
+    console.log(JSON.stringify({ binding: readBinding(), source: process.env.GPT_RELAY_URL ? "environment" : readBinding() ? "binding" : "discovery", environmentUrl: process.env.GPT_RELAY_URL ?? null }));
+    return 0;
+  }
+  const backend = options.local ? uniqueBackend(await discoverBackends(true)) : await probeBackend(addresses[0]!);
+  console.log(JSON.stringify({ binding: await saveBinding(backend) }));
+  return 0;
+}
+
+async function cmdDetect(args: string[], options: BackendOptions): Promise<number> {
+  if (new Set(args).size !== args.length) throw new BackendError("invalid_arguments", "duplicate detect option");
+  if (options.server || args.some(a => !["--list", "--json"].includes(a))) throw new BackendError("invalid_arguments", "usage: detect [--local] [--list] [--json]");
+  const candidates = await discoverBackends(!!options.local);
+  if (args.includes("--list")) { console.log(JSON.stringify({ candidates })); return 0; }
+  let selected: Backend;
+  if (candidates.length > 1 && process.stdin.isTTY && process.stdout.isTTY && !args.includes("--json")) {
+    candidates.forEach((backend, index) => console.error(`${index + 1}. ${backend.name}\t${backend.baseUrl}\t${backend.serverId}`));
+    const input = createInterface({ input: process.stdin, output: process.stderr });
+    try {
+      const answer = await input.question("Select a Relay server number: ");
+      const index = Number(answer) - 1;
+      if (!Number.isInteger(index) || !candidates[index]) throw new BackendError("invalid_arguments", "invalid server selection; binding unchanged");
+      selected = candidates[index]!;
+    } finally { input.close(); }
+  } else selected = uniqueBackend(candidates);
+  selected = await probeBackend(selected.baseUrl, { expectedId: selected.serverId });
+  console.log(JSON.stringify({ binding: await saveBinding(selected) }));
+  return 0;
+}
 
 function validateControlOptions(args: string[], flags: string[]) {
   const seen = new Set<string>();
@@ -44,7 +87,7 @@ async function cmdStart(args: string[]): Promise<number> {
 }
 
 async function cmdHealth(): Promise<number> {
-  const ok = await healthCheck(BASE);
+  const ok = await healthCheck(BASE, SERVER_ID);
   if (ok) {
     console.log(`ok (${BASE})`);
     return 0;
@@ -73,19 +116,19 @@ async function cmdSessions(args: string[] = []): Promise<number> {
       return submitControl({ kind: "refresh", session: args[i + 1], taskId: recovery < 0 ? null : args[recovery + 1] }, args);
     }
     const route = `/v1/sessions/${encodeURIComponent(args[i + 1]!)}/${args[0]}`;
-    console.log(JSON.stringify(args[0] === "inspect" ? await http.get(route, { baseUrl: BASE }) :
-      await http.post(route, {}, { baseUrl: BASE })));
+    console.log(JSON.stringify(args[0] === "inspect" ? await http.get(route, { baseUrl: BASE, serverId: SERVER_ID }) :
+      await http.post(route, {}, { baseUrl: BASE, serverId: SERVER_ID })));
     return 0;
   }
   const refIndex = args.indexOf("--session-ref");
   if (refIndex >= 0) {
     const ref = args[refIndex + 1];
     if (!ref) throw new Error("missing session ref");
-    const row = await http.get(`/v1/sessions/${encodeURIComponent(ref)}`, { baseUrl: BASE });
+    const row = await http.get(`/v1/sessions/${encodeURIComponent(ref)}`, { baseUrl: BASE, serverId: SERVER_ID });
     console.log(JSON.stringify(row));
     return 0;
   }
-  const sessions = await listSessions(BASE);
+  const sessions = await listSessions(BASE, SERVER_ID);
   if (args.includes("--json")) { console.log(JSON.stringify({ sessions })); return 0; }
   if (sessions.length === 0) {
     console.log("(no active sessions)");
@@ -131,7 +174,7 @@ async function cmdTasks(args: string[]): Promise<number> {
   if (args[0] === "trace") {
     if (!args[1]) throw new Error("usage: tasks trace TASK_ID");
     validateControlOptions(args.slice(2), []);
-    console.log(JSON.stringify(await http.get(`/v1/tasks/${encodeURIComponent(args[1])}/trace`, { baseUrl: BASE })));
+    console.log(JSON.stringify(await http.get(`/v1/tasks/${encodeURIComponent(args[1])}/trace`, { baseUrl: BASE, serverId: SERVER_ID })));
     return 0;
   }
   const q = new URLSearchParams();
@@ -144,7 +187,7 @@ async function cmdTasks(args: string[]): Promise<number> {
   }
   if (!q.has("limit")) q.set("limit", "20");
   const r = await http.get<{ tasks: CliTask[] }>(`/v1/tasks?${q}`, {
-    baseUrl: BASE,
+    baseUrl: BASE, serverId: SERVER_ID,
     timeoutMs: 5_000,
   });
   if (r.tasks.length === 0) {
@@ -177,7 +220,7 @@ async function submitControl(body: Record<string, unknown>, args: string[]): Pro
   if (!operationId) throw new Error("missing operation ID");
   // Keep the identifier even when the HTTP response is lost: retry with the same ID.
   console.error(JSON.stringify({ operationId }));
-  console.log(JSON.stringify(await http.post("/v1/session-controls", { ...body, operationId }, { baseUrl: BASE })));
+  console.log(JSON.stringify(await http.post("/v1/session-controls", { ...body, operationId }, { baseUrl: BASE, serverId: SERVER_ID })));
   return 0;
 }
 
@@ -187,7 +230,7 @@ async function cmdShow(args: string[]): Promise<number> {
     console.error("usage: gpt-relay show <taskId>");
     return 64;
   }
-  const t = await getTask(id, BASE);
+  const t = await getTask(id, BASE, SERVER_ID);
   if (!t) {
     console.error(`task not found: ${id}`);
     return 1;
@@ -257,20 +300,24 @@ async function cmdCancel(args: string[]): Promise<number> {
     console.error("usage: gpt-relay cancel <taskId>");
     return 64;
   }
-  const t = await cancelTask(id, BASE);
+  const t = await cancelTask(id, BASE, SERVER_ID);
   console.log(`${t.taskId}: ${t.status}`);
   return 0;
 }
 
 async function cmdResume(): Promise<number> {
-  const rows = await resumePending(BASE);
+  const rows = await resumePending(BASE, SERVER_ID);
   if (rows.length === 0) {
     console.log("(no pending tasks)");
     return 0;
   }
-  for (const { record, task } of rows) {
+  for (const { record, task, reason } of rows) {
     const preview = record.textPreview.replace(/\s+/g, " ");
     if (!task) {
+      if (reason) {
+        console.log(`${record.taskId}\t${reason.toUpperCase()}\t${record.baseUrl ?? "unknown backend"}; pending retained`);
+        continue;
+      }
       if (record.requestOnly) {
         console.log(`${record.session}\tUNCONFIRMED\t"${preview}"; keep request ID ${record.clientRequestId}`);
         continue;
@@ -362,7 +409,7 @@ async function cmdReview(args: string[]): Promise<number> {
     sessionRef: sessionRef || undefined,
     newSession,
     ...(newSession ? { projectId } : {}),
-    baseUrl: BASE,
+    baseUrl: BASE, serverId: SERVER_ID,
     wait,
     ...(waitTimeoutMs !== undefined ? { waitTimeoutMs } : {}),
     ...(taskTimeoutMs !== undefined ? { taskTimeoutMs } : {}),
@@ -391,20 +438,20 @@ async function cmdProjects(args: string[]): Promise<number> {
   if (action === "discover") {
     if (args.slice(1).some(a => !["--save", "--no-wait", "--json"].includes(a))) throw new Error("invalid discovery option");
     let result = await http.post<{ discoveryId: string; status: string; error?: string }>(
-      "/v1/projects/discover", { save: args.includes("--save") }, { baseUrl: BASE });
+      "/v1/projects/discover", { save: args.includes("--save") }, { baseUrl: BASE, serverId: SERVER_ID });
     if (!args.includes("--no-wait")) {
       const deadline = Date.now() + 125_000;
       while (["queued", "claimed"].includes(result.status)) {
         if (Date.now() >= deadline) throw new Error(`discovery wait expired; query /v1/projects/discover/${result.discoveryId}`);
         await new Promise(resolve => setTimeout(resolve, 1000));
-        result = await http.get(`/v1/projects/discover/${result.discoveryId}`, { baseUrl: BASE });
+        result = await http.get(`/v1/projects/discover/${result.discoveryId}`, { baseUrl: BASE, serverId: SERVER_ID });
       }
     }
     console.log(JSON.stringify(result));
     return result.status === "failed" ? 2 : 0;
   }
   if (!action || action === "--json") {
-    const result = await http.get<{ projects: Array<{ projectId: string; name: string; description: string | null }> }>("/v1/projects", { baseUrl: BASE });
+    const result = await http.get<{ projects: Array<{ projectId: string; name: string; description: string | null }> }>("/v1/projects", { baseUrl: BASE, serverId: SERVER_ID });
     if (action === "--json") console.log(JSON.stringify(result));
     else for (const p of result.projects) console.log(`${p.projectId}\t${p.name}\t${p.description ?? ""}`);
     return 0;
@@ -423,8 +470,8 @@ async function cmdProjects(args: string[]): Promise<number> {
   if (action === "set") {
     if (!values["--name"]) throw new Error("projects set requires --name");
     await http.put(url, { name: values["--name"], ...(values["--description"] !== undefined
-      ? { description: values["--description"] } : {}) }, { baseUrl: BASE });
-  } else if (action === "remove") await http.del(url, { baseUrl: BASE });
+      ? { description: values["--description"] } : {}) }, { baseUrl: BASE, serverId: SERVER_ID });
+  } else if (action === "remove") await http.del(url, { baseUrl: BASE, serverId: SERVER_ID });
   else throw new Error("unknown projects action");
   console.log(JSON.stringify({ status: "ok" }));
   return 0;
@@ -434,13 +481,18 @@ function usage(): void {
   console.log(`gpt-relay <command>
 
 commands:
+  bind [address] [--json]  show binding, or verify and save a server
+  bind --local            bind the unique locally registered server
+  bind --clear            clear binding while retaining pending tasks
+  detect [--local] [--list] [--json]
+                           discover servers; bind a unique result or select interactively
   projects [--json]        list local project metadata
   projects set --project-id ID --name NAME [--description TEXT]
   projects remove --project-id ID
   projects discover [--save] [--no-wait]
                            scan visible Project links in open ChatGPT tabs
   start                    start relay server (foreground)
-  health                   check relay at ${BASE}
+  health                   check the selected relay server
   sessions                 list active ChatGPT sessions
   sessions inspect|suspend|continue --session-ref REF (or --session ID)
   sessions refresh --session-ref REF [--recover-task TASK_ID] [--operation-id ID]
@@ -463,16 +515,36 @@ commands:
          [--wait-timeout ms] [--task-timeout ms]
                            submit a review and wait
 
+client options (temporary; mutually exclusive):
+  --server <address>       select an HTTP(S) origin or host:port
+  --local                  select the unique locally registered server
+  priority: options > GPT_RELAY_URL > binding > discovery
+  an unavailable selected server never causes automatic switching
+
 env:
+  GPT_RELAY_HOST              server bind host (127.0.0.1)
   GPT_RELAY_PORT (${PORT})     server port
-  GPT_RELAY_URL                override base url
+  GPT_RELAY_URL                client backend override
+  GPT_RELAY_CLIENT_CONFIG      binding file (~/.gpt-relay/client.json)
+  GPT_RELAY_REGISTRY_DIR       local server registry (~/.gpt-relay/servers)
+  GPT_RELAY_DISCOVERY          0 disables LAN mDNS; local registry still works
   GPT_RELAY_PENDING_DIR        agent pending records dir
 `);
 }
 
 async function main(): Promise<number> {
-  const [, , cmd, ...rest] = process.argv;
+  let cmd: string | undefined, rest: string[] = [];
   try {
+    const parsed = parseGlobalOptions(process.argv.slice(2));
+    [cmd, ...rest] = parsed.args;
+    if (cmd === "bind") return await cmdBind(rest, parsed.options);
+    if (cmd === "detect") return await cmdDetect(rest, parsed.options);
+    const business = ["health", "doctor", "sessions", "projects", "tasks", "operations", "show", "cancel", "resume", "review"];
+    if (business.includes(cmd ?? "")) {
+      validateBusinessArgs(cmd!, rest);
+      const backend = await resolveBackend(parsed.options);
+      BASE = backend.baseUrl; SERVER_ID = backend.serverId;
+    } else if (parsed.options.server || parsed.options.local) throw new BackendError("invalid_arguments", "backend options apply to client commands, not start or help");
     switch (cmd) {
       case "start":
         return await cmdStart(rest);
@@ -482,7 +554,7 @@ async function main(): Promise<number> {
         validateControlOptions(rest, ["--session", "--session-ref"]);
         const i = rest.findIndex(x => x === "--session" || x === "--session-ref");
         if (i >= 0 && !rest[i + 1]) throw new Error("missing session");
-        const result = await http.get<{ status: string }>(`/v1/doctor${i < 0 ? "" : `?session=${encodeURIComponent(rest[i + 1]!)}`}`, { baseUrl: BASE });
+        const result = await http.get<{ status: string }>(`/v1/doctor${i < 0 ? "" : `?session=${encodeURIComponent(rest[i + 1]!)}`}`, { baseUrl: BASE, serverId: SERVER_ID });
         console.log(JSON.stringify(result));
         return result.status === "ok" ? 0 : 2;
       }
@@ -495,7 +567,7 @@ async function main(): Promise<number> {
       case "operations":
         if (!rest[0]) throw new Error("usage: operations OPERATION_ID");
         validateControlOptions(rest.slice(1), []);
-        console.log(JSON.stringify(await http.get(`/v1/operations/${encodeURIComponent(rest[0])}`, { baseUrl: BASE })));
+        console.log(JSON.stringify(await http.get(`/v1/operations/${encodeURIComponent(rest[0])}`, { baseUrl: BASE, serverId: SERVER_ID })));
         return 0;
       case "show":
         return await cmdShow(rest);
@@ -517,6 +589,19 @@ async function main(): Promise<number> {
         return 64;
     }
   } catch (err) {
+    const controlCommand = ["doctor", "operations"].includes(cmd ?? "") ||
+      cmd === "sessions" && ["inspect", "suspend", "continue", "refresh", "open", "close"].includes(rest[0] ?? "") ||
+      cmd === "tasks" && ["trace", "recover", "stop"].includes(rest[0] ?? "");
+    if (err instanceof BackendError) {
+      const code = controlCommand && err.code === "invalid_arguments" ? "client_error" : err.code;
+      if (process.argv.includes("--json") || controlCommand) console.error(JSON.stringify({ error: code, message: err.message, candidates: err.candidates,
+        errorInfo: { code, message: err.message, deliveryState: "unknown", safeToResubmit: null } }));
+      else {
+        console.error(`error: ${err.code}: ${err.message}`);
+        for (const backend of err.candidates ?? []) console.error(`  ${backend.name}\t${backend.baseUrl}\t${backend.serverId ?? "legacy"}`);
+      }
+      return !controlCommand && ["invalid_arguments", "invalid_backend"].includes(err.code) ? 64 : 1;
+    }
     if (rest.includes("--json") || ["doctor", "operations"].includes(cmd ?? "") ||
         cmd === "sessions" && ["inspect", "suspend", "continue", "refresh"].includes(rest[0] ?? "") ||
         cmd === "tasks" && ["trace", "recover", "stop"].includes(rest[0] ?? "")) {
@@ -529,4 +614,4 @@ async function main(): Promise<number> {
   }
 }
 
-main().then((code) => process.exit(code));
+main().then((code) => { process.exitCode = code; });

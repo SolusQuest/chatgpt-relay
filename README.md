@@ -38,6 +38,7 @@ account's plan limits and the applicable OpenAI terms.
   connectivity changes and can reload when necessary.
 - **Agent-friendly interfaces**: a CLI, TypeScript client, and versioned REST API
   support long polling, idempotency, status inspection, and recovery.
+- **Remote CLI backends**: bind clients to a server on a trusted LAN, discover servers through mDNS, and retain pending work by stable server identity.
 
 ## Repository layout
 
@@ -125,6 +126,48 @@ gpt-relay review --session-ref <ref> --file <follow-up-file> --no-wait
 Use `--project-id <id>` instead of `--no-project` for a Project chat. Maintain the local catalog with `gpt-relay projects set --project-id <id> --name "Name" --description "Purpose"` and `gpt-relay projects remove --project-id <id>`. Use `gpt-relay projects discover` to preview visible Project links in open ChatGPT tabs, or add `--save` to merge them into the catalog. Discovery preserves descriptions and unseen entries and reports partial coverage. It does not expand the sidebar or navigate tabs. See the agent guide for first-message context, creation failure boundaries and request recovery.
 
 After a created session is bound, its `sessionRef` and ChatGPT conversation ID address the same Relay queue. Reopen the ordinary ChatGPT conversation URL after closing its tab; the extension restores the canonical identity from the server during registration. No creation marker or manual rebinding is needed. A different conversation opened in the same tab registers independently.
+
+## Separate CLI and server computers
+
+Run the server, browser and extension on computer A, and the CLI on computer B. Both computers install the same package; only A runs `gpt-relay start`. Start remains a foreground process, with no platform service installation.
+
+On A, allow connections from the LAN. For example, on macOS:
+
+```bash
+GPT_RELAY_HOST=0.0.0.0 gpt-relay start
+```
+
+The browser extension on A can keep its default `http://127.0.0.1:8765` relay URL. On B:
+
+```bash
+gpt-relay bind <server-ip>:8765
+gpt-relay health
+gpt-relay sessions
+```
+
+Use `GPT_RELAY_PORT` on A to choose a different port. Discovery advertises the actual listener port; clients do not scan ports. LAN discovery uses DNS-SD `_gpt-relay._tcp` over mDNS (UDP 5353), and requires multicast connectivity between computers. If discovery is unavailable, use an explicit address with `bind` or `--server`.
+
+```bash
+gpt-relay bind                         # show saved binding and environment override
+gpt-relay bind --local                 # save the unique local server
+gpt-relay bind --clear                 # clear binding; retain pending records
+gpt-relay detect                       # find and bind a server
+gpt-relay detect --list --json          # list verified servers without binding
+gpt-relay health --server <host>:8765   # temporary backend selection
+gpt-relay health --local               # temporary local selection
+```
+
+`--local` uses the current user's server registry, including custom ports. It ignores environment and saved backend choices. It requires exactly one reachable local server and does not scan arbitrary ports. Servers remove registrations on graceful shutdown; unreachable or identity-mismatched registrations are ignored.
+
+Client commands select a backend in this order: `--server` or `--local`, then `GPT_RELAY_URL`, then the saved binding, then discovery. The two flags are mutually exclusive and do not change the saved binding. Bare `host` uses port 8765; a full HTTP(S) URL follows its explicit scheme and port. Backend URLs must be origins without paths, query strings or credentials.
+
+With no explicit backend, environment override or binding, a unique discovered server is automatically bound. Zero or multiple results produce an error and instructions to bind a backend. Only explicit `detect` in an interactive terminal offers a numbered choice; `detect --json` and ordinary commands never prompt. An unreachable or replaced bound server produces an error instead of silently selecting another server. Clearing a binding allows the next ordinary command to discover and bind again. `start` does not consult or change the client binding.
+
+The server stores a stable identity in its SQLite database, while the CLI stores binding configuration separately in `~/.gpt-relay/client.json`. Pending records remain in the CLI computer's pending directory and include the originating server identity. `resume` checks only the selected backend, retains other-backend and missing-task records, and never resubmits them. Use `resume --server <original-server>` to observe work on another backend. Identity follows the database when its address changes. Legacy records with a matching origin are migrated only after matching task evidence; records without an origin remain retained.
+
+Already running older servers remain usable through `GPT_RELAY_URL`, `--server`, or the legacy loopback fallback. Persisted binding and discovery require the new server identity API, activated when the server is next restarted. This change does not require an extension reload.
+
+The default listener stays on loopback. A LAN listener trusts computers that can reach it; server identity prevents accidental backend switching and is not authentication. See [trust boundaries](./SECURITY.md#trust-boundaries).
 
 ## Common commands
 

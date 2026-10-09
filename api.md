@@ -7,13 +7,21 @@ operations and [`README.md`](./README.md) for installation and CLI usage.
 ## Conventions
 
 - Default base URL: `http://127.0.0.1:8765`
-- Clients can override it with `GPT_RELAY_URL`.
+- CLI backend selection follows `--server`/`--local`, `GPT_RELAY_URL`, saved binding, then discovery. The TypeScript client accepts `baseUrl` and defaults to `GPT_RELAY_URL` or loopback.
 - The server bind address and port use `GPT_RELAY_HOST` and `GPT_RELAY_PORT`.
 - JSON endpoints use `application/json`.
 - All timestamps are Unix epoch milliseconds.
 - The public agent API uses `/v1/*`.
 - `/internal/*` is reserved for the browser extension and is not a stable agent
   integration surface.
+
+## Server identity and discovery
+
+`GET /v1/server` returns `{product: "gpt-relay", serverId, name, version, apiVersion: 1}`. `serverId` is a UUID stored in the SQLite database and survives restarts and listener address changes. Each HTTP response carries `X-Gpt-Relay-Server-Id`. Clients can supply the same request header as an expected identity; a mismatch returns 409 `backend_identity_mismatch` before processing the request. This is an identity fence, not authentication.
+
+Each server registers its actual listener URL and identity in the current user's local server registry. Non-loopback listeners additionally announce DNS-SD `_gpt-relay._tcp` with the listener port and TXT fields `serverId`, `apiVersion`, and `version`. CLI discovery validates candidates through `/v1/server`, verifies advertised identities and API compatibility, and deduplicates multiple addresses for one identity. Advertisements and stale local entries alone are not proof that a compatible server is reachable.
+
+See [CLI backend selection](./README.md#separate-cli-and-server-computers) for binding, temporary overrides, ambiguity behavior and legacy compatibility. Binding configuration and pending records are client-owned and independent of the server's data directory.
 
 ## Session maintenance and controls
 
@@ -584,9 +592,15 @@ For large or non-ASCII input, prefer files, stdin, or
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `GPT_RELAY_URL` | `http://127.0.0.1:8765` | Client and CLI base URL |
-| `GPT_RELAY_PORT` | `8765` | Server port and CLI URL fallback |
+| `GPT_RELAY_URL` | Unset | CLI backend override; TypeScript client falls back to `http://127.0.0.1:8765` |
+| `GPT_RELAY_PORT` | `8765` | Server port (`0` allocates an available port); also the old loopback server compatibility port |
 | `GPT_RELAY_HOST` | `127.0.0.1` | Server bind host |
+| `GPT_RELAY_NAME` | Hostname | Human-readable server name returned by `/v1/server` |
+| `GPT_RELAY_CLIENT_CONFIG` | `~/.gpt-relay/client.json` | CLI binding configuration |
+| `GPT_RELAY_REGISTRY_DIR` | `~/.gpt-relay/servers` | Current user's local server registrations |
+| `GPT_RELAY_DISCOVERY` | Enabled | `0` disables LAN mDNS browsing and announcements; local registry remains available |
+| `GPT_RELAY_DISCOVERY_TIMEOUT_MS` | `2000` | CLI mDNS discovery window, clamped to 100-10000 ms |
+| `GPT_RELAY_LEGACY_FALLBACK` | Enabled | `0` disables unbound CLI compatibility with an older loopback server |
 | `GPT_RELAY_DATA_DIR` | `~/.gpt-relay` | Data directory |
 | `GPT_RELAY_DB_FILE` | `<data-dir>/gpt-relay.db` | SQLite database |
 | `GPT_RELAY_LOG_DIR` | `<data-dir>/logs` | Server log directory |
