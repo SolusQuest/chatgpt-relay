@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
 import { fileURLToPath } from "node:url";
+import { Window } from "happy-dom";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const contentScript = fs.readFileSync(
@@ -47,7 +48,7 @@ function element(id: string, text = ""): FakeElement {
   };
 }
 
-function createHarness({ advanceTimers = false, managed = null as null | Record<string, unknown> } = {}) {
+function createHarness({ advanceTimers = false, managed = null as null | Record<string, unknown>, html = undefined as string | undefined } = {}) {
   const state = {
     reloads: 0,
     now: 10_000,
@@ -82,7 +83,7 @@ function createHarness({ advanceTimers = false, managed = null as null | Record<
       node.isConnected = true;
     },
   };
-  const document = {
+  const mockDocument = {
     get readyState() {
       return state.readyState;
     },
@@ -119,6 +120,21 @@ function createHarness({ advanceTimers = false, managed = null as null | Record<
       return [];
     },
   };
+  const dom = html === undefined ? null : new Window({ settings: {
+    enableJavaScriptEvaluation: false,
+    disableJavaScriptFileLoading: true,
+    disableCSSFileLoading: true,
+    disableIframePageLoading: true,
+  } });
+  if (dom) {
+    dom.document.write(html!);
+    Object.defineProperty(dom.document, "readyState", { get: () => state.readyState });
+    // Only layout is simulated; selectors, ancestry, order and IDs use the parsed DOM.
+    Object.defineProperty(dom.HTMLElement.prototype, "getBoundingClientRect", {
+      value: () => ({ width: 100, height: 30 }), configurable: true,
+    });
+  }
+  const document = dom?.document ?? mockDocument;
   const location = {
     get hash() { return state.hash; },
     get pathname() {
@@ -206,6 +222,7 @@ function createHarness({ advanceTimers = false, managed = null as null | Record<
   assert.ok(onMessage, "content script did not register onMessage");
   return {
     state,
+    dom,
     seedInflight(record: Record<string, unknown>) { storage.set("gpt_relay_inflight_v3", JSON.stringify(record)); },
     sentMessages,
     userEvent(type: string, target: any) {
@@ -1169,38 +1186,104 @@ for (const ancestor of ["data-content-search-unit-key", "data-chatgpt-selection-
   });
 }
 
+function createAttachmentDomHarness() {
+  const html = fs.readFileSync(path.join(__dirname, "fixtures", "chatgpt-attachment-turn.html"), "utf8");
+  const h = createHarness({ html });
+  h.state.readyState = "complete";
+  const doc = h.dom!.document;
+  const main = doc.querySelector("main")!;
+  const history = doc.getElementById("history-turn")!;
+  const turn = doc.getElementById("attachment-turn")!;
+  const user = doc.getElementById("attachment-user")!;
+  const reply = doc.getElementById("attachment-reply")!;
+  turn.remove();
+  return { h, doc, main, history, turn, user, reply };
+}
+
+async function settledPage(h: ReturnType<typeof createHarness>) {
+  await h.pageState();
+  h.state.now += 4000;
+  return h.pageState();
+}
+
 for (const kind of ["pasted-text", "file", "image", "mixed-text-and-file"]) {
-  test(`attachment-only user identity supports reply capture and recovery: ${kind}`, async () => {
-    const h = createHarness(); h.state.readyState = "complete";
-    const oldUser = modernMessage("user", "previous-user", "old text", "fallback-turn-0:0:user");
-    const oldReply = modernMessage("assistant", "previous-reply", "old reply", "fallback-turn-0:1:assistant");
-    h.state.modernUserBubbles = [oldUser.marker]; h.state.modernUserUnits = [oldUser.unit];
-    h.state.modernAssistantHeadings = [oldReply.marker];
-    await h.pageState(); h.state.now += 4000;
-    const baseline = (await h.pageState()).baseline as any;
-    const attachment = modernMessage("user", "attachment-user", kind, "fallback-turn-1:0:user");
-    const reply = modernMessage("assistant", "attachment-reply", "ATTACHMENT_OK", "fallback-turn-1:2:assistant");
-    h.state.modernUserUnits.push(attachment.unit);
-    if (kind === "mixed-text-and-file") h.state.modernUserBubbles.push(attachment.marker);
-    h.state.modernAssistantHeadings.push(reply.marker);
-    await h.pageState(); h.state.now += 4000;
-    const page = await h.pageState();
-    assert.equal((page.baseline as any).userCount, 2, "each message counted once, even with both markers");
+  test(`parsed attachment DOM supports reply capture and recovery: ${kind}`, async () => {
+    const { h, main, history, turn, user, reply } = createAttachmentDomHarness();
+    const baseline = (await settledPage(h)).baseline as Record<string, unknown>;
+    assert.equal(baseline.userCount, 1);
+    if (kind === "file") user.innerHTML = '<div><button aria-label="document.pdf">document.pdf</button></div>';
+    if (kind === "image") user.innerHTML = '<div><img alt="Uploaded image"></div>';
+    if (kind === "mixed-text-and-file") {
+      user.insertAdjacentHTML("beforeend", '<div data-content-search-unit-key="fallback-turn-1:0:user"><div data-user-message-bubble>Read the attachment</div></div>');
+    } else {
+      assert.equal(user.querySelector('[data-user-message-bubble], [data-content-search-unit-key]'), null);
+      assert.equal(user.hasAttribute("data-content-search-unit-key"), false);
+    }
+    main.append(turn);
+    const page = await settledPage(h);
+    assert.equal((page.baseline as any).userCount, 2, "count inner and outer wrappers only once");
     assert.equal((page.baseline as any).lastUserId, "attachment-user");
     const result = await h.pollReply(baseline);
-    assert.equal(result.status, "reply-ready"); assert.equal(result.reply, "ATTACHMENT_OK");
+    assert.equal(result.status, "reply-ready");
+    assert.equal(result.reply, "ATTACHMENT_OK");
+    assert.equal(result.assistantMessageId, "attachment-reply");
     assert.equal(result.submittedUserMessageId, "attachment-user");
-    h.state.modernUserBubbles = []; h.state.modernUserUnits = [attachment.unit];
-    h.state.modernAssistantHeadings = [reply.marker];
-    await h.pageState(); h.state.now += 4000;
-    assert.equal((await h.message({ type: "poll-reply", baseline, submittedUserMessageId: "attachment-user" })).reply, "ATTACHMENT_OK");
+
+    // Virtual scrolling removes the original anchor and rekeys the remaining turn.
+    history.remove();
+    for (const node of [turn, ...turn.querySelectorAll("*")]) {
+      for (const attr of ["data-content-search-unit-key", "data-chatgpt-search-unit-key", "data-content-search-turn-key"]) {
+        const key = node.getAttribute(attr);
+        if (key) node.setAttribute(attr, key.replace("fallback-turn-1", "fallback-turn-0"));
+      }
+    }
+    // Duplicate copies of the same UUID are one identity, as in the actual assistant wrapper.
+    user.setAttribute("data-chatgpt-search-message-ids", "attachment-user attachment-user");
+    await settledPage(h);
+    const recovered = await h.message({ type: "poll-reply", baseline, submittedUserMessageId: "attachment-user" });
+    assert.equal(recovered.reply, "ATTACHMENT_OK");
+    assert.equal(recovered.assistantMessageId, "attachment-reply");
+    assert.equal(reply.getAttribute("data-content-search-unit-key"), "fallback-turn-0:2:assistant");
   });
 }
 
-test("an attachment-only first turn satisfies conversation hydration", async () => {
-  const h = createHarness(); h.state.readyState = "complete";
-  const attachment = modernMessage("user", "first-attachment", "file", "fallback-turn-0:0:user");
-  h.state.modernUserUnits = [attachment.unit];
-  await h.pageState(); h.state.now += 4000;
-  assert.equal((await h.pageState()).ready, true);
+for (const scenario of ["user-unmounted", "missing-anchor", "missing-id", "ambiguous-id", "later-turn", "later-user-unmounted"] as const) {
+  test(`parsed attachment DOM preserves reply attribution: ${scenario}`, async () => {
+    const { h, main, history, turn, user, reply } = createAttachmentDomHarness();
+    const baseline = (await settledPage(h)).baseline;
+    main.append(turn);
+    let expectedId: string | null = "attachment-user";
+    if (scenario === "user-unmounted") user.remove();
+    if (scenario === "missing-anchor") { history.remove(); expectedId = null; }
+    if (scenario === "missing-id") user.removeAttribute("data-chatgpt-search-message-ids");
+    if (scenario === "ambiguous-id") user.setAttribute("data-chatgpt-search-message-ids", "attachment-user other-user");
+    if (scenario === "later-turn" || scenario === "later-user-unmounted") {
+      const later = turn.cloneNode(true) as typeof turn;
+      for (const node of [later, ...later.querySelectorAll("*")]) {
+        for (const attr of ["id", "data-content-search-unit-key", "data-chatgpt-search-unit-key", "data-chatgpt-search-message-ids", "data-chatgpt-selection-message-id"]) {
+          const value = node.getAttribute(attr);
+          if (value) node.setAttribute(attr, value.replaceAll("attachment-", "later-").replaceAll("fallback-turn-1", "fallback-turn-2"));
+        }
+      }
+      if (scenario === "later-user-unmounted") later.querySelector("#later-user")!.remove();
+      main.append(later);
+      reply.remove();
+    }
+    await settledPage(h);
+    const result = await h.message({ type: "poll-reply", baseline, submittedUserMessageId: expectedId });
+    assert.notEqual(result.status, "reply-ready");
+    if (scenario === "user-unmounted") {
+      turn.prepend(user);
+      await settledPage(h);
+      assert.equal((await h.message({ type: "poll-reply", baseline, submittedUserMessageId: expectedId })).reply, "ATTACHMENT_OK");
+    }
+  });
+}
+
+test("a parsed attachment-only first turn satisfies conversation hydration", async () => {
+  const { h, main, history, turn, reply } = createAttachmentDomHarness();
+  history.remove(); reply.remove(); main.append(turn);
+  const page = await settledPage(h);
+  assert.equal(page.ready, true);
+  assert.equal((page.baseline as any).lastUserId, "attachment-user");
 });

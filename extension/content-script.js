@@ -301,9 +301,12 @@
     const marker = role === "assistant" ? '[data-conversation-role="assistant"]' : '[data-user-message-bubble]';
     const modern = Array.from(document.querySelectorAll(marker))
       .map(node => node.closest('[data-content-search-unit-key]')).filter(Boolean);
-    // File/image-only turns have no text bubble. Their user unit still carries
-    // the role suffix and resolves to a real UUID on its enclosing search unit.
-    if (role === "user") modern.push(...document.querySelectorAll('[data-content-search-unit-key$=":user"]'));
+    // Attachment-only turns can omit both the text bubble and the inner content
+    // unit. Their outer search unit still carries the role and real message ID.
+    if (role === "user") {
+      modern.push(...document.querySelectorAll('[data-content-search-unit-key$=":user"]'));
+      modern.push(...document.querySelectorAll('[data-chatgpt-search-unit-key$=":user"][data-chatgpt-search-message-ids]'));
+    }
     const seen = new Set();
     return [...new Set([...legacy, ...modern])].filter(node => {
       const id = getMessageId(node);
@@ -363,7 +366,9 @@
     if (!submittedUser) return [];
     const nextUser = users.find(user => precedes(submittedUser, user));
     const turnKey = node => (node.getAttribute("data-content-search-unit-key") ??
-      node.closest?.('[data-content-search-unit-key]')?.getAttribute("data-content-search-unit-key"))
+      node.getAttribute("data-chatgpt-search-unit-key") ??
+      node.closest?.('[data-content-search-unit-key]')?.getAttribute("data-content-search-unit-key") ??
+      node.closest?.('[data-chatgpt-search-unit-key]')?.getAttribute("data-chatgpt-search-unit-key"))
       ?.match(/^(.*):\d+:(?:user|assistant)$/)?.[1] ?? null;
     const userTurn = turnKey(submittedUser);
     return messages.filter(message => precedes(submittedUser, message) &&

@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+<body>
+  <!-- Sanitized shape of a manual text turn followed by an attachment-only turn. -->
+  <main>
+    <section id="history-turn" data-content-search-turn-key="fallback-turn-0">
+      <div data-chatgpt-search-unit-key="fallback-turn-0:0:user" data-chatgpt-search-message-ids="history-user">
+        <div data-content-search-unit-key="fallback-turn-0:0:user">
+          <div data-user-message-bubble>Manual question</div>
+        </div>
+      </div>
+      <div data-content-search-unit-key="fallback-turn-0:2:assistant" data-chatgpt-search-unit-key="fallback-turn-0:2:assistant" data-chatgpt-search-message-ids="history-reply history-reply">
+        <h4 data-conversation-role="assistant">Assistant</h4>
+        <div data-chatgpt-selection-message-id="history-reply">Previous answer</div>
+      </div>
+    </section>
+    <section id="attachment-turn" data-content-search-turn-key="fallback-turn-1">
+      <div id="attachment-user" data-chatgpt-search-unit-key="fallback-turn-1:0:user" data-chatgpt-search-message-ids="attachment-user">
+        <div class="attachments"><button aria-label="Pasted text (1).txt">Pasted text (1)</button></div>
+      </div>
+      <div id="attachment-reply" data-content-search-unit-key="fallback-turn-1:2:assistant" data-chatgpt-search-unit-key="fallback-turn-1:2:assistant" data-chatgpt-search-message-ids="attachment-reply attachment-reply">
+        <h4 data-conversation-role="assistant">Assistant</h4>
+        <div data-chatgpt-selection-message-id="attachment-reply">ATTACHMENT_OK</div>
+      </div>
+    </section>
+  </main>
+  <form data-type="unified-composer">
+    <div id="prompt-textarea" contenteditable="true" role="textbox"></div>
+  </form>
+</body>
+</html>
