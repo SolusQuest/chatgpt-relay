@@ -14,3 +14,6 @@ srv.err
 *.tmp.log
 
 relay-test.*
+
+# Local package verification output
+package-check.tgz

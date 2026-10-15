@@ -253,7 +253,7 @@ new status and recovery columns. The public session response retains
 `inProgressTaskId` as a compatibility alias while adding `activeTaskId` and
 `activeTaskStatus`.
 
-Source edits do not hot-swap a server started with `npm start`, and an unpacked
+Source edits do not hot-swap a server started with `pnpm start`, and an unpacked
 extension does not reload itself. Activate this change during an idle window in
 this order:
 

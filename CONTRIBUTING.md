@@ -19,17 +19,17 @@ normal issue process.
 
 Requirements:
 
-- Node.js 22 or later
-- npm
+- Node.js 22.18 or later
+- pnpm 11.7.0 (declared in `package.json`)
 - A Chromium browser for manual extension validation
 
 Install and validate:
 
 ```bash
-npm install
-npm run typecheck
-npm test
-npm pack --dry-run
+pnpm install --frozen-lockfile
+pnpm run typecheck
+pnpm test
+pnpm pack --out package-check.tgz
 ```
 
 Load `extension/` as an unpacked extension when a change affects browser
@@ -59,7 +59,7 @@ A pull request should:
 - call out compatibility, migration, security, and privacy effects;
 - remain narrowly scoped.
 
-CI runs on Ubuntu and Windows with Node.js 22. A pull request should pass
+CI runs on Ubuntu, Windows, and macOS with Node.js 22. A pull request should pass
 type-checking, tests, and package-content validation before review.
 
 ## License

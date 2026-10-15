@@ -58,7 +58,8 @@ gpt-relay/
 
 ## Requirements
 
-- Node.js 22 or later
+- Node.js 22.18 or later
+- pnpm 11.7.0 (declared in `package.json`)
 - Chrome, Edge, Brave, or another Chromium browser with MV3 support
 
 ## Quick start
@@ -67,20 +68,22 @@ gpt-relay/
 
 ```bash
 git clone https://github.com/SolusQuest/chatgpt-relay.git
-cd gpt-relay
-npm install
+cd chatgpt-relay
+pnpm install --frozen-lockfile
 ```
+
+The development versions are pinned in `mise.toml`. With mise, run `mise trust` and `mise install` in the checkout before installing dependencies.
 
 ### 2. Start the relay
 
 ```bash
-npm start
+pnpm start
 ```
 
 After a global installation, you can instead run:
 
 ```bash
-npm install -g .
+pnpm add -g .
 gpt-relay start
 ```
 
@@ -254,9 +257,9 @@ state machine and recovery decisions.
 ## Validation
 
 ```bash
-npm run typecheck
-npm test
-npm pack --dry-run
+pnpm run typecheck
+pnpm test
+pnpm pack --out package-check.tgz
 ```
 
 ## Data and privacy
@@ -280,7 +283,7 @@ To reset local relay data, stop the relay and remove the database files from
 
 | Symptom | Suggested action |
 |---|---|
-| `gpt-relay health` fails | Confirm that `npm start` or `gpt-relay start` is running |
+| `gpt-relay health` fails | Confirm that `pnpm start` or `gpt-relay start` is running |
 | Relay banner is missing | Reload the extension, then refresh `chatgpt.com` |
 | Popup reports `unreachable` | Check the relay URL and local firewall |
 | Session is paused | Resolve the reported captcha or rate limit, then resume |

@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -36,7 +36,7 @@ const secretPatterns = [
   /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/,
 ];
 
-const failures = [];
+const failures: string[] = [];
 
 for (const file of requiredFiles) {
   try {
@@ -46,10 +46,16 @@ for (const file of requiredFiles) {
   }
 }
 
-const tracked = execFileSync("git", ["ls-files", "-z"], {
-  cwd: root,
-  encoding: "utf8",
-}).split("\0").filter(Boolean);
+const tracked = execFileSync(
+  "git",
+  ["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+  {
+    cwd: root,
+    encoding: "utf8",
+  },
+)
+  .split("\0")
+  .filter((file) => file && existsSync(join(root, file)));
 
 for (const file of tracked) {
   const buffer = readFileSync(join(root, file));
@@ -61,7 +67,11 @@ for (const file of tracked) {
   for (const [index, line] of lines.entries()) {
     const location = `${file}:${index + 1}`;
 
-    if (windowsLocalPath.test(line) || unixHomePath.test(line) || line.includes(formerPrivateProjectName)) {
+    if (
+      windowsLocalPath.test(line) ||
+      unixHomePath.test(line) ||
+      line.includes(formerPrivateProjectName)
+    ) {
       failures.push(`${location}: machine-specific path or former private project name`);
     }
 
@@ -89,7 +99,7 @@ const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8"))
 if (packageJson.license !== "MIT") {
   failures.push("package.json: license must match the root MIT License");
 }
-if (packageJson.engines?.node !== ">=22.0.0") {
+if (packageJson.engines?.node !== ">=22.18.0") {
   failures.push("package.json: engines.node must match the documented Node.js requirement");
 }
 if (!packageJson.description || cjkPattern.test(packageJson.description)) {
@@ -111,4 +121,4 @@ if (failures.length > 0) {
   process.exit(1);
 }
 
-console.log(`Public-release hygiene check passed for ${tracked.length} tracked files.`);
+console.log(`Public-release hygiene check passed for ${tracked.length} repository files.`);

@@ -44,7 +44,8 @@
     "cli": "tsx bin/gpt-relay.ts",
     "test": "tsx --test test/**/*.test.ts",
     "typecheck": "tsc --noEmit",
-    "check:public": "node scripts/check-public-release.mjs"
+    "check:public": "node scripts/check-public-release.ts",
+    "icons:generate": "node scripts/gen-icons.ts"
   },
   "dependencies": {
     "bonjour-service": "1.4.4",
@@ -58,6 +59,7 @@
     "typescript": "^5.4.0"
   },
   "engines": {
-    "node": ">=22.0.0"
-  }
+    "node": ">=22.18.0"
+  },
+  "packageManager": "pnpm@11.7.0"
 }
