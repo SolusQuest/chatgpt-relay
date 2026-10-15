@@ -48,18 +48,20 @@ CLI/client persists `clientRequestId` before each message. After a lost response
 
 ### Apply the workflow effort policy
 
-When running a workflow, resolve its [effort default or explicit override](./workflows/README.md#relay-effort-policy) at preflight. Keep the webpage's model family. New-session creation accepts `--effort <value>` and `--effort-fallback <policy>`; effort participates in creation idempotency, so never change it on a same-ref retry. Existing sessions use a separate control before message submission:
+For a workflow, resolve or inherit the [effort policy](./workflows/README.md#relay-effort-policy) at preflight. This section owns execution steps; workflow defaults and inheritance belong to that shared policy.
+
+For a new session, add `--effort <value> --effort-fallback <policy>` to the first substantive creation prompt under [new-session mode](#new-session-mode). These parameters participate in creation idempotency; keep them unchanged on a same-ref retry. For an existing session, require a fresh idle page, a clean composer and no queued/active work, then apply the policy before submitting a message:
 
 ```bash
 gpt-relay sessions effort --session-ref <ref> --effort <value> --effort-fallback <policy> --operation-id <operation-id>
 gpt-relay operations <operation-id>
 ```
 
-Wait for `succeeded`, inspect requested/effective effort, and persist it with the execution record. A changed control payload needs a new operation ID; a transport timeout first requires observation of the original operation. For messages, `--effort` is accepted only with `--new-session`; follow-ups inherit the saved session policy.
+Wait for `succeeded`, inspect requested/effective effort, and persist it with the execution record. Observe uncertain controls under the shared [operation rules](#diagnose-and-control-an-existing-session); a changed payload needs a new operation ID. For messages, `--effort` is accepted only with `--new-session`; follow-ups inherit the saved session policy.
 
-The default fallback is `error`. `lower` permits ordinary downward fallback, never Pro. Explicit `max` permits only Pro to max before Send. An unavailable max, unknown layout, captcha, pause or generic rate limit blocks execution. This is not a retry policy. After a verified Pro-to-max fallback, record it and set the session policy to max with a new control before the next message so subsequent rounds do not keep testing Pro.
+When the workflow must retain max after a Pro-to-max fallback, run a new `sessions effort --effort max --effort-fallback error` control with the same session selector before the next message. Wait for success and preserve the original Pro request/fallback evidence in the execution record. The saved Pro policy otherwise attempts Pro again on later messages.
 
-Read effort-enabled review results using `--json` or `show <task-id>`. Require the expected selection and verified response metadata. Platform fallback after Send produces a failed task with its reply retained; do not discard that reply, reset rounds, replace the session or resend automatically. Use the workflow's checkpoint/blocked outcome. Bare CLI use without a workflow remains opt-in.
+Read effort-enabled review results using `--json` or `show <task-id>`. Require `effortSelection` to match the resolved policy or its allowed fallback and `effortVerification.status` to be `verified`. A failed/unknown control or mismatched/unverifiable reply blocks dependent submission or advancement under the workflow policy. For accepted values, other fallback policies and error fields, consult [effort API semantics](./api.md#effort-selection).
 
 ## Artifact review
 

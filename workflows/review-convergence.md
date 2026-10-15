@@ -2,8 +2,6 @@
 
 Shared rules for bounded Relay review: round accounting, finding lineage, applicability, and continuation. Each workflow owns its artifact-specific evidence, verdicts, checkpoints, submission timing, and targeted closure exceptions.
 
-Resolve and inherit Relay effort under the shared [workflow effort policy](./README.md#relay-effort-policy). An effort change or fallback neither resets a cycle nor replaces pending tasks.
-
 ## Review budget
 
 Allow at most three full substantive submissions: initial comprehensive review, correction/regression review, and final convergence. Never start a fourth unrestricted review or treat exhausted budget as approval.
@@ -12,7 +10,7 @@ A round is consumed only by a substantive review of the requested artifact. Acce
 
 Where a workflow combines Relay with CI or GitHub feedback, all declared sources share one ledger and continuation decision; non-Relay gates create no separate review budget. The workflow defines correction/completion barriers and feedback cutoffs.
 
-The initial submission requests all currently identifiable blockers. The second includes the current artifact, complete ledger, revision summary, and relevant versions or diff, and reconciles prior IDs. The third uses final convergence scope. Later findings, artifact changes, deterministic corrections, and `auto` never reset a cycle. A new cycle requires the active workflow's explicit condition or direct user authorization; retain the ledger and record the reason.
+The initial submission requests all currently identifiable blockers. The second includes the current artifact, complete ledger, revision summary, and relevant versions or diff, and reconciles prior IDs. The third uses final convergence scope. Later findings, artifact changes, deterministic corrections, and `auto` never reset a cycle. Effort changes or fallback neither reset a cycle nor replace pending tasks. A new cycle requires the active workflow's explicit condition or direct user authorization; retain the ledger and record the reason.
 
 ## Revision evidence and workflow readiness
 

@@ -161,15 +161,8 @@ To exercise recovery, submit a review and refresh the ChatGPT page while it is g
 
 ## Thinking effort
 
-`effort-controls.js` loads before the content script and operates only within
-the target composer. It links menus using runtime ARIA IDs, uses bounded
-left/right keyboard actions, verifies the selected model family has not changed,
-and distinguishes Pro with `data-maximum`. Unknown layouts fail closed.
+`effort-controls.js` loads before the content script and operates only within the target composer. It finds the trigger through `data-composer-navigation-target="reasoning"` and `data-selected-reasoning-effort`, links menus through runtime ARIA IDs, and operates `[data-reasoning-slider]` with bounded left/right keyboard actions. These attributes avoid depending on localized effort labels. Pro is distinguished through `data-maximum`: both Pro and ordinary Medium have raw effort `medium`. Unknown layouts fail closed.
 
-The worker verifies completed effort-enabled replies through a bounded
-`chrome.scripting.executeScript` call in the MAIN world. Its read-only history
-request returns only the exact turn's model and thinking-effort identifiers.
-Credentials stay in the page; no network interception or additional host
-permissions are required. Missing/unknown metadata is reported rather than
-treated as successful verification. The existing durable Send fence and
-at-most-once recovery remain in force.
+The adapter verifies the selected model family, slider value, raw effort and Pro marker, rechecks after prompt injection, and checks the trigger again immediately before Send. It never opens the model-family selector.
+
+The worker verifies completed effort-enabled replies through a bounded `chrome.scripting.executeScript` call in the MAIN world. Its read-only history request matches the exact submitted user UUID and final assistant UUID and returns only their model and thinking-effort identifiers. Credentials stay in the page; no network interception or additional host permissions are required. Public verification errors and reply retention are defined in [the effort API contract](../api.md#effort-selection); the existing durable Send fence and at-most-once recovery remain in force.

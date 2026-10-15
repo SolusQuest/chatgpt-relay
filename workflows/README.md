@@ -12,7 +12,7 @@ Mode: default | auto
 Issue: <url>
 Relay session: <optional existing session ID or sessionRef>
 Relay Project: <optional Project ID/name, or no-project, for a new session>
-Relay effort: <optional explicit override; otherwise use workflow defaults>
+Relay effort: <optional explicit override>
 ```
 
 Standalone or delegated stage:
@@ -24,7 +24,7 @@ Issue: <url or complete issue text>
 Stage handoff: <artifact path/reference or complete record, required for implementation>
 Relay session: <existing task-specific session ID or sessionRef when established>
 Relay Project: <optional Project ID/name, or no-project, when no session is established>
-Relay effort: <optional explicit override; otherwise use workflow defaults>
+Relay effort: <optional explicit override>
 ```
 
 Milestone issue-graph publication:
@@ -37,7 +37,7 @@ Refinement parent: <issue url>
 Design authority: <document or merged PR url>@<exact commit SHA>
 Relay session: <optional existing session ID or sessionRef>
 Relay Project: <optional Project ID/name, or no-project, for a new session>
-Relay effort: <optional explicit override; otherwise use workflow defaults>
+Relay effort: <optional explicit override>
 Close refinement parent: yes | no
 ```
 
@@ -71,7 +71,7 @@ Persist complete handoff content or accessible references using the target proje
 
 Only established fields need values; Design need not invent a plan, PR, or branch. Receivers verify sources/state, reuse applicable completed work, and act on concrete changed evidence under the owning stage. Missing/inconsistent required evidence means unknown readiness: reconcile authoritative artifacts and original task records before dependent work. Never manufacture approval or open a new cycle to replace lost context.
 
-Contract, plan, and PR review budgets remain separate. Passing a stage neither consumes nor replenishes another budget. Stage/agent/model/chat changes, standalone invocation, delegation, composition, and resume never reset cycles, rename findings, drop pending tasks, replace an established session, or expand authority; omitted invocation fields inherit recorded identity.
+Contract, plan, and PR review budgets remain separate. Passing a stage neither consumes nor replenishes another budget. Stage/agent/model/chat changes, effort changes or fallback, standalone invocation, delegation, composition, and resume never reset cycles, rename findings, drop pending tasks, replace an established session, or expand authority; omitted invocation fields inherit recorded identity.
 
 Plan owns the one-time [readiness fallback](./plan.md#automatic-readiness-fallback). When eligible before implementation, run only Design from Phase 1 through contract review, publication/readback, and `DESIGN_READY`, then return to the existing Plan stage with remaining budgets; propagate blocked Design. Implementation deviations and authorized PR re-entry follow their stage rules.
 
@@ -92,22 +92,22 @@ Acceptance is not creation: `pending` is in progress, `created` requires a bound
 
 ## Relay effort policy
 
-Resolve effort at invocation preflight with the session. An explicit user override takes precedence; otherwise use:
+Resolve effort at invocation preflight with the session: an explicit user override takes precedence, followed by the execution chain's recorded effective policy and fallback settings. Delegated stages, composition, readiness fallback, resume and PR re-entry inherit that policy; entering another stage does not select a new default. Apply the following defaults only to a new execution without an inherited policy:
 
 | Workflow entry | Requested effort | Pre-send fallback |
 |---|---|---|
 | `milestone-to-issue-graph` | `pro` | `max` |
 | Every other workflow, including standalone Design, Plan and Implementation | `max` | `error` |
 
-These are workflow defaults, not global CLI defaults. Preserve the model family selected by the user on the webpage; do not select a different model to obtain an effort. An explicit override defaults to no fallback unless the user also supplies a fallback policy.
+Preserve the model family selected by the user on the webpage. An explicit effort override uses `error` unless the user also supplies a fallback policy. Bare CLI use remains opt-in.
 
-For a new session, include the resolved policy with the first substantive creation prompt: `--effort pro --effort-fallback max` for the milestone default, or `--effort max` for other defaults. Do not create an ID-only placeholder to select effort. For an established idle session, use `sessions effort` with a retained operation ID and inspect `operations` until it succeeds before the first submission. A failed/unknown operation is not permission to submit, replace the session, or change model families.
+Apply the resolved policy and inspect results using [the agent effort procedure](../agent-instructions.md#apply-the-workflow-effort-policy). It covers creation, existing-session controls, operation observation and result verification; load [API details](../api.md#effort-selection) only when needed for protocol work or diagnosis.
 
-The explicit `max` fallback applies only to a requested Pro preset and only before Send, when the known UI shows Pro unavailable and max can be positively verified. Max unavailable, unknown DOM, timeout, inaccessible page, captcha, session pause or generic rate limiting remains a blocker; do not broaden the fallback to High or retry quota failures. The task records requested Pro and effective max when fallback occurs. Notify the user, record the reason/evidence, and retain max as the effective workflow policy for the remainder of this invocation instead of probing Pro on every round. A new explicit invocation may reconsider the default.
+The milestone's Pro-to-max fallback applies only before Send, when the known UI shows Pro unavailable and max can be positively verified. It never falls further to High or treats unknown page state, timeout or generic rate limiting as Pro unavailability. If fallback occurs, notify the user, record requested Pro/effective max and the reason/evidence, and retain max for the rest of this execution. A new independent invocation may reconsider the default.
 
-Inspect `effortSelection` and `effortVerification` on every required Relay result. A platform downgrade after Send is independent of this pre-send fallback: retain the captured reply and original task identity, report the mismatch/unknown verification, and follow the active workflow's blocker rules. Do not replay the prompt or silently accept Medium/another model as the requested max fallback.
+Platform downgrade after Send is separate from this fallback. Mismatched or unverifiable effort uses the active workflow's checkpoint/blocked outcome; keep the reply and original task identity without replaying the prompt.
 
-Carry requested/effective effort, fallback policy, fallback-used reason and verification evidence in the handoff. Delegated stages, composition, readiness fallback and resume inherit that record; omitted fields do not reset it. Selecting effort changes neither review budgets nor authority.
+Persist effort continuity in the shared [handoff record](#stage-handoffs-and-delegation), including the original request when the effective policy changes to max.
 
 ## Execution modes
 

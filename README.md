@@ -338,19 +338,9 @@ gpt-relay review --new-session --session-ref sr_new --no-project \
   --effort max --text 'Review this proposal' --json
 ```
 
-Supported values are `none | medium | high | max | pro`. The default is to fail
-when a requested preset is unavailable. Opt into ordinary downward fallback with
-`--effort-fallback lower`. To explicitly permit Pro to max before Send, use
-`--effort pro --effort-fallback max`; Pro does not downgrade without that policy. The session policy
-survives reload and is applied before subsequent Relay messages. Without a new
-policy, existing behavior is preserved. Use session controls to change an
-existing conversation; `review --effort` is accepted only with `--new-session`.
+Supported values are `none | medium | high | max | pro`; an unavailable preset fails by default. Optional fallback is `--effort-fallback lower` for ordinary presets, or `--effort pro --effort-fallback max` for Pro to max before Send. A saved session policy survives reload and applies to subsequent messages. Change it through session controls; `review --effort` is accepted only with `--new-session`. Without a policy, the webpage setting is preserved.
 
-Effort-enabled results include the requested/effective preset and verification
-of the platform-reported response model. A mismatch or unverifiable response
-fails the task while retaining its reply. Inspect it using `show TASK_ID`; do not
-automatically resend. See [effort API semantics](api.md#effort-selection) and
-[workflow defaults](workflows/README.md#relay-effort-policy).
+Results report requested/effective effort and response verification. A mismatch or unverifiable response fails the task while retaining its reply; inspect `show TASK_ID` without automatically resending. See [API semantics](api.md#effort-selection) for the contract. Agents running workflows should use the [workflow effort policy](workflows/README.md#relay-effort-policy) and [execution procedure](agent-instructions.md#apply-the-workflow-effort-policy).
 
 After updating, restart the Relay service, reload the extension, and refresh
 ChatGPT tabs so the new content-script module is loaded.
