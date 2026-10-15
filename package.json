@@ -28,6 +28,8 @@
     "bin",
     "client",
     "server",
+    "service",
+    "docs",
     "shared",
     "scripts",
     "extension",

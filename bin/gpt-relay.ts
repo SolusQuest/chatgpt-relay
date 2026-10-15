@@ -492,6 +492,8 @@ commands:
   projects discover [--save] [--no-wait]
                            scan visible Project links in open ChatGPT tabs
   start                    start relay server (foreground)
+  service install [--dry-run] | status | start | stop | restart | uninstall
+                           manage a login service (currently macOS LaunchAgent)
   health                   check the selected relay server
   sessions                 list active ChatGPT sessions
   sessions inspect|suspend|continue --session-ref REF (or --session ID)
@@ -548,6 +550,9 @@ async function main(): Promise<number> {
     switch (cmd) {
       case "start":
         return await cmdStart(rest);
+      case "service":
+        await (await import("../service/index.js")).serviceCommand(rest);
+        return 0;
       case "health":
         return await cmdHealth();
       case "doctor": {

@@ -20,6 +20,7 @@
   },
   "include": [
     "server/**/*.ts",
+    "service/**/*.ts",
     "bin/**/*.ts",
     "client/**/*.ts",
     "shared/**/*.ts",

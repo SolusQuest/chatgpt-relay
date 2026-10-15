@@ -132,7 +132,7 @@ After a created session is bound, its `sessionRef` and ChatGPT conversation ID a
 
 ## Separate CLI and server computers
 
-Run the server, browser and extension on computer A, and the CLI on computer B. Both computers install the same package; only A runs `gpt-relay start`. Start remains a foreground process, with no platform service installation.
+Run the server, browser and extension on computer A, and the CLI on computer B. Both computers install the same package; only A runs the server. `gpt-relay start` runs in the foreground; macOS also supports a login service.
 
 On A, allow connections from the LAN. For example, on macOS:
 
@@ -173,6 +173,21 @@ The server stores a stable identity in its SQLite database, while the CLI stores
 Already running older servers remain usable through `GPT_RELAY_URL`, `--server`, or the legacy loopback fallback. Persisted binding and discovery require the new server identity API, activated when the server is next restarted. This change does not require an extension reload.
 
 The default listener stays on loopback. A LAN listener trusts computers that can reach it; server identity prevents accidental backend switching and is not authentication. See [trust boundaries](./SECURITY.md#trust-boundaries).
+
+### Start automatically at login (macOS)
+
+Stop any foreground server first, then install a per-user LaunchAgent from the installed package or checkout:
+
+```bash
+GPT_RELAY_HOST=0.0.0.0 gpt-relay service install --dry-run
+GPT_RELAY_HOST=0.0.0.0 gpt-relay service install
+gpt-relay service status
+gpt-relay health --local
+```
+
+The service starts immediately and at subsequent logins, restarts after exit, and uses the same database by default. It records absolute Node and package paths, so no shell, pnpm, or version-manager initialization is needed at login. Keep those paths installed. The browser still needs to be open with the extension enabled and ChatGPT signed in.
+
+Use `gpt-relay service restart` after source updates. `service stop` stops it for the current login; `service start` starts it again. `service uninstall` stops it and removes login startup without deleting data or logs. See [service management](./docs/services.md) for configuration, logs, runtime upgrades, and platform support.
 
 ## Common commands
 
