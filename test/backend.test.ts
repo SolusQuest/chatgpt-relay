@@ -9,7 +9,7 @@ import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import dgram from "node:dgram";
 import type { AddressInfo } from "node:net";
-import { Service, type Bonjour, type Browser } from "bonjour-service";
+import { Service, type ServiceConfig, type Bonjour, type Browser } from "bonjour-service";
 import { createBonjour } from "../shared/mdns.js";
 import { createApp } from "../server/app.js";
 import { loadConfig } from "../server/config.js";
@@ -374,6 +374,53 @@ test("local server announcements are removed without changing client bindings", 
   stop();
   assert.deepEqual(localRegistrations(), []);
   assert.equal(readBinding()!.serverId, server.identity.serverId);
+});
+
+test("multi-interface announcements own a stable host instead of claiming the OS Bonjour name", async () => {
+  const server = await relay("multi-interface");
+  process.env.GPT_RELAY_DISCOVERY = "1";
+  const hostname = mock.method(os, "hostname", () => "Yues-Mac-mini.local");
+  const interfaces = mock.method(os, "networkInterfaces", () => ({
+    lo0: [{ address: "127.0.0.1", family: "IPv4", netmask: "255.255.255.0", cidr: null, internal: true, mac: "00:00:00:00:00:00" }],
+    en0: [{ address: "192.0.2.10", family: "IPv4", netmask: "255.255.255.0", cidr: null, internal: false, mac: "02:00:00:00:00:01" }],
+    en1: [{ address: "198.51.100.10", family: "IPv4", netmask: "255.255.255.0", cidr: null, internal: false, mac: "02:00:00:00:00:02" }],
+    bridge0: [
+      { address: "203.0.113.10", family: "IPv4", netmask: "255.255.255.0", cidr: null, internal: false, mac: "02:00:00:00:00:03" },
+      { address: "2001:db8::10", family: "IPv6", netmask: "ffff:ffff:ffff:ffff::", cidr: null, scopeid: 0, internal: false, mac: "02:00:00:00:00:03" },
+    ],
+  }) satisfies NodeJS.Dict<os.NetworkInterfaceInfo[]>);
+  const services: Service[] = [];
+  // Exercise the real dependency's record generation without LAN broadcasts.
+  const client = {
+    publish(options: ServiceConfig) {
+      const service = new Service(options, () => {}, () => {});
+      services.push(service);
+      return service;
+    },
+    unpublishAll(callback: () => void) { callback(); },
+    destroy() {},
+  } as unknown as Bonjour;
+  try {
+    for (const systemName of ["Yues-Mac-mini.local", "Yues-Mac-mini-2.local"]) {
+      hostname.mock.mockImplementation(() => systemName);
+      const stop = announceServer(server.identity, "0.0.0.0", 9123, () => client);
+      cleanup.push(stop);
+      const records = services.at(-1)!.records();
+      const target = `gpt-relay-${server.identity.serverId}.local`;
+      const addresses = records.filter(record => ["A", "AAAA"].includes(record.type));
+      assert.equal(addresses.length, 4);
+      assert.ok(addresses.every(record => record.name === target));
+      assert.deepEqual(addresses.map(record => record.data).sort(),
+        ["192.0.2.10", "198.51.100.10", "203.0.113.10", "2001:db8::10"].sort());
+      assert.equal(records.find(record => record.type === "SRV")!.data.target, target);
+      assert.equal(records.find(record => record.type === "SRV")!.data.port, 9123);
+      assert.ok(records.every(record => record.name !== systemName));
+      stop();
+    }
+    assert.equal(services[0]!.host, services[1]!.host);
+  } finally {
+    hostname.mock.restore(); interfaces.mock.restore();
+  }
 });
 
 test("DNS-SD announcements round-trip through isolated UDP sockets and verify the advertised HTTP port", async () => {

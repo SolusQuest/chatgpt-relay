@@ -14,6 +14,10 @@ export function announceServer(identity: ServerInfo, host: string, port: number,
     try {
       bonjour = createClient((error: unknown) => console.error("[discovery]", error));
       const service = bonjour.publish({ name: `gpt-relay-${identity.serverId}`, type: DISCOVERY_TYPE,
+        // bonjour-service otherwise publishes every interface's A/AAAA records
+        // under os.hostname(), conflicting with the OS's own mDNS responder.
+        // Own a separate, stable host name instead of claiming the system name.
+        host: `gpt-relay-${identity.serverId}.local`,
         protocol: "tcp", port,
         txt: { serverId: identity.serverId, apiVersion: String(identity.apiVersion), version: identity.version } });
       service.on("error", error => console.error("[discovery]", error));

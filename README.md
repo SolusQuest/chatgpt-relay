@@ -150,6 +150,8 @@ gpt-relay sessions
 
 Use `GPT_RELAY_PORT` on A to choose a different port. Discovery advertises the actual listener port; clients do not scan ports. LAN discovery uses DNS-SD `_gpt-relay._tcp` over mDNS (UDP 5353), and requires multicast connectivity between computers. If discovery is unavailable, use an explicit address with `bind` or `--server`.
 
+Discovery publishes a separate `gpt-relay-<serverId>.local` host name so it does not conflict with the operating system's Bonjour host name, including on computers with multiple network interfaces. Set `GPT_RELAY_DISCOVERY=0` to disable LAN discovery without disabling direct connections.
+
 ```bash
 gpt-relay bind                         # show saved binding and environment override
 gpt-relay bind --local                 # save the unique local server
