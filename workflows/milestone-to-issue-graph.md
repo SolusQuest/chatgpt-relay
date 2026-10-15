@@ -3,6 +3,7 @@
 **Required references**:
 
 - Relay mechanics: [`agent-instructions.md`](../agent-instructions.md)
+- Effort defaults, fallback and inheritance: [Relay effort policy](./README.md#relay-effort-policy)
 - Execution modes and authority boundaries: [`workflows/README.md`](./README.md#execution-modes)
 - Session selection: [`workflows/README.md`](./README.md#relay-session-selection)
 - Review budget, finding rules, and continuation: [`review-convergence.md`](./review-convergence.md)
@@ -25,10 +26,11 @@ Refinement parent: <issue URL>
 Design authority: <document or merged PR URL>@<exact commit SHA>
 Relay session: <optional existing session ID or sessionRef>
 Relay Project: <optional Project ID/name, or no-project, for a new session>
+Relay effort: <optional explicit override; default pro with max fallback>
 Close refinement parent: yes | no
 ```
 
-Defaults are `Mode: default` and `Close refinement parent: no`. The milestone must already exist and be open; a missing or closed milestone yields the selected mode's checkpoint or `BLOCKED_HANDOFF`, without creation or reopening.
+Defaults are `Mode: default`, `Close refinement parent: no`, and `Relay effort: pro` with an explicit pre-send fallback to `max` under the shared effort policy. The milestone must already exist and be open; a missing or closed milestone yields the selected mode's checkpoint or `BLOCKED_HANDOFF`, without creation or reopening.
 
 Resolve the Relay session at invocation preflight under the shared selection rule. Pin the repository, milestone, refinement parent, authority revision, mode, session ID/ref, and closure permission. Reuse that session for every unit and round; never allocate one per unit. An authority change is a material workflow change.
 

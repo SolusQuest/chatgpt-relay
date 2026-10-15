@@ -1,6 +1,6 @@
 export const EFFORTS = ["none", "medium", "high", "max", "pro"] as const;
 export type Effort = typeof EFFORTS[number];
-export interface EffortPolicy { effort: Effort; effortFallback: "error" | "lower" }
+export interface EffortPolicy { effort: Effort; effortFallback: "error" | "lower" | "max" }
 export interface EffortSelection {
   requestedEffort: Effort; effectiveEffort: Effort; fallbackApplied: boolean; modelFamily: string;
 }
@@ -10,16 +10,19 @@ export interface EffortVerification {
 export function parseEffortPolicy(body: { effort?: unknown; effortFallback?: unknown }): EffortPolicy | null {
   if (body.effort === undefined && body.effortFallback === undefined) return null;
   if (!EFFORTS.includes(body.effort as Effort) ||
-      body.effortFallback !== undefined && !["error", "lower"].includes(body.effortFallback as string)) {
+      body.effortFallback !== undefined && !["error", "lower", "max"].includes(body.effortFallback as string) ||
+      body.effortFallback === "max" && body.effort !== "pro") {
     throw new Error("invalid_effort_policy");
   }
-  return { effort: body.effort as Effort, effortFallback: body.effortFallback as "error" | "lower" ?? "error" };
+  return { effort: body.effort as Effort, effortFallback: body.effortFallback as EffortPolicy["effortFallback"] ?? "error" };
 }
 export function validSelection(policy: EffortPolicy, s: EffortSelection): boolean {
   if (!s || s.requestedEffort !== policy.effort || !EFFORTS.includes(s.effectiveEffort) ||
       !["GPT-6", "GPT-5.6 Sol"].includes(s.modelFamily)) return false;
   const changed = s.effectiveEffort !== policy.effort;
-  return s.fallbackApplied === changed && (!changed || policy.effortFallback === "lower" &&
+  return s.fallbackApplied === changed && (!changed ||
+    policy.effort === "pro" && policy.effortFallback === "max" && s.effectiveEffort === "max" ||
+    policy.effortFallback === "lower" &&
     policy.effort !== "pro" && s.effectiveEffort !== "pro" &&
     EFFORTS.indexOf(s.effectiveEffort) < EFFORTS.indexOf(policy.effort));
 }

@@ -85,10 +85,13 @@ export function validateBusinessArgs(command: string, args: string[]): void {
   if (command === "sessions" && args[0] === "effort" && !seen.has("--effort"))
     throw new BackendError("invalid_arguments", "sessions effort requires --effort");
   for (const [flag, allowed] of [["--effort", ["none", "medium", "high", "max", "pro"]],
-      ["--effort-fallback", ["error", "lower"]]] as const) {
+      ["--effort-fallback", ["error", "lower", "max"]]] as const) {
     if (seen.has(flag) && !(allowed as readonly string[]).includes(args[args.indexOf(flag) + 1]!))
       throw new BackendError("invalid_arguments", `invalid value: ${flag}`);
   }
+  if (seen.has("--effort-fallback") && args[args.indexOf("--effort-fallback") + 1] === "max" &&
+      args[args.indexOf("--effort") + 1] !== "pro")
+    throw new BackendError("invalid_arguments", "max fallback requires --effort pro");
   if (command === "projects" && ["set", "remove"].includes(args[0] ?? "") &&
       (!seen.has("--project-id") || args[0] === "set" && !seen.has("--name"))) {
     throw new BackendError("invalid_arguments", "projects requires an ID and set requires a name");

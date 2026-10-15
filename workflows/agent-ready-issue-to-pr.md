@@ -3,6 +3,7 @@
 **Required shared rules**:
 
 - Relay mechanics: [`agent-instructions.md`](../agent-instructions.md)
+- Effort defaults, fallback and inheritance: [Relay effort policy](./README.md#relay-effort-policy)
 - Execution modes and session selection: [execution modes](./README.md#execution-modes) and [session selection](./README.md#relay-session-selection)
 - Stage handoffs and reference loading: [stage handoffs and delegation](./README.md#stage-handoffs-and-delegation)
 - Review protocol: [`review-convergence.md`](./review-convergence.md)

@@ -597,3 +597,17 @@ test("post-Send creation route mismatch cannot fail a valid reply or override su
     effortEvidence: { model: "gpt-6-thinking", thinkingEffort: "standard" } });
   assert.equal(taskStore!.getTask(task.id)!.status, "done");
 });
+
+test("creation and controls accept only explicit Pro-to-max fallback", async () => {
+  const created = await post("/v1/sessions", { sessionRef: "sr_pro_fallback_policy_api",
+    projectId: null, text: "policy-only test", effort: "pro", effortFallback: "max" });
+  assert.equal(created.status, 201);
+  assert.deepEqual(created.json.effortPolicy, { effort: "pro", effortFallback: "max" });
+  const conflict = await post("/v1/sessions", { sessionRef: "sr_pro_fallback_policy_api",
+    projectId: null, text: "policy-only test", effort: "pro", effortFallback: "error" });
+  assert.equal(conflict.status, 409);
+  assert.equal((await post("/v1/sessions", { sessionRef: "sr_bad_fallback_policy_api",
+    projectId: null, text: "policy-only test", effort: "max", effortFallback: "max" })).status, 400);
+  assert.equal((await post("/v1/session-controls", { operationId: "invalid-pro-fallback-control",
+    kind: "set-effort", session: "unused", effort: "high", effortFallback: "max" })).status, 400);
+});

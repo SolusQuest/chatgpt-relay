@@ -517,7 +517,7 @@ commands:
   sessions inspect|suspend|continue --session-ref REF (or --session ID)
   sessions refresh --session-ref REF [--recover-task TASK_ID] [--operation-id ID]
   sessions open --session-ref REF [--instance INSTANCE_ID] [--operation-id ID]
-  sessions effort --session-ref REF --effort none|medium|high|max|pro [--effort-fallback error|lower]
+  sessions effort --session-ref REF --effort none|medium|high|max|pro [--effort-fallback error|lower|max]
   sessions close --session-ref REF [--operation-id ID]
                            all session controls also accept --session ID
   doctor [--session-ref REF]  diagnose service, extension and observed DOM
@@ -533,7 +533,7 @@ commands:
   review --session-ref REF (--text T | --stdin | --file F)
   review --new-session --session-ref REF (--project-id ID | --no-project)
          (--text T | --stdin | --file F) [--no-wait] [--cri KEY]
-         [--wait-timeout ms] [--task-timeout ms] [--effort VALUE] [--effort-fallback error|lower]
+         [--wait-timeout ms] [--task-timeout ms] [--effort VALUE] [--effort-fallback error|lower|max]
                            submit a review and wait
 
 client options (temporary; mutually exclusive):

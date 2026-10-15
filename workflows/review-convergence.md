@@ -2,6 +2,8 @@
 
 Shared rules for bounded Relay review: round accounting, finding lineage, applicability, and continuation. Each workflow owns its artifact-specific evidence, verdicts, checkpoints, submission timing, and targeted closure exceptions.
 
+Resolve and inherit Relay effort under the shared [workflow effort policy](./README.md#relay-effort-policy). An effort change or fallback neither resets a cycle nor replaces pending tasks.
+
 ## Review budget
 
 Allow at most three full substantive submissions: initial comprehensive review, correction/regression review, and final convergence. Never start a fourth unrestricted review or treat exhausted budget as approval.

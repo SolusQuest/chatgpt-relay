@@ -12,6 +12,7 @@ Mode: default | auto
 Issue: <url>
 Relay session: <optional existing session ID or sessionRef>
 Relay Project: <optional Project ID/name, or no-project, for a new session>
+Relay effort: <optional explicit override; otherwise use workflow defaults>
 ```
 
 Standalone or delegated stage:
@@ -23,6 +24,7 @@ Issue: <url or complete issue text>
 Stage handoff: <artifact path/reference or complete record, required for implementation>
 Relay session: <existing task-specific session ID or sessionRef when established>
 Relay Project: <optional Project ID/name, or no-project, when no session is established>
+Relay effort: <optional explicit override; otherwise use workflow defaults>
 ```
 
 Milestone issue-graph publication:
@@ -35,6 +37,7 @@ Refinement parent: <issue url>
 Design authority: <document or merged PR url>@<exact commit SHA>
 Relay session: <optional existing session ID or sessionRef>
 Relay Project: <optional Project ID/name, or no-project, for a new session>
+Relay effort: <optional explicit override; otherwise use workflow defaults>
 Close refinement parent: yes | no
 ```
 
@@ -60,7 +63,7 @@ Persist complete handoff content or accessible references using the target proje
 |---|---|
 | Execution identity | Repository/issue; workspace/worktree and branch when selected; composition or standalone stage; phase and completion/blocker status |
 | Authority and mode | Authorized scope/actions, exclusions, unresolved user decisions, inherited mode |
-| Relay identity | Same task-specific session ID/ref and original submitted/pending task IDs for observation without replay |
+| Relay identity | Same task-specific session ID/ref and original submitted/pending task IDs for observation without replay; requested/effective effort, fallback policy/reason and verification evidence |
 | Artifacts and baseline | Exact issue/draft/plan revisions as applicable, repository baseline, relevant working-tree state, and readable content/references |
 | Decisions and verification | Constraint profile, decisions, dependencies, assumptions, acceptance/test mapping and validation requirements when established; review/correction evidence and agent continuation decision |
 | Review continuity | Stable finding ledger and revision/head lineage; established contract/plan/PR cycles and consumed/remaining rounds; applicable discovery and targeted-closure usage |
@@ -86,6 +89,25 @@ Create with the first substantive prompt and necessary context, never an ID-only
 Honor the user's Project; otherwise inspect catalog names/descriptions and choose an appropriate Project. If none can be established, explicitly use `--no-project` with sufficient context. An inaccessible or unresolved user-required Project is a mode-aware blocker, not permission to substitute. Optional discovery has partial coverage.
 
 Acceptance is not creation: `pending` is in progress, `created` requires a bound conversation ID, and `unknown` requires observation. Missing IDs and wait timeouts permit neither another page nor prompt replay. A bound session survives first-task failure. Continue independent safe work while waiting; each required Relay result still gates its dependent phase. Failures use the active mode's recovery/checkpoint or `BLOCKED_HANDOFF` rules.
+
+## Relay effort policy
+
+Resolve effort at invocation preflight with the session. An explicit user override takes precedence; otherwise use:
+
+| Workflow entry | Requested effort | Pre-send fallback |
+|---|---|---|
+| `milestone-to-issue-graph` | `pro` | `max` |
+| Every other workflow, including standalone Design, Plan and Implementation | `max` | `error` |
+
+These are workflow defaults, not global CLI defaults. Preserve the model family selected by the user on the webpage; do not select a different model to obtain an effort. An explicit override defaults to no fallback unless the user also supplies a fallback policy.
+
+For a new session, include the resolved policy with the first substantive creation prompt: `--effort pro --effort-fallback max` for the milestone default, or `--effort max` for other defaults. Do not create an ID-only placeholder to select effort. For an established idle session, use `sessions effort` with a retained operation ID and inspect `operations` until it succeeds before the first submission. A failed/unknown operation is not permission to submit, replace the session, or change model families.
+
+The explicit `max` fallback applies only to a requested Pro preset and only before Send, when the known UI shows Pro unavailable and max can be positively verified. Max unavailable, unknown DOM, timeout, inaccessible page, captcha, session pause or generic rate limiting remains a blocker; do not broaden the fallback to High or retry quota failures. The task records requested Pro and effective max when fallback occurs. Notify the user, record the reason/evidence, and retain max as the effective workflow policy for the remainder of this invocation instead of probing Pro on every round. A new explicit invocation may reconsider the default.
+
+Inspect `effortSelection` and `effortVerification` on every required Relay result. A platform downgrade after Send is independent of this pre-send fallback: retain the captured reply and original task identity, report the mismatch/unknown verification, and follow the active workflow's blocker rules. Do not replay the prompt or silently accept Medium/another model as the requested max fallback.
+
+Carry requested/effective effort, fallback policy, fallback-used reason and verification evidence in the handoff. Delegated stages, composition, readiness fallback and resume inherit that record; omitted fields do not reset it. Selecting effort changes neither review budgets nor authority.
 
 ## Execution modes
 

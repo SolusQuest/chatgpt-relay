@@ -5,7 +5,7 @@ import { TaskStore } from "../server/task-store.js";
 import { loadConfig } from "../server/config.js";
 import { SessionDiagnostics } from "../server/session-diagnostics.js";
 import { SessionControls } from "../server/session-controls.js";
-import { parseEffortPolicy, verifyEffort, type EffortSelection } from "../shared/effort.js";
+import { parseEffortPolicy, verifyEffort, validSelection, type EffortSelection } from "../shared/effort.js";
 import { validateBusinessArgs } from "../client/cli-options.js";
 import fs from "node:fs";
 import vm from "node:vm";
@@ -81,13 +81,13 @@ test("effort mismatch/unknown retain captured reply and cannot replay across res
   assert.equal(verifyEffort({ ...selection, effectiveEffort: "pro", requestedEffort: "pro" }, { model: "gpt-6-thinking", thinkingEffort: "standard" }).status, "mismatch");
 });
 
-function dom({ max = 4, pro = true, chinese = false, family = "GPT-6", inertDuplicate = false, ignoreKeys = false, delayedKey = false } = {}) {
+function dom({ max = 4, pro = true, chinese = false, family = "GPT-6", inertDuplicate = false, ignoreKeys = false, delayedKey = false, proLocked = false } = {}) {
   const w = new Window();
   w.document.body.innerHTML = '<form><div contenteditable="true"></div><button id="trigger" data-composer-navigation-target="reasoning" data-selected-reasoning-effort="max" aria-expanded="false">Extra High</button></form>';
   const form = w.document.querySelector("form")!, b = form.querySelector("button")!;
   const rect = () => ({ width: 100, height: 30 } as any);
   Object.defineProperty(w.HTMLElement.prototype, "getBoundingClientRect", { value: rect, configurable: true });
-  let index = Math.min(3, max), clock = 0, familyClicks = 0, pendingKey: string | null = null;
+  let index = Math.min(3, max), clock = 0, familyClicks = 0, pendingKey: string | null = null, proWarning = false;
   const labels = chinese ? ["即时", "中", "高", "极高", "Pro"] : ["Instant", "Medium", "High", "Extra High", "Pro"];
   const update = () => {
     const menu = w.document.querySelector('[role="menu"]');
@@ -96,15 +96,18 @@ function dom({ max = 4, pro = true, chinese = false, family = "GPT-6", inertDupl
     b.textContent = isPro ? "Pro" : labels[index]!;
     menu?.querySelector('[role="slider"]')?.setAttribute("aria-valuenow", String(index));
     menu?.querySelector("[data-maximum]")?.setAttribute("data-maximum", String(isPro));
+    menu?.querySelector("[data-ultra-warning-visible]")?.setAttribute("data-ultra-warning-visible", String(proWarning));
   };
   update();
   b.addEventListener("click", () => {
     if (w.document.querySelector('[role="menu"]')) return;
     const menu = w.document.createElement("div");
     menu.setAttribute("role", "menu"); menu.setAttribute("data-state", "open"); menu.setAttribute("aria-labelledby", b.id);
-    menu.innerHTML = `<div data-model-selected="true">${family}</div><div data-model-picker-view-toggle="true"></div><span data-maximum="false"></span><div data-reasoning-slider><span role="slider" aria-valuemin="0" aria-valuemax="${max}" aria-valuenow="${index}"></span></div>`;
+    menu.innerHTML = `<div data-model-selected="true">${family}</div><div data-model-picker-view-toggle="true"></div><span data-maximum="false"></span><span data-ultra-warning-visible="false"></span><div data-reasoning-slider><span role="slider" aria-valuemin="0" aria-valuemax="${max}" aria-valuenow="${index}"></span></div>`;
     menu.querySelector("[data-model-picker-view-toggle]")!.addEventListener("click", () => familyClicks++);
     menu.querySelector("[data-reasoning-slider]")!.addEventListener("keydown", e => {
+      if (proLocked && (e as any).key === "ArrowRight" && index === max - 1) { proWarning = true; update(); return; }
+      if ((e as any).key === "ArrowLeft") proWarning = false;
       if (delayedKey) { pendingKey = (e as any).key; return; }
       if (!ignoreKeys) index = Math.min(max, Math.max(0, index + ((e as any).key === "ArrowRight" ? 1 : -1)));
       update();
@@ -239,5 +242,52 @@ test("queued work prevents a new effort control and late replies carry effort ve
     assert.equal(result.task.error, "submission_outcome_unknown");
     assert.equal(result.task.lateReply, "late answer");
     assert.equal(result.task.effortVerification!.status, "mismatch");
+  } finally { db.close(); }
+});
+
+
+test("Pro-to-max fallback requires explicit policy and never falls further or follows unknown failures", async () => {
+  assert.deepEqual(parseEffortPolicy({ effort: "pro", effortFallback: "max" }), { effort: "pro", effortFallback: "max" });
+  assert.throws(() => parseEffortPolicy({ effort: "high", effortFallback: "max" }));
+  validateBusinessArgs("sessions", ["effort", "--session", "chat", "--effort", "pro", "--effort-fallback", "max"]);
+  assert.throws(() => validateBusinessArgs("sessions", ["effort", "--session", "chat", "--effort", "high", "--effort-fallback", "max"]));
+  const proPolicy = { effort: "pro", effortFallback: "max" } as const;
+  const fallback: EffortSelection = { requestedEffort: "pro", effectiveEffort: "max", fallbackApplied: true, modelFamily: "GPT-6" };
+  assert.equal(validSelection(proPolicy, fallback), true);
+  assert.equal(validSelection(proPolicy, { ...fallback, effectiveEffort: "high" }), false);
+  assert.equal(validSelection({ effort: "pro", effortFallback: "error" }, fallback), false);
+
+  const absent = dom({ max: 3, pro: false });
+  const result = await absent.ctrl.set(proPolicy);
+  assert.equal(result.requestedEffort, "pro"); assert.equal(result.effectiveEffort, "max"); assert.equal(result.fallbackApplied, true);
+  await absent.ctrl.recheck(); absent.ctrl.assertUnchanged();
+
+  const locked = dom({ proLocked: true });
+  await assert.rejects(locked.ctrl.set({ effort: "pro" }), /effort_unavailable/);
+  const selected = await locked.ctrl.set(proPolicy);
+  assert.equal(selected.effectiveEffort, "max"); assert.equal(locked.index(), 3);
+  await locked.ctrl.recheck(); locked.ctrl.assertUnchanged();
+
+  const available = await dom().ctrl.set(proPolicy);
+  assert.equal(available.effectiveEffort, "pro"); assert.equal(available.fallbackApplied, false);
+  await assert.rejects(dom({ max: 2, pro: false }).ctrl.set(proPolicy), /effort_unavailable/);
+  await assert.rejects(dom({ ignoreKeys: true }).ctrl.set(proPolicy), /effort_timeout/);
+  await assert.rejects(dom({ family: "Unknown" }).ctrl.set(proPolicy), /effort_model_unsupported/);
+});
+
+test("explicit Pro-to-max selection is durable and verified against max execution", () => {
+  const db = openDatabase(":memory:");
+  try {
+    const store = new TaskStore(db, loadConfig());
+    store.touchSession("explicit-pro-fallback");
+    store.registry.setEffort("explicit-pro-fallback", { effort: "pro", effortFallback: "max" });
+    const task = store.createTask({ session: "explicit-pro-fallback", text: "test fallback" });
+    store.claimNextTask("explicit-pro-fallback");
+    store.recordEffortSelection(task.id, { requestedEffort: "pro", effectiveEffort: "max", fallbackApplied: true, modelFamily: "GPT-6" });
+    store.markTaskProgress(task.id, "send_attempted");
+    const verified = store.captureReply(task.id, "answer", Date.now(), { model: "gpt-6-thinking", thinkingEffort: "max" });
+    assert.equal(verified.task.status, "done");
+    assert.equal(verified.task.effortVerification!.status, "verified");
+    assert.equal(new TaskStore(db, loadConfig()).getTask(task.id)!.effortSelection!.fallbackApplied, true);
   } finally { db.close(); }
 });

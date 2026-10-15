@@ -46,6 +46,21 @@ CLI/client persists `clientRequestId` before each message. After a lost response
 
 **Catalog maintenance — only when needed:** `projects set --project-id <id> --name <name> [--description <text>]` and `projects remove --project-id <id>` change local metadata only. Omitted descriptions persist; empty text clears them. Names aid selection, but creation uses IDs. Catalog entries neither guarantee access nor form an allowlist; valid supplied IDs work with page verification. `projects discover [--save] [--no-wait]` reads visible links in open tabs without messages, navigation, or tab switching. Results include sources and `complete: false`; collapsed/unloaded Projects may be absent. Save merges names by ID, preserving descriptions/unseen entries and skipping conflicting observed names. Async discovery returns an ID for API polling.
 
+### Apply the workflow effort policy
+
+When running a workflow, resolve its [effort default or explicit override](./workflows/README.md#relay-effort-policy) at preflight. Keep the webpage's model family. New-session creation accepts `--effort <value>` and `--effort-fallback <policy>`; effort participates in creation idempotency, so never change it on a same-ref retry. Existing sessions use a separate control before message submission:
+
+```bash
+gpt-relay sessions effort --session-ref <ref> --effort <value> --effort-fallback <policy> --operation-id <operation-id>
+gpt-relay operations <operation-id>
+```
+
+Wait for `succeeded`, inspect requested/effective effort, and persist it with the execution record. A changed control payload needs a new operation ID; a transport timeout first requires observation of the original operation. For messages, `--effort` is accepted only with `--new-session`; follow-ups inherit the saved session policy.
+
+The default fallback is `error`. `lower` permits ordinary downward fallback, never Pro. Explicit `max` permits only Pro to max before Send. An unavailable max, unknown layout, captcha, pause or generic rate limit blocks execution. This is not a retry policy. After a verified Pro-to-max fallback, record it and set the session policy to max with a new control before the next message so subsequent rounds do not keep testing Pro.
+
+Read effort-enabled review results using `--json` or `show <task-id>`. Require the expected selection and verified response metadata. Platform fallback after Send produces a failed task with its reply retained; do not discard that reply, reset rounds, replace the session or resend automatically. Use the workflow's checkpoint/blocked outcome. Bare CLI use without a workflow remains opt-in.
+
 ## Artifact review
 
 Workflow-specific prompts/verdicts belong to the active stage. For standalone reviews, request concrete required changes before optional risks, applying current applicability rather than generic best practices.

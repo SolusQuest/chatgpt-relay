@@ -637,7 +637,7 @@ the model-family selector. The webpage itself selects Instant, Thinking or Pro
 execution within that family when effort changes.
 
 `POST /v1/sessions` accepts optional `effort` (`none`, `medium`, `high`,
-`max`, `pro`) and `effortFallback` (`error`, the default, or `lower`).
+`max`, `pro`) and `effortFallback` (`error`, the default, `lower`, or Pro-only `max`).
 Both are included in creation idempotency. Existing sessions use
 `POST /v1/session-controls` with
 `{operationId, kind: "set-effort", session, effort, effortFallback?}`.
@@ -656,7 +656,9 @@ return `effortPolicy`; tasks return `effortPolicy`, `effortSelection` and
 `effortSelection` contains `requestedEffort`, `effectiveEffort`,
 `fallbackApplied` and `modelFamily`. Explicit `lower` permits only a verified
 ordinary effort below the request; it never upgrades to Pro or downgrades a Pro
-request. Unknown DOM structure, unsupported families, timeouts and changed
+request. Explicit `max` is accepted only with `effort: pro` and permits a verified
+pre-send fallback to exactly max when Pro is unavailable. It never falls further
+to High and does not authorize retries or accepting a platform downgrade. Unknown DOM structure, unsupported families, timeouts and changed
 composers fail closed. The current adapter recognizes the observed GPT-6 and
 GPT-5.6 Sol slider layouts. `xhigh` is not an alias for `max`.
 
