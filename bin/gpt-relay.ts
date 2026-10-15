@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { parseEffortPolicy, type Effort, type EffortPolicy } from "../shared/effort.js";
 // bin/gpt-relay.ts
 // gpt-relay server launcher and backend-aware client commands.
 import { spawn } from "node:child_process";
@@ -97,14 +98,20 @@ async function cmdHealth(): Promise<number> {
 }
 
 async function cmdSessions(args: string[] = []): Promise<number> {
-  if (["inspect", "suspend", "continue", "refresh", "open", "close"].includes(args[0] ?? "")) {
+  if (["inspect", "suspend", "continue", "refresh", "open", "close", "effort"].includes(args[0] ?? "")) {
     validateControlOptions(args.slice(1), ["--session", "--session-ref",
-      ...(["refresh", "open", "close"].includes(args[0]!) ? ["--operation-id"] : []),
-      ...(args[0] === "refresh" ? ["--recover-task"] : []), ...(args[0] === "open" ? ["--instance"] : [])]);
+      ...(["refresh", "open", "close", "effort"].includes(args[0]!) ? ["--operation-id"] : []),
+      ...(args[0] === "effort" ? ["--effort", "--effort-fallback"] : []), ...(args[0] === "refresh" ? ["--recover-task"] : []), ...(args[0] === "open" ? ["--instance"] : [])]);
     const flag = args.includes("--session-ref") ? "--session-ref" : "--session";
     const i = args.indexOf(flag);
     if (i < 0 || !args[i + 1] || args.includes("--session-ref") && args.includes("--session"))
       throw new Error("usage: sessions inspect|suspend|continue|refresh|open|close --session-ref REF | --session ID");
+    if (args[0] === "effort") {
+      const effort = args[args.indexOf("--effort") + 1];
+      const fallbackIndex = args.indexOf("--effort-fallback");
+      const policy = parseEffortPolicy({ effort, effortFallback: fallbackIndex >= 0 ? args[fallbackIndex + 1] : undefined });
+      return submitControl({ kind: "set-effort", session: args[i + 1], ...policy }, args);
+    }
     if (args[0] === "open" || args[0] === "close") {
       const instance = args.indexOf("--instance");
       return submitControl({ kind: args[0], session: args[i + 1],
@@ -362,6 +369,8 @@ async function cmdReview(args: string[]): Promise<number> {
   let session = "";
   let sessionRef = "";
   let newSession = false;
+  let effort: Effort | undefined;
+  let effortFallback: EffortPolicy["effortFallback"] | undefined;
   let projectId: string | null | undefined;
   let projectChoices = 0;
   let text = "";
@@ -375,6 +384,8 @@ async function cmdReview(args: string[]): Promise<number> {
     const a = args[i]!;
     if (a === "--session") session = args[++i] ?? "";
     else if (a === "--session-ref") sessionRef = args[++i] ?? "";
+    else if (a === "--effort") effort = args[++i] as Effort;
+    else if (a === "--effort-fallback") effortFallback = args[++i] as EffortPolicy["effortFallback"];
     else if (a === "--new-session") newSession = true;
     else if (a === "--project-id") { projectId = args[++i]; projectChoices++; }
     else if (a === "--no-project") { projectId = null; projectChoices++; }
@@ -407,7 +418,7 @@ async function cmdReview(args: string[]): Promise<number> {
   const r = await review(text, {
     session: session || undefined,
     sessionRef: sessionRef || undefined,
-    newSession,
+    newSession, effort, effortFallback,
     ...(newSession ? { projectId } : {}),
     baseUrl: BASE, serverId: SERVER_ID,
     wait,
@@ -415,7 +426,14 @@ async function cmdReview(args: string[]): Promise<number> {
     ...(taskTimeoutMs !== undefined ? { taskTimeoutMs } : {}),
     ...(cri !== undefined ? { clientRequestId: cri } : {}),
   });
+  if (args.includes("--json")) {
+    console.log(JSON.stringify(r));
+    return "reply" in r && r.reply !== undefined && r.status !== "done" ? 2 : 0;
+  }
   if ("reply" in r && r.reply !== undefined) {
+    if (r.effortPolicy) console.error(JSON.stringify({
+      effortPolicy: r.effortPolicy, effortSelection: r.effortSelection, effortVerification: r.effortVerification,
+    }));
     if (r.status === "done" || r.lateReply) {
       process.stdout.write(r.reply ?? r.lateReply ?? "");
       return 0;
@@ -499,6 +517,7 @@ commands:
   sessions inspect|suspend|continue --session-ref REF (or --session ID)
   sessions refresh --session-ref REF [--recover-task TASK_ID] [--operation-id ID]
   sessions open --session-ref REF [--instance INSTANCE_ID] [--operation-id ID]
+  sessions effort --session-ref REF --effort none|medium|high|max|pro [--effort-fallback error|lower]
   sessions close --session-ref REF [--operation-id ID]
                            all session controls also accept --session ID
   doctor [--session-ref REF]  diagnose service, extension and observed DOM
@@ -514,7 +533,7 @@ commands:
   review --session-ref REF (--text T | --stdin | --file F)
   review --new-session --session-ref REF (--project-id ID | --no-project)
          (--text T | --stdin | --file F) [--no-wait] [--cri KEY]
-         [--wait-timeout ms] [--task-timeout ms]
+         [--wait-timeout ms] [--task-timeout ms] [--effort VALUE] [--effort-fallback error|lower]
                            submit a review and wait
 
 client options (temporary; mutually exclusive):

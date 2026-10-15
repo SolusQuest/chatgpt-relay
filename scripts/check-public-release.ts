@@ -20,6 +20,7 @@ const cjkDataFiles = new Set([
   "extension/content-script.js",
   "test/e2e-fake-extension.test.ts",
   "test/encoding-fix.test.ts",
+  "test/effort.test.ts",
   "test/recovery.test.ts",
   "test/v1-api.test.ts",
 ]);

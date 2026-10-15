@@ -31,7 +31,7 @@ export class SessionDiagnostics {
       generation: Number.isSafeInteger(body.generation) ? body.generation : null,
       version: typeof body.version === "string" ? body.version.slice(0, 80) : null,
       protocol: body.protocol === 1 ? 1 : null,
-      capabilities: { composer: bool(body.capabilities?.composer),
+      capabilities: { composer: bool(body.capabilities?.composer), effort: bool(body.capabilities?.effort),
         userMessages: bool(body.capabilities?.userMessages), assistantMessages: bool(body.capabilities?.assistantMessages) },
       ready: bool(body.ready), generating: bool(body.generating), composerClean: bool(body.composerClean),
       reason: typeof body.reason === "string" ? body.reason.slice(0, 100) : null };

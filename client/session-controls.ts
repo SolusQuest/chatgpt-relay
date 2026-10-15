@@ -1,8 +1,11 @@
+import type { EffortPolicy } from "../shared/effort.js";
 import { http } from "./http.js";
 const DEFAULT_BASE = process.env.GPT_RELAY_URL ?? "http://127.0.0.1:8765";
-export type ControlKind = "open" | "close" | "refresh" | "recover" | "stop";
+export type ControlKind = "open" | "close" | "refresh" | "recover" | "stop" | "set-effort";
 export interface SessionControlRequest {
   // Retain this ID before submitting. Reuse it after a transport failure.
+  effort?: EffortPolicy["effort"];
+  effortFallback?: EffortPolicy["effortFallback"];
   operationId: string;
   kind: ControlKind;
   session?: string;
@@ -23,6 +26,7 @@ export interface BrowserInstanceView {
   tabs: { tabId: number; conversationId: string | null; projectId: string | null; loading: boolean | null; discarded: boolean | null }[];
 }
 export interface SessionInspection {
+  effortPolicy?: EffortPolicy | null;
   session: string; sessionRef: string; conversationId: string | null; projectId: string | null;
   pageStatus: "observed" | "ambiguous" | "unknown";
   activeTaskId: string | null; queuedTasks: number;

@@ -7,6 +7,7 @@ import type { Config } from "./config.js";
 import { SessionRegistry } from "./session-registry.js";
 import { installTaskTrace, readTaskTrace } from "./task-trace.js";
 import { installControls } from "./session-controls.js";
+import { verifyEffort, validSelection, type EffortPolicy, type EffortSelection, type EffortVerification } from "../shared/effort.js";
 
 export type TaskStatus =
   | "queued"
@@ -28,6 +29,9 @@ export interface Task {
   id: string;
   session: string;
   clientRequestId: string | null;
+  effortPolicy: EffortPolicy | null;
+  effortSelection: EffortSelection | null;
+  effortVerification: EffortVerification | null;
   status: TaskStatus;
   text: string;
   reply: string | null;
@@ -62,6 +66,7 @@ export interface SessionRow {
 
 // SQLite row shape in snake_case.
 interface TaskRowRaw {
+  effort_policy: string | null; effort_selection: string | null; effort_verification: string | null;
   id: string;
   session: string;
   client_request_id: string | null;
@@ -97,6 +102,9 @@ interface SessionRowRaw {
 
 function rowToTask(r: TaskRowRaw): Task {
   return {
+    effortPolicy: r.effort_policy ? JSON.parse(r.effort_policy) : null,
+    effortSelection: r.effort_selection ? JSON.parse(r.effort_selection) : null,
+    effortVerification: r.effort_verification ? JSON.parse(r.effort_verification) : null,
     id: r.id,
     session: r.session,
     clientRequestId: r.client_request_id,
@@ -154,6 +162,7 @@ export interface CompleteTaskInput {
   text?: string;
   error?: string;
   now?: number;
+  effortEvidence?: unknown;
 }
 
 export type TaskProgressPhase =
@@ -218,6 +227,10 @@ export class TaskStore {
     private readonly db: Db,
     private readonly config: Config,
   ) {
+    const columns = db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[];
+    for (const name of ["effort_policy", "effort_selection", "effort_verification"]) {
+      if (!columns.some(c => c.name === name)) db.exec(`ALTER TABLE tasks ADD COLUMN ${name} TEXT`);
+    }
     this.registry = new SessionRegistry(db);
     installTaskTrace(db);
     installControls(db);
@@ -473,6 +486,8 @@ export class TaskStore {
              WHERE id = ?`,
         )
         .run(now, next.id);
+      if (ref?.effort_policy) this.db.prepare("UPDATE tasks SET effort_policy=COALESCE(effort_policy, ?) WHERE id=?")
+        .run(ref.effort_policy, next.id);
       this.db.exec("COMMIT");
       const task = this.mustGetTask(next.id);
       this.emitTaskChange(task);
@@ -481,6 +496,17 @@ export class TaskStore {
       this.db.exec("ROLLBACK");
       throw err;
     }
+  }
+
+  recordEffortSelection(id: string, selection: EffortSelection) {
+    const task = this.mustGetTask(id);
+    if (!task.effortPolicy || !validSelection(task.effortPolicy, selection)) throw new TaskStoreError("effort_verification_failed", "invalid_transition");
+    if (task.sendAttemptedAt !== null) {
+      if (JSON.stringify(task.effortSelection) !== JSON.stringify(selection)) throw new TaskStoreError("effort_selection_conflict", "invalid_transition");
+      return;
+    }
+    if (task.status !== "in_progress") throw new TaskStoreError("effort_task_not_active", "invalid_transition");
+    this.db.prepare("UPDATE tasks SET effort_selection=? WHERE id=?").run(JSON.stringify(selection), id);
   }
 
   completeTask(id: string, input: CompleteTaskInput): Task {
@@ -498,7 +524,10 @@ export class TaskStore {
       );
     }
     const isError = typeof input.error === "string" && input.error.length > 0;
-    const status: TaskStatus = isError ? "failed" : "done";
+    const verification = !isError && existing.effortPolicy ? verifyEffort(existing.effortSelection, input.effortEvidence) : null;
+    const effortError = verification && verification.status !== "verified"
+      ? verification.status === "mismatch" ? "effort_mismatch" : "effort_verification_unknown" : null;
+    const status: TaskStatus = isError || effortError ? "failed" : "done";
     this.db
       .prepare(
         `UPDATE tasks
@@ -509,16 +538,17 @@ export class TaskStore {
         status,
         now,
         isError ? null : (input.text ?? null),
-        isError ? (input.error ?? null) : null,
+        isError ? (input.error ?? null) : effortError,
         id,
       );
+    if (verification) this.db.prepare("UPDATE tasks SET effort_verification=? WHERE id=?").run(JSON.stringify(verification), id);
     const task = this.mustGetTask(id);
     this.taskObservations.delete(id);
     this.emitTaskChange(task);
     return task;
   }
 
-  captureReply(id: string, text: string, now = Date.now()): CaptureReplyResult {
+  captureReply(id: string, text: string, now = Date.now(), effortEvidence?: unknown): CaptureReplyResult {
     const existing = this.getTask(id);
     if (!existing) throw new TaskStoreError(`task ${id} not found`, "task_not_found");
     if (
@@ -526,7 +556,7 @@ export class TaskStore {
       existing.status === "in_progress" ||
       existing.status === "recovering"
     ) {
-      return { task: this.completeTask(id, { text, now }), captured: true, late: false };
+      return { task: this.completeTask(id, { text, now, effortEvidence }), captured: true, late: false };
     }
     if (existing.status === "done") {
       return { task: existing, captured: false, late: false };
@@ -547,6 +577,8 @@ export class TaskStore {
              WHERE id = ?`,
         )
         .run(text, now, now, id);
+      if (existing.effortPolicy) this.db.prepare("UPDATE tasks SET effort_verification=? WHERE id=?")
+        .run(JSON.stringify(verifyEffort(existing.effortSelection, effortEvidence)), id);
       const task = this.mustGetTask(id);
       this.emitTaskChange(task);
       return { task, captured: true, late: true };

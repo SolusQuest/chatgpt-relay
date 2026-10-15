@@ -941,6 +941,7 @@
     if (findSendButton() !== b || !isSendEnabled()) {
       throw makeRelayError("submission_target_changed", "Send button changed before submission");
     }
+    target.effortController?.assertUnchanged();
     b.click();
     return true;
   }
@@ -1213,9 +1214,20 @@
           sendResponse({ inflight: readInflight() });
         } else if (msg.type === "get-page-state") {
           sendResponse({ ...getPageReadiness(), documentId, controlProtocol: 1,
-            capabilities: { composer: !!findInput(),
+            capabilities: { composer: !!findInput(), effort: !!globalThis.GptRelayEffort && !!getComposerRoot()?.querySelector?.('[data-composer-navigation-target="reasoning"]'),
               userMessages: getUserMessages().length > 0 ? true : null,
               assistantMessages: getAssistantMessages().length > 0 ? true : null } });
+        } else if (msg.type === "set-effort") {
+          const state = getPageReadiness();
+          if (msg.expectedSession !== getSessionId() || msg.documentId !== documentId)
+            throw makeRelayError("session_identity_changed", "session_identity_changed");
+          if (!state.ready || state.generating || !state.composerClean) throw makeRelayError("page_not_idle", "page_not_idle");
+          const input = findInput(), root = getComposerRoot(input);
+          const controller = globalThis.GptRelayEffort.create({ root: () => root, assert: () => {
+            if (msg.expectedSession !== getSessionId() || findInput() !== input || isGenerating() ||
+                !getComposerPayloadState(input).clean) throw makeRelayError("effort_changed", "effort_changed");
+          } });
+          sendResponse(await controller.set(msg.effortPolicy));
         } else if (msg.type === "check-close") {
           const state = getPageReadiness();
           if (msg.expectedSession !== state.session || msg.documentId !== documentId) throw new Error("session_identity_changed");
@@ -1288,16 +1300,26 @@
 
           try {
             assertSubmissionTarget(target);
+            if (msg.effortPolicy) {
+              if (!globalThis.GptRelayEffort) throw makeRelayError("reload_extension_and_page", "reload_extension_and_page");
+              target.effortController = globalThis.GptRelayEffort.create({
+                root: () => target.root, assert: () => assertSubmissionTarget(target),
+              });
+              inflight.effortSelection = await target.effortController.set(msg.effortPolicy);
+              writeInflight(inflight);
+            }
             const pasteResult = await pasteIntoInput(msg.text, target);
             inflight.attachmentMode = pasteResult?.asAttachment === true;
             writeInflight(inflight);
             await pacedDelay(500, 1200);
             assertSubmissionTarget(target, true);
+            if (target.effortController) await target.effortController.recheck();
             inflight.phase = "send-attempted";
             inflight.sendAttemptedAt = Date.now();
             writeInflight(inflight);
             const fence = await chrome.runtime.sendMessage({
               type: "send-attempted",
+              effortSelection: inflight.effortSelection,
               taskId: msg.taskId,
               baseline,
             });
@@ -1324,6 +1346,7 @@
             sendResponse({
               ...sessionMetadata(),
               status: "submitted",
+              effortSelection: inflight.effortSelection,
               baseline,
               submissionState: "accepted",
               acceptanceKind: acceptance.kind,

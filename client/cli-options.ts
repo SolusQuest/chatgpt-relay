@@ -2,7 +2,7 @@ import { BackendError } from "./backend.js";
 import type { BackendOptions } from "./backend-resolver.js";
 
 const VALUES = new Set(["--session", "--session-ref", "--operation-id", "--recover-task", "--instance", "--status",
-  "--last", "--project-id", "--name", "--description", "--text", "--file", "--timeout", "--wait-timeout", "--task-timeout", "--cri"]);
+  "--last", "--project-id", "--name", "--description", "--text", "--file", "--timeout", "--wait-timeout", "--task-timeout", "--cri", "--effort", "--effort-fallback"]);
 export function parseGlobalOptions(argv: string[]): { args: string[]; options: BackendOptions } {
   const args: string[] = [], options: BackendOptions = {};
   for (let i = 0; i < argv.length; i++) {
@@ -28,9 +28,10 @@ export function validateBusinessArgs(command: string, args: string[]): void {
     case "health": break;
     case "doctor": values = ["--session", "--session-ref"]; break;
     case "sessions":
-      if (["inspect", "suspend", "continue", "refresh", "open", "close"].includes(args[0] ?? "")) {
+      if (["inspect", "suspend", "continue", "refresh", "open", "close", "effort"].includes(args[0] ?? "")) {
         start = 1; values = ["--session", "--session-ref"];
-        if (["refresh", "open", "close"].includes(args[0]!)) values.push("--operation-id");
+        if (["refresh", "open", "close", "effort"].includes(args[0]!)) values.push("--operation-id");
+        if (args[0] === "effort") values.push("--effort", "--effort-fallback");
         if (args[0] === "refresh") values.push("--recover-task");
         if (args[0] === "open") values.push("--instance");
       } else values = ["--session-ref"];
@@ -47,7 +48,7 @@ export function validateBusinessArgs(command: string, args: string[]): void {
     case "resume": break;
     case "review":
       flags = ["--new-session", "--no-project", "--stdin", "--no-wait"];
-      values = ["--session", "--session-ref", "--project-id", "--text", "--file", "--timeout", "--wait-timeout", "--task-timeout", "--cri"];
+      values = ["--session", "--session-ref", "--project-id", "--text", "--file", "--timeout", "--wait-timeout", "--task-timeout", "--cri", "--effort", "--effort-fallback"];
       break;
     case "projects":
       if (args[0] === "discover") { start = 1; flags = ["--save", "--no-wait"]; }
@@ -76,6 +77,17 @@ export function validateBusinessArgs(command: string, args: string[]): void {
       ["--text", "--stdin", "--file"].filter(flag => seen.has(flag)).length !== 1 ||
       seen.has("--new-session") && (!seen.has("--session-ref") || seen.has("--project-id") === seen.has("--no-project")))) {
     throw new BackendError("invalid_arguments", "review requires exactly one session selector, input and an explicit project choice for a new session");
+  }
+  if ((seen.has("--effort") || seen.has("--effort-fallback")) &&
+      (command === "review" && !seen.has("--new-session") || !seen.has("--effort"))) {
+    throw new BackendError("invalid_arguments", "effort requires a new session or sessions effort");
+  }
+  if (command === "sessions" && args[0] === "effort" && !seen.has("--effort"))
+    throw new BackendError("invalid_arguments", "sessions effort requires --effort");
+  for (const [flag, allowed] of [["--effort", ["none", "medium", "high", "max", "pro"]],
+      ["--effort-fallback", ["error", "lower"]]] as const) {
+    if (seen.has(flag) && !(allowed as readonly string[]).includes(args[args.indexOf(flag) + 1]!))
+      throw new BackendError("invalid_arguments", `invalid value: ${flag}`);
   }
   if (command === "projects" && ["set", "remove"].includes(args[0] ?? "") &&
       (!seen.has("--project-id") || args[0] === "set" && !seen.has("--name"))) {

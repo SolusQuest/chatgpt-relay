@@ -158,3 +158,18 @@ printf '%s' 'Review this function: function add(a,b){return a+b}' |
 ```
 
 To exercise recovery, submit a review and refresh the ChatGPT page while it is generating. The extension should recover or reattach to the reply, the conversation should contain exactly one copy of the user prompt, and the task should either complete normally or reach one explicit terminal recovery error. It must never be automatically submitted a second time.
+
+## Thinking effort
+
+`effort-controls.js` loads before the content script and operates only within
+the target composer. It links menus using runtime ARIA IDs, uses bounded
+left/right keyboard actions, verifies the selected model family has not changed,
+and distinguishes Pro with `data-maximum`. Unknown layouts fail closed.
+
+The worker verifies completed effort-enabled replies through a bounded
+`chrome.scripting.executeScript` call in the MAIN world. Its read-only history
+request returns only the exact turn's model and thinking-effort identifiers.
+Credentials stay in the page; no network interception or additional host
+permissions are required. Missing/unknown metadata is reported rather than
+treated as successful verification. The existing durable Send fence and
+at-most-once recovery remain in force.

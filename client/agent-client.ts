@@ -1,3 +1,4 @@
+import { parseEffortPolicy, type Effort, type EffortPolicy } from "../shared/effort.js";
 // client/agent-client.ts
 // Agent client built on the /v1 API with cross-process pending-record persistence.
 import fs from "node:fs";
@@ -19,6 +20,8 @@ export interface ReviewOptions {
   session?: string;
   sessionRef?: string;
   newSession?: boolean;
+  effort?: Effort;
+  effortFallback?: EffortPolicy["effortFallback"];
   projectId?: string | null;
   /** @deprecated Use waitTimeoutMs. This no longer changes server task lifetime. */
   timeoutMs?: number;
@@ -33,6 +36,9 @@ export interface ReviewOptions {
 }
 
 export interface ReviewResult {
+  effortPolicy?: import("../shared/effort.js").EffortPolicy | null;
+  effortSelection?: import("../shared/effort.js").EffortSelection | null;
+  effortVerification?: import("../shared/effort.js").EffortVerification | null;
   taskId: string;
   status: "done" | "failed" | "cancelled" | "expired";
   reply: string | null;
@@ -53,6 +59,9 @@ export interface TaskProgressView {
 }
 
 export interface TaskView {
+  effortPolicy?: import("../shared/effort.js").EffortPolicy | null;
+  effortSelection?: import("../shared/effort.js").EffortSelection | null;
+  effortVerification?: import("../shared/effort.js").EffortVerification | null;
   clientRequestId?: string | null;
   sessionRef?: string | null;
   conversationId?: string | null;
@@ -171,7 +180,7 @@ async function submitTask(
     ...(opts.sessionRef ? { sessionRef: opts.sessionRef } : { session: opts.session }),
     text,
   };
-  if (opts.newSession) body.projectId = opts.projectId;
+  if (opts.newSession) { body.projectId = opts.projectId; if (opts.effort) Object.assign(body, parseEffortPolicy(opts)); }
   if (opts.taskTimeoutMs != null) body.timeout = opts.taskTimeoutMs;
   if (opts.clientRequestId) body.clientRequestId = opts.clientRequestId;
   return http.post<{ taskId: string; status: string; encodingWarning?: string; encodingFixed?: string }>(opts.newSession ? "/v1/sessions" : "/v1/tasks", body, {
@@ -217,11 +226,13 @@ export async function review(
     throw new Error("invalid clientRequestId");
   }
   opts = { ...opts, clientRequestId: opts.clientRequestId ?? randomUUID() };
+  const effortPolicy = parseEffortPolicy(opts);
+  if (effortPolicy && !opts.newSession) throw new Error("effort is set using session controls for existing sessions");
   const backend = await probeBackend(opts.baseUrl ?? DEFAULT_BASE, { expectedId: opts.serverId, allowLegacy: true });
   opts = { ...opts, baseUrl: backend.baseUrl, serverId: backend.serverId };
   const identity = opts.sessionRef ?? opts.session!;
   const requestHash = createHash("sha256").update(JSON.stringify({ text, project: opts.projectId,
-    newSession: !!opts.newSession, timeout: opts.taskTimeoutMs })).digest("hex");
+    newSession: !!opts.newSession, timeout: opts.taskTimeoutMs, ...(effortPolicy ? { effortPolicy } : {}) })).digest("hex");
   const requestKey = `request_${createHash("sha256").update(JSON.stringify([
     opts.serverId ?? opts.baseUrl ?? DEFAULT_BASE, identity, opts.clientRequestId])).digest("hex")}`;
   const old = listPending().find(r => r.taskId === requestKey);
@@ -275,6 +286,7 @@ export async function review(
     if (!shouldKeepPendingForLateReply(t)) clearPending(taskId, opts.serverId);
     return {
       taskId: t.taskId,
+      effortPolicy: t.effortPolicy, effortSelection: t.effortSelection, effortVerification: t.effortVerification,
       status: t.status as ReviewResult["status"],
       reply: t.reply,
       lateReply: t.lateReply,

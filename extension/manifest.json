@@ -26,6 +26,7 @@
         "https://chatgpt.com/*"
       ],
       "js": [
+        "effort-controls.js",
         "content-script.js"
       ],
       "run_at": "document_idle",

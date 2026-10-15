@@ -324,3 +324,31 @@ To reset local relay data, stop the relay and remove the database files from
 ## License
 
 Licensed under the [MIT License](./LICENSE).
+
+### Select thinking effort
+
+Keep the model family selected in ChatGPT and set only its thinking preset:
+
+```bash
+gpt-relay sessions effort --session-ref sr_example --effort high
+# Inspect the operation ID printed by the command before submitting work.
+gpt-relay operations OPERATION_ID
+
+gpt-relay review --new-session --session-ref sr_new --no-project \
+  --effort max --text 'Review this proposal' --json
+```
+
+Supported values are `none | medium | high | max | pro`. The default is to fail
+when a requested preset is unavailable. Opt into ordinary downward fallback with
+`--effort-fallback lower`; Pro never automatically downgrades. The session policy
+survives reload and is applied before subsequent Relay messages. Without a new
+policy, existing behavior is preserved. Use session controls to change an
+existing conversation; `review --effort` is accepted only with `--new-session`.
+
+Effort-enabled results include the requested/effective preset and verification
+of the platform-reported response model. A mismatch or unverifiable response
+fails the task while retaining its reply. Inspect it using `show TASK_ID`; do not
+automatically resend. See [effort API semantics](api.md#effort-selection).
+
+After updating, restart the Relay service, reload the extension, and refresh
+ChatGPT tabs so the new content-script module is loaded.

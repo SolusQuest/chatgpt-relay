@@ -644,7 +644,79 @@ async function executeCloseControl(command) {
   return { action: "page_closed", suspended: true, tabId: command.tabId };
 }
 
+// Runs in the page's MAIN world. Credentials stay inside this function; only
+// model identifiers from the exact submitted turn are returned to the worker.
+async function readEffortEvidence(conversationId, userId, assistantId) {
+  const unknown = { model: null, thinkingEffort: null };
+  if (location.origin !== "https://chatgpt.com" ||
+      location.pathname.match(/\/c\/([^/]+)/)?.[1] !== conversationId ||
+      !userId || !assistantId) return unknown;
+  const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const path = "/backend-api/conversations/" + encodeURIComponent(conversationId);
+    let response = await fetch(path, { credentials: "include", signal: controller.signal });
+    if (response.status === 401) {
+      const auth = await fetch("/api/auth/session", { credentials: "include", signal: controller.signal });
+      if (!auth.ok) return unknown;
+      const session = await auth.json();
+      if (typeof session.accessToken !== "string") return unknown;
+      response = await fetch(path, { credentials: "include", signal: controller.signal,
+        headers: { Authorization: "Bearer " + session.accessToken } });
+    }
+    if (!response.ok) return unknown;
+    const data = await response.json();
+    if (location.pathname.match(/\/c\/([^/]+)/)?.[1] !== conversationId) return unknown;
+    // This adapter deliberately supports the observed active-branch array only.
+    if (!Array.isArray(data.messages)) return unknown;
+    const userIndex = data.messages.findIndex(m => m.id === userId && m.author?.role === "user");
+    const answerIndex = data.messages.findIndex(m => m.id === assistantId && m.author?.role === "assistant");
+    if (userIndex < 0 || answerIndex <= userIndex ||
+        data.messages.slice(userIndex + 1, answerIndex).some(m => m.author?.role === "user")) return unknown;
+    const answer = data.messages[answerIndex];
+    if (answer.status !== "finished_successfully") return unknown;
+    const meta = answer.metadata ?? {};
+    return {
+      model: typeof meta.model_slug === "string" && meta.model_slug.length < 100 ? meta.model_slug : null,
+      thinkingEffort: typeof meta.thinking_effort === "string" && meta.thinking_effort.length < 50 ? meta.thinking_effort : null,
+    };
+  } catch { return unknown; }
+  finally { clearTimeout(timer); }
+}
+
+async function verifyReplyEffort(tabId, session, snap) {
+  try {
+    if (await getTabSession(tabId, { forceFresh: true }) !== session) return null;
+    const tab = await chrome.tabs.get(tabId), url = new URL(tab.url);
+    if (url.origin !== "https://chatgpt.com") return null;
+    const conversationId = url.pathname.match(/\/c\/([^/]+)/)?.[1];
+    if (!conversationId) return null;
+    const results = await chrome.scripting.executeScript({
+      target: { tabId }, world: "MAIN", func: readEffortEvidence,
+      args: [conversationId, snap.submittedUserMessageId, snap.assistantMessageId],
+    });
+    if (await getTabSession(tabId, { forceFresh: true }) !== session) return null;
+    return results?.[0]?.result ?? null;
+  } catch { return null; }
+}
+
+async function executeEffortControl(command) {
+  const { tabId, session } = command;
+  if (command.state === "executing") throw new Error("effort_outcome_unknown");
+  if (await getTabSession(tabId, { forceFresh: true }) !== session) throw new Error("session_identity_changed");
+  const state = await getPageState(tabId);
+  if (!state.ready || state.generating || state.composerClean !== true) throw new Error("page_not_idle");
+  command.executionFenced = true;
+  const fence = await httpJson("POST", `/internal/session-controls/${encodeURIComponent(command.operationId)}/fence`,
+    { owner: command.owner, token: command.token, documentId: state.documentId });
+  if (!fence.execute) throw new Error("effort_outcome_unknown");
+  const result = await sendTabMessage(tabId, { type: "set-effort", expectedSession: session,
+    documentId: state.documentId, effortPolicy: command.target.effortPolicy }, 20000, "set-effort");
+  if (result?.error) throw Object.assign(new Error(result.error), { definitelyBlocked: true });
+  return result;
+}
+
 async function executeSessionControl(command) {
+  if (command.kind === "set-effort") return executeEffortControl(command);
   if (command.kind === "open") return executeOpenControl(command);
   if (command.kind === "close") return executeCloseControl(command);
   if (command.kind === "refresh") return executeRefreshControl(command);
@@ -867,6 +939,7 @@ async function setClaimPendingReply(
     session,
     tabId,
     taskId,
+    effortPolicy: claim.task.effortPolicy ?? null,
     expiresAt: claim.task.expiresAt,
     completionDeadlineAt: claim.task.completionDeadlineAt,
     recoveryDeadlineAt: claim.task.recoveryDeadlineAt,
@@ -945,6 +1018,7 @@ async function attachPendingFromTask(task, session, tabId, record, epochs) {
     session,
     tabId,
     taskId: task.taskId,
+    effortPolicy: task.effortPolicy ?? null,
     expiresAt: existing?.expiresAt ?? task.expiresAt,
     completionDeadlineAt: existing?.completionDeadlineAt ?? task.completionDeadlineAt,
     recoveryDeadlineAt: existing?.recoveryDeadlineAt ?? task.recoveryDeadlineAt,
@@ -1258,7 +1332,7 @@ async function startDispatchLoop(session, tabId) {
         try {
           runRes = await sendTabMessage(
             tabId,
-            { type: "run-task", taskId, text, baseline: pageState?.baseline, expectedSession: session },
+            { type: "run-task", taskId, text, effortPolicy: claim.task.effortPolicy, baseline: pageState?.baseline, expectedSession: session },
             RUN_TASK_ACK_TIMEOUT_MS,
             "run-task acknowledgement",
           );
@@ -1330,7 +1404,7 @@ async function startDispatchLoop(session, tabId) {
             await waitForPendingReply(taskId, controller.signal);
             continue;
           }
-          throw new Error(runRes.error);
+          throw new Error(runRes.errorCode ?? runRes.error);
         }
         if (runRes?.status !== "submitted") {
           // Compatibility with older content-script versions.
@@ -1690,7 +1764,12 @@ async function pollOnePendingSnapshot(taskId, rec) {
           await cancelPending(taskId, rec, 'user stopped before reply');
           return;
         }
-        const captured = await httpJson("POST", `/internal/tasks/${taskId}/capture`, { text });
+        const effortEvidence = rec.effortPolicy ? await verifyReplyEffort(rec.tabId, rec.session, snap) : undefined;
+        // Stop/navigation can arrive during metadata verification too.
+        if (observeStopRequest(taskId, rec, snap)) {
+          await cancelPending(taskId, rec, "user stopped before reply"); return;
+        }
+        const captured = await httpJson("POST", `/internal/tasks/${taskId}/capture`, { text, effortEvidence });
         console.log(
           "[relay sw] reply captured",
           taskId.slice(0, 8),
@@ -2325,7 +2404,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (!marked) throw new Error("send_fence_superseded");
         const epochs = await captureTaskEpochs();
         await httpJson("POST", `/internal/tasks/${msg.taskId}/progress`, {
-          phase: "send_attempted",
+          phase: "send_attempted", effortSelection: msg.effortSelection,
         });
         const fencedTask = await httpJson("GET", `/v1/tasks/${msg.taskId}`);
         const attached = await attachPendingFromTask(fencedTask, sid, sender.tab.id, {

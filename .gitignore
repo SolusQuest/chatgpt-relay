@@ -17,3 +17,6 @@ relay-test.*
 
 # Local package verification output
 package-check.tgz
+
+# Local browser probes contain real conversation IDs and test messages.
+test-plan/effort-*-probe-*.json

@@ -1,3 +1,4 @@
+import type { EffortPolicy } from "../shared/effort.js";
 import { randomUUID } from "node:crypto";
 import type { Db } from "./db.js";
 
@@ -15,7 +16,7 @@ export interface ReferenceRow {
   ref: string; canonical: string; conversation: string | null; project: string | null;
   initial_task: string | null; fingerprint: string | null; command_state: string;
   owner: string | null; token: string | null; tab_id: number | null;
-  created_at: number; error: string | null;
+  created_at: number; error: string | null; effort_policy: string | null;
 }
 interface TaskEvidence { status: string; send_attempted_at: number | null }
 
@@ -34,6 +35,8 @@ export class SessionRegistry {
         updated_at INTEGER NOT NULL
       );
     `);
+    const columns = db.prepare("PRAGMA table_info(session_refs)").all() as { name: string }[];
+    if (!columns.some(c => c.name === "effort_policy")) db.exec("ALTER TABLE session_refs ADD COLUMN effort_policy TEXT");
   }
   get(id: string): ReferenceRow | null {
     return this.db.prepare("SELECT * FROM session_refs WHERE ref = ? OR canonical = ? OR conversation = ?")
@@ -62,10 +65,11 @@ export class SessionRegistry {
         (row.command_state === "opening" && row.tab_id === null))) ? "unknown"
       : row.command_state === "failed" || terminal ? "failed" : "pending";
     return { sessionRef: row.ref, conversationId: row.conversation, projectId: row.project,
+      effortPolicy: row.effort_policy ? JSON.parse(row.effort_policy) as EffortPolicy : null,
       creationStatus, initialTaskId: row.initial_task, initialTaskStatus: task?.status ?? null,
       creationError: row.error };
   }
-  create(ref: string, project: string | null, fingerprint: string, createTask: () => { id: string }) {
+  create(ref: string, project: string | null, fingerprint: string, createTask: () => { id: string }, policy: EffortPolicy | null = null) {
     if (!validRef(ref)) throw new RegistryError("invalid sessionRef", 400);
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -77,11 +81,17 @@ export class SessionRegistry {
       }
       this.db.prepare(`INSERT INTO session_refs(ref, canonical, project, fingerprint, command_state, created_at)
         VALUES (?, ?, ?, ?, 'queued', ?)`).run(ref, ref, project, fingerprint, Date.now());
+      if (policy) this.setEffort(ref, policy);
       const task = createTask();
       this.db.prepare("UPDATE session_refs SET initial_task = ? WHERE ref = ?").run(task.id, ref);
       this.db.exec("COMMIT");
       return this.get(ref)!;
     } catch (e) { this.db.exec("ROLLBACK"); throw e; }
+  }
+  setEffort(id: string, policy: EffortPolicy) {
+    const ref = this.get(id);
+    if (!ref) throw new RegistryError("session not found", 404);
+    this.db.prepare("UPDATE session_refs SET effort_policy=? WHERE ref=?").run(JSON.stringify(policy), ref.ref);
   }
   claim(owner: string): ReferenceRow | null {
     const resumable = this.db.prepare(`SELECT r.* FROM session_refs r JOIN tasks t ON t.id = r.initial_task

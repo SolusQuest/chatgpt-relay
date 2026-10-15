@@ -1,3 +1,4 @@
+import { parseEffortPolicy, validSelection } from "../shared/effort.js";
 import { randomUUID } from "node:crypto";
 import { Router } from "express";
 import type { Db } from "./db.js";
@@ -40,9 +41,13 @@ export class SessionControls {
   }
   create(body: any) {
     this.expire();
+    let effortPolicy;
+    try { effortPolicy = parseEffortPolicy(body ?? {}); } catch { throw new ControlError("invalid_effort_policy", 400); }
+    if (body?.kind === "set-effort" ? !effortPolicy || body.taskId != null : effortPolicy !== null)
+      throw new ControlError("invalid_effort_policy", 400);
     if (typeof body?.operationId !== "string" || !/^[a-zA-Z0-9_-]{8,100}$/.test(body.operationId) ||
-        !["recover", "refresh", "stop", "open", "close"].includes(body.kind) ||
-        (["refresh", "open", "close"].includes(body.kind) && typeof body.session !== "string") ||
+        !["recover", "refresh", "stop", "open", "close", "set-effort"].includes(body.kind) ||
+        (["refresh", "open", "close", "set-effort"].includes(body.kind) && typeof body.session !== "string") ||
         (body.taskId != null && typeof body.taskId !== "string") ||
         (["open", "close"].includes(body.kind) && body.taskId != null) ||
         (body.instanceId != null && (body.kind !== "open" || typeof body.instanceId !== "string" || !body.instanceId || body.instanceId.length > 200))) throw new ControlError("invalid_control", 400);
@@ -55,7 +60,8 @@ export class SessionControls {
     const old = this.row(body.operationId);
     if (old) {
       if (old.session !== session || old.kind !== body.kind || old.task_id !== (body.taskId ?? null) ||
-          (JSON.parse(old.target_json ?? "{} ").requestedInstance ?? null) !== (body.instanceId ?? null)) throw new ControlError("operation_id_conflict");
+          (JSON.parse(old.target_json ?? "{} ").requestedInstance ?? null) !== (body.instanceId ?? null) ||
+          JSON.stringify(JSON.parse(old.target_json ?? "{}").effortPolicy ?? null) !== JSON.stringify(effortPolicy)) throw new ControlError("operation_id_conflict");
       return this.view(old);
     }
     if (task && (task.sendAttemptedAt == null || !["in_progress", "recovering"].includes(task.status))) throw new ControlError("task_not_recoverable");
@@ -87,7 +93,12 @@ export class SessionControls {
         target = { generation: instance.generation, conversationId: ref.conversation, projectId: ref.project };
       }
     }
-    if (["refresh", "close"].includes(body.kind)) {
+    if (body.kind === "set-effort") {
+      if (snapshot?.queuedTasks || snapshot?.activeTaskId) throw new ControlError("session_busy");
+      if (snapshot?.page?.capabilities?.effort !== true) throw new ControlError("control_unsupported");
+      target = { effortPolicy };
+    }
+    if (["refresh", "close", "set-effort"].includes(body.kind)) {
       if (!snapshot) throw new ControlError("page_identity_unavailable");
       if (snapshot.activeTaskId !== (task?.id ?? null)) throw new ControlError("session_busy");
       if (snapshot.page.composerClean !== true) throw new ControlError("composer_not_clean");
@@ -114,13 +125,23 @@ export class SessionControls {
     if (!row || row.owner !== body?.owner || row.token !== body?.token) throw new ControlError("control_ownership_mismatch");
     if (!["claimed", "executing"].includes(row.state)) return this.view(row);
     if (!["succeeded", "blocked", "unknown"].includes(body.state)) throw new ControlError("invalid_control_state", 400);
+    let policyToCommit = null;
+    if (row.kind === "set-effort" && body.state === "succeeded") {
+      const policy = JSON.parse(row.target_json!).effortPolicy;
+      if (row.state !== "executing" || !validSelection(policy, body.result)) throw new ControlError("effort_verification_failed");
+      policyToCommit = policy;
+    }
     const previous = JSON.parse(row.result ?? "null");
     const result = JSON.stringify(row.kind === "close" && previous?.suspended === true
       ? { ...previous, ...body.result } : body.result ?? null);
     if (result.length > 4000) throw new ControlError("control_result_too_large", 400);
-    this.db.prepare("UPDATE session_controls SET state=?, error=?, result=? WHERE id=?")
-      .run(body.state, typeof body.error === "string" ? body.error.slice(0, 150) : null,
-        result, id);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      if (policyToCommit) this.store.registry.setEffort(row.session, policyToCommit);
+      this.db.prepare("UPDATE session_controls SET state=?, error=?, result=? WHERE id=?")
+        .run(body.state, typeof body.error === "string" ? body.error.slice(0, 150) : null, result, id);
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
     return this.view(this.row(id)!);
   }
   recordTab(id: string, body: any) {
@@ -138,10 +159,10 @@ export class SessionControls {
     const row = this.row(id);
     if (!row || row.owner !== body?.owner || row.token !== body?.token) throw new ControlError("control_ownership_mismatch");
     if (row.state !== "claimed") return { ...this.view(row), execute: false };
-    if (!["refresh", "stop", "open", "close"].includes(row.kind)) throw new ControlError("control_has_no_side_effect_fence");
+    if (!["refresh", "stop", "open", "close", "set-effort"].includes(row.kind)) throw new ControlError("control_has_no_side_effect_fence");
     if (row.kind !== "open" && (typeof body.documentId !== "string" || body.documentId.length > 100 || !body.documentId)) throw new ControlError("invalid_document_id", 400);
     const target = JSON.parse(row.target_json ?? "null");
-    if (target) {
+    if (target?.generation !== undefined) {
       const instance = this.diagnostics.instances.list().find(i => i.instanceId === row.owner && !i.stale);
       // A restarted worker must obtain a new operation, after inspecting this one.
       // Never apply an old numeric tab ID to a new browser/worker generation.

@@ -30,6 +30,9 @@ export type SubmissionState =
   | "unknown";
 
 export interface TaskView {
+  effortPolicy: Task["effortPolicy"];
+  effortSelection: Task["effortSelection"];
+  effortVerification: Task["effortVerification"];
   sessionRef: string | null;
   conversationId: string | null;
   taskId: string;
@@ -79,6 +82,7 @@ function getSubmissionState(t: Task): SubmissionState {
 export function toTaskView(store: TaskStore, t: Task, includeText = false): TaskView {
   const submissionState = getSubmissionState(t);
   const v: TaskView = {
+    effortPolicy: t.effortPolicy, effortSelection: t.effortSelection, effortVerification: t.effortVerification,
     sessionRef: store.registry.get(t.session)?.ref ?? null,
     conversationId: store.registry.get(t.session)?.conversation ?? null,
     taskId: t.id,

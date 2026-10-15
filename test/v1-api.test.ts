@@ -516,3 +516,84 @@ test("POST /v1/tasks passes through clean UTF-8 CJK without warning", async () =
   assert.equal(r.json.encodingFixed, undefined);
   assert.equal(r.json.encodingWarning, undefined);
 });
+
+test("creation effort is durable, idempotent and validated before dispatch", async () => {
+  const body = { sessionRef: "sr_effort_creation_api", projectId: null, text: "effort create",
+    effort: "high", effortFallback: "lower" };
+  const created = await post("/v1/sessions", body);
+  assert.equal(created.status, 201);
+  assert.deepEqual(created.json.effortPolicy, { effort: "high", effortFallback: "lower" });
+  assert.equal((await post("/v1/sessions", body)).json.taskId, created.json.taskId);
+  assert.equal((await post("/v1/sessions", { ...body, effort: "max" })).status, 409);
+  assert.equal((await post("/v1/sessions", { ...body, sessionRef: "sr_invalid_effort", effort: "xhigh" })).status, 400);
+  const owner = { owner: "effort-api-owner" };
+  // Claim may return earlier pending creations in this shared test database;
+  // the registry's owned API lets this test attach only its own creation.
+  let row = taskStore!.registry.get(body.sessionRef)!;
+  for (let n = 0; n < 100 && !row.owner; n++) {
+    const next = taskStore!.registry.claim(owner.owner);
+    if (!next) break;
+    if (next.ref !== body.sessionRef) {
+      taskStore!.registry.opening(next.ref, owner.owner, next.token!);
+      taskStore!.registry.attach(next.ref, owner.owner, next.token!, 990 + n);
+    }
+    row = taskStore!.registry.get(body.sessionRef)!;
+  }
+  assert.equal(row.owner, owner.owner);
+  taskStore!.registry.opening(row.ref, row.owner!, row.token!);
+  taskStore!.registry.attach(row.ref, row.owner!, row.token!, 980);
+  const claim = await get(`/internal/next_task?session=${row.ref}`);
+  assert.deepEqual(claim.json.task.effortPolicy, { effort: "high", effortFallback: "lower" });
+  const id = claim.json.task.taskId;
+  const badFence = await post(`/internal/tasks/${id}/progress`, { phase: "send_attempted" });
+  assert.equal(badFence.status, 400);
+  assert.equal(taskStore!.getTask(id)!.sendAttemptedAt, null);
+  const selected = { requestedEffort: "high", effectiveEffort: "high", fallbackApplied: false, modelFamily: "GPT-6" };
+  assert.equal((await post(`/internal/tasks/${id}/progress`, { phase: "send_attempted", effortSelection: selected })).status, 200);
+  await post(`/internal/tasks/${id}/capture`, { text: "captured fallback answer",
+    effortEvidence: { model: "gpt-6-thinking", thinkingEffort: "standard" } });
+  const result = (await get(`/v1/tasks/${id}`)).json;
+  assert.equal(result.status, "failed");
+  assert.equal(result.reply, "captured fallback answer");
+  assert.equal(result.error, "effort_mismatch");
+  assert.equal(result.effortVerification.status, "mismatch");
+  assert.equal(result.errorInfo.safeToResubmit, false);
+});
+
+test("session effort controls validate JSON and leave unrelated controls compatible", async () => {
+  for (const invalid of [{ kind: "set-effort", effort: "xhigh" }, { kind: "set-effort", effortFallback: "lower" },
+      { kind: "refresh", effort: "max" }]) {
+    assert.equal((await post("/v1/session-controls", { operationId: "invalid-effort-control", session: "anything", ...invalid })).status, 400);
+  }
+});
+
+test("post-Send creation route mismatch cannot fail a valid reply or override successful binding", async () => {
+  const ref = "sr_effort_creation_race";
+  const created = await post("/v1/sessions", { sessionRef: ref, projectId: null, text: "route race", effort: "medium" });
+  const owner = "effort-route-race";
+  let row = taskStore!.registry.get(ref)!;
+  for (let n = 0; n < 100 && !row.owner; n++) {
+    const next = taskStore!.registry.claim(owner);
+    if (!next) break;
+    if (next.ref !== ref) {
+      taskStore!.registry.opening(next.ref, owner, next.token!);
+      taskStore!.registry.attach(next.ref, owner, next.token!, 700 + n);
+    }
+    row = taskStore!.registry.get(ref)!;
+  }
+  const own = { owner, token: row.token! };
+  taskStore!.registry.opening(ref, owner, row.token!);
+  taskStore!.registry.attach(ref, owner, row.token!, 777);
+  const task = taskStore!.claimNextTask(ref)!;
+  taskStore!.recordEffortSelection(task.id, { requestedEffort: "medium", effectiveEffort: "medium", fallbackApplied: false, modelFamily: "GPT-6" });
+  taskStore!.markTaskProgress(task.id, "send_attempted");
+  await post(`/internal/session-creations/${ref}/fail`, { ...own, error: "creation_route_mismatch" });
+  assert.equal(taskStore!.getTask(task.id)!.status, "in_progress");
+  await post(`/internal/session-creations/${ref}/bind`, { ...own, tabId: 777,
+    conversationId: "6ad00000-0000-0000-0000-000000000077", projectId: null });
+  await post(`/internal/session-creations/${ref}/fail`, { ...own, error: "stale_creation_failure" });
+  assert.equal(taskStore!.getTask(task.id)!.status, "in_progress");
+  await post(`/internal/tasks/${created.json.taskId}/capture`, { text: "correct answer",
+    effortEvidence: { model: "gpt-6-thinking", thinkingEffort: "standard" } });
+  assert.equal(taskStore!.getTask(task.id)!.status, "done");
+});

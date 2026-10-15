@@ -629,3 +629,53 @@ For large or non-ASCII input, prefer files, stdin, or
   [`client/agent-client.ts`](./client/agent-client.ts)
 - CLI:
   [`bin/gpt-relay.ts`](./bin/gpt-relay.ts)
+
+## Effort selection
+
+Relay preserves the model family selected in ChatGPT. It never opens or clicks
+the model-family selector. The webpage itself selects Instant, Thinking or Pro
+execution within that family when effort changes.
+
+`POST /v1/sessions` accepts optional `effort` (`none`, `medium`, `high`,
+`max`, `pro`) and `effortFallback` (`error`, the default, or `lower`).
+Both are included in creation idempotency. Existing sessions use
+`POST /v1/session-controls` with
+`{operationId, kind: "set-effort", session, effort, effortFallback?}`.
+The operation requires a fresh idle page, a clean composer, no queued/active
+tasks, and an updated extension advertising the effort capability. No messages
+are sent by a control. A successful operation durably saves the requested policy;
+uncertain operations must be inspected rather than blindly repeated.
+
+The policy belongs to the session and is reapplied before each new submission,
+including after page reload. A task snapshots it at claim time. Webpage manual
+changes do not override a saved Relay policy. Omitting effort on a new session
+leaves the webpage behavior intact. `GET /v1/sessions/:ref` and session inspection
+return `effortPolicy`; tasks return `effortPolicy`, `effortSelection` and
+`effortVerification`.
+
+`effortSelection` contains `requestedEffort`, `effectiveEffort`,
+`fallbackApplied` and `modelFamily`. Explicit `lower` permits only a verified
+ordinary effort below the request; it never upgrades to Pro or downgrades a Pro
+request. Unknown DOM structure, unsupported families, timeouts and changed
+composers fail closed. The current adapter recognizes the observed GPT-6 and
+GPT-5.6 Sol slider layouts. `xhigh` is not an alias for `max`.
+
+Before Send, the extension verifies the slider, raw effort and Pro marker,
+rechecks after prompt injection, and checks the trigger again immediately
+before clicking. Pro cannot be identified using raw effort alone: the observed
+Pro and ordinary Medium buttons both contain `medium`.
+
+After a reply, the extension reads authenticated history in the page, matching
+the exact submitted user UUID and final assistant UUID. Only bounded model and
+thinking-effort identifiers leave the page; authentication material and other
+conversation content are not returned. History access failure or unknown
+metadata yields `effort_verification_unknown`; an observed different family,
+mode or effort yields `effort_mismatch`. The task is failed **with its captured
+reply retained**, `safeToResubmit: false`, and no automatic replay. Inspect the
+reply and verification result before accepting it or starting a new task.
+Late replies retain their original delivery error and additionally record effort
+verification.
+
+Platform quota fallback is independent of Relay's pre-send `effortFallback`
+policy. Selecting Pro in the UI does not guarantee a Pro response. A verified
+response confirms the platform-reported metadata, not internal compute usage.

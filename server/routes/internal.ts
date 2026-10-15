@@ -49,6 +49,7 @@ export function createInternalRouter(store: TaskStore): Router {
       task: {
         taskId: task.id,
         text: task.text,
+        effortPolicy: task.effortPolicy,
         timeoutMs: task.timeoutMs,
         submittedAt: task.submittedAt,
         expiresAt: task.expiresAt,
@@ -69,7 +70,7 @@ export function createInternalRouter(store: TaskStore): Router {
     const text = typeof body.text === "string" ? body.text : "";
     if (!text) return res.status(400).json({ error: "missing text" });
     try {
-      const result = store.captureReply(id, text);
+      const result = store.captureReply(id, text, Date.now(), req.body?.effortEvidence);
       return res.json({
         status: result.task.status,
         taskId: result.task.id,
@@ -99,6 +100,10 @@ export function createInternalRouter(store: TaskStore): Router {
       return res.status(400).json({ error: "invalid phase" });
     }
     try {
+      if (body.phase === "send_attempted") {
+        const task = store.getTask(id);
+        if (task?.effortPolicy) store.recordEffortSelection(id, req.body?.effortSelection);
+      }
       const task = store.markTaskProgress(id, body.phase as TaskProgressPhase);
       return res.json({ status: task.status, taskId: task.id, phase: body.phase });
     } catch (err) {

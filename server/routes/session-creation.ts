@@ -1,3 +1,4 @@
+import { parseEffortPolicy } from "../../shared/effort.js";
 import { Router } from "express";
 import type { TaskStore } from "../task-store.js";
 import { normalizeTimeout } from "../task-store.js";
@@ -21,11 +22,13 @@ export function createSessionCreationRouter(store: TaskStore, config: Config) {
     const project = b.projectId === null ? null : projectKey(b.projectId);
     const timeout = normalizeTimeout(asPositiveInt(b.timeout) ?? undefined, config.defaultTimeoutMs, config.maxTaskTimeoutMs);
     const fix = tryFixEncoding(b.text);
-    const fingerprint = JSON.stringify({ project, text: fix.text, timeout });
+    let policy;
+    try { policy = parseEffortPolicy(b); } catch { throw new RegistryError("invalid_effort_policy", 400); }
+    const fingerprint = JSON.stringify({ project, text: fix.text, timeout, ...(policy ? { effortPolicy: policy } : {}) });
     const row = registry.create(b.sessionRef, project, fingerprint, () => store.createTask({
       session: b.sessionRef, text: fix.text, timeoutMs: timeout,
       clientRequestId: typeof b.clientRequestId === "string" ? b.clientRequestId : null,
-    }));
+    }), policy);
     const task = store.getTask(row.initial_task!)!;
     res.status(201).json({ taskId: task.id, status: task.status, ...registry.view(row) });
   });
@@ -80,8 +83,13 @@ export function createSessionCreationRouter(store: TaskStore, config: Config) {
         const task = store.getTask(row.initial_task!)!;
         const unknown = b.unknown === true || task.sendAttemptedAt !== null;
         const error = typeof b.error === "string" ? b.error.slice(0, 200) : "session_creation_failed";
+        // A concurrent successful bind wins over a stale page observation.
+        if (row.conversation) break;
         registry.fail(ref, b.owner, b.token, error, unknown);
-        if (["queued", "in_progress", "recovering"].includes(task.status)) store.completeTask(task.id, { error });
+        // After Send, a transient SPA identity mismatch is unknown evidence,
+        // not proof the message failed. Keep observing the original task.
+        if (task.sendAttemptedAt === null && ["queued", "in_progress", "recovering"].includes(task.status))
+          store.completeTask(task.id, { error });
         break;
       }
       default: throw new RegistryError("unknown action", 400);

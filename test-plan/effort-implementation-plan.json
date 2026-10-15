@@ -1,0 +1,58 @@
+{
+  "scope": "Control effort for the model family selected by the user in ChatGPT; never select a model family.",
+  "values": [
+    "none",
+    "medium",
+    "high",
+    "max",
+    "pro"
+  ],
+  "fallback": {
+    "default": "error",
+    "optional": "lower",
+    "pro": "Never automatically downgrade Pro or upgrade another effort to Pro"
+  },
+  "phases": [
+    {
+      "step": 1,
+      "work": "Define shared effort policy and validation; persist session policy, task snapshot and verification evidence with additive migrations."
+    },
+    {
+      "step": 2,
+      "work": "Add set-effort session control and creation effort parameters, CLI/client support, idempotency checks and task/control exclusion."
+    },
+    {
+      "step": 3,
+      "work": "Implement composer-scoped DOM adapter using reasoning trigger, dynamic ARIA menu linkage, bounded keyboard actions, model-family preservation, and Pro-aware verification. Apply before Send fence and recheck before click."
+    },
+    {
+      "step": 4,
+      "work": "Verify actual reply model and thinking_effort using exact submitted user and reply IDs in authenticated page history. Persist unknown/mismatch with reply retained; never resend. Recover using durable task evidence."
+    },
+    {
+      "step": 5,
+      "work": "Document public semantics, unknown capabilities, platform fallback, errors and extension reload requirements."
+    },
+    {
+      "step": 6,
+      "work": "Run meaningful DOM, database migration, API/client, idempotency, race and recovery tests; typecheck and full regression suite; perform bounded non-Pro browser validation. No additional Pro sends."
+    }
+  ],
+  "acceptance": [
+    "No effort supplied preserves existing behavior and user model selection.",
+    "Requested effort survives reload and is verified before each dispatch.",
+    "Unavailable effort fails without Send; lower fallback only uses verified lower ordinary efforts.",
+    "Pro is distinguished from medium despite identical raw effort values.",
+    "Platform fallback or unverifiable metadata is reported without discarding the captured reply or replaying Send.",
+    "Existing unrelated changes are preserved."
+  ],
+  "status": "complete",
+  "validation": {
+    "automatedTestsPassed": 457,
+    "typecheck": "passed",
+    "publicReleaseHygiene": "passed",
+    "liveExistingConversation": "verified high/extended",
+    "liveNewConversation": "verified medium/standard",
+    "additionalProMessages": 0
+  }
+}

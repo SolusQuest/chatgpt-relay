@@ -8,7 +8,9 @@ export function errorInfo(message: string, task?: Task) {
   const deliveryState = !task ? "unknown" : task.reply !== null || task.lateReply !== null ? "replied" :
     task.submitAcknowledgedAt !== null || task.generatingSeenAt !== null ? "acknowledged" :
     task.sendAttemptedAt !== null ? "uncertain" : "not_attempted";
-  const nextAction = code === "composer_changed" || code === "composer_not_clean" ? "inspect_session_and_preserve_draft" :
+  const nextAction = code === "effort_mismatch" || code === "effort_verification_unknown" ? "inspect_captured_reply_and_effort_do_not_resend" :
+    code === "effort_unavailable" || code === "effort_dom_unsupported" || code === "effort_model_unsupported" ? "inspect_page_effort_options" :
+    code === "composer_changed" || code === "composer_not_clean" ? "inspect_session_and_preserve_draft" :
     code === "page_identity_unavailable" || code === "reload_extension_and_page" ? "run_doctor" :
     code === "control_timeout" || /^(refresh|open|close)_outcome_unknown$/.test(code) ? "inspect_session_and_operation_do_not_repeat" :
     code === "instance_ambiguous" ? "inspect_browser_instances_and_select_instance" :
