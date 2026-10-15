@@ -213,6 +213,8 @@ gpt-relay resume
 gpt-relay review --session <session-id> --stdin
 ```
 
+`show <task-id> --json` returns the full task object, `tasks --json` returns `{tasks: [...]}`, and `resume --json` returns `{results: [...]}` with each pending record, its task or null, and any unresolved reason. Empty lists remain valid JSON. These observation commands return zero on a successful query even when a task failed; inspect task status and verification. Resume observes original tasks and retains unresolved records without resubmitting.
+
 ## API summary
 
 Maintenance commands return JSON. `suspend` stops new claims while existing work continues; queued tasks retain their original expiry. `continue` releases only that dispatch suspension. Safety `pause`/`resume` remain separate.
@@ -342,5 +344,8 @@ Supported values are `none | medium | high | max | pro`; an unavailable preset f
 
 Results report requested/effective effort and response verification. A mismatch or unverifiable response fails the task while retaining its reply; inspect `show TASK_ID` without automatically resending. See [API semantics](api.md#effort-selection) for the contract. Agents running workflows should use the [workflow effort policy](workflows/README.md#relay-effort-policy) and [execution procedure](agent-instructions.md#apply-the-workflow-effort-policy).
 
-After updating, restart the Relay service, reload the extension, and refresh
-ChatGPT tabs so the new content-script module is loaded.
+Text task output includes effort and verification: `disabled` means no policy, `pending` means verification has not arrived for an active task, and `not_checked` means a terminal task has no verification. Completed verification reports `verified`, `mismatch` or `unknown`; `show` also includes model metadata and fallback details. Session lists display the saved effort/fallback policy, rather than a live reading of the webpage.
+
+Both text and JSON `review` return zero for completed results or captured late replies when any required effort verification is `verified`. Failed, unknown or missing required verification returns exit code 2. Captured replies remain available in either output mode, including failed tasks; text mode writes replies to stdout and diagnostics to stderr. JSON includes `errorInfo` with delivery and recovery guidance. A usable late reply can return zero while preserving the task's historical failed status and error.
+
+When installing the effort feature's server/extension changes, wait until Relay work is idle, restart the Relay service, reload the extension, and refresh ChatGPT tabs so the new content-script module is loaded. CLI/client-only updates need no service restart or page refresh.

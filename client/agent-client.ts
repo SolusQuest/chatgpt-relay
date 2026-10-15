@@ -35,7 +35,16 @@ export interface ReviewOptions {
   signal?: AbortSignal;
 }
 
+export interface TaskErrorInfo {
+  code: string;
+  message: string;
+  deliveryState: string;
+  safeToResubmit: boolean | null;
+  nextAction: string;
+}
+
 export interface ReviewResult {
+  errorInfo?: TaskErrorInfo | null;
   effortPolicy?: import("../shared/effort.js").EffortPolicy | null;
   effortSelection?: import("../shared/effort.js").EffortSelection | null;
   effortVerification?: import("../shared/effort.js").EffortVerification | null;
@@ -59,6 +68,7 @@ export interface TaskProgressView {
 }
 
 export interface TaskView {
+  errorInfo?: TaskErrorInfo | null;
   effortPolicy?: import("../shared/effort.js").EffortPolicy | null;
   effortSelection?: import("../shared/effort.js").EffortSelection | null;
   effortVerification?: import("../shared/effort.js").EffortVerification | null;
@@ -103,6 +113,7 @@ export interface TaskView {
 }
 
 export interface SessionView {
+  effortPolicy?: EffortPolicy | null;
   sessionRef?: string;
   conversationId?: string | null;
   creationStatus?: string;
@@ -291,6 +302,7 @@ export async function review(
       reply: t.reply,
       lateReply: t.lateReply,
       error: t.error,
+      errorInfo: t.errorInfo ?? null,
       submissionState: t.submissionState,
       elapsedMs: Date.now() - started,
     };

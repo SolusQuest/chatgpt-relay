@@ -1,0 +1,35 @@
+{
+  "title": "Complete effort observability and CLI result handling",
+  "status": "complete",
+  "scope": [
+    "Show effort policy, selection, verification and response metadata in task details, task lists and resumed results; show saved policy in session lists.",
+    "Implement JSON output for show, tasks and resume, including empty and unresolved results, without discarding API fields.",
+    "Preserve captured replies on failed verification and use consistent review exit codes for normal and late replies.",
+    "Expose structured errorInfo through the SDK and review JSON; complete SessionView and CLI help.",
+    "Add regression coverage using isolated local servers and temporary databases, without sending ChatGPT messages."
+  ],
+  "result_contract": {
+    "review_success": "A completed reply or eligible captured late reply, with verified effort whenever an effort policy is present.",
+    "review_failure": "Return exit code 2 for failed, unknown or missing required effort verification while retaining captured reply output.",
+    "observation_commands": "show/tasks/resume remain successful queries even when observed tasks failed; task status and verification remain explicit in text and JSON.",
+    "json_shapes": "show returns the task object; tasks returns {tasks}; resume returns {results} with record, task and optional unresolved reason.",
+    "verification_display": "Distinguish effort disabled, pending verification, terminal unchecked verification, verified, mismatch and unknown."
+  },
+  "steps": [
+    "Add regressions reproducing verification failures, late replies, JSON output and session policy visibility.",
+    "Implement shared display/result helpers and complete CLI/SDK output contracts.",
+    "Update the existing user and agent documentation at the owning entry points.",
+    "Run focused tests, full suite, typecheck, public-release hygiene and diff checks.",
+    "Inspect the live Relay state before any runtime maintenance. Do not restart the server, reload extensions or refresh pages while active work exists. Perform maintenance only if changed runtime components require it."
+  ],
+  "runtime_safety": "CLI/client changes require no server restart or browser reload. Do not disturb active sessions. If scope expands to server or extension changes, defer runtime activation until no active or queued work and no generating pages are observed.",
+  "validation": {
+    "regression_tests_added": 11,
+    "full_suite": "471 passed, 0 failed",
+    "typecheck": "passed",
+    "public_release_hygiene": "passed",
+    "diff_check": "passed",
+    "live_relay_observation": "At the final read-only check: zero in-progress, recovering and queued tasks.",
+    "runtime_maintenance": "None required or performed; no server or extension code changed and no ChatGPT messages were sent."
+  }
+}

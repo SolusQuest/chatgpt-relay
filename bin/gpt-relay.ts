@@ -14,7 +14,9 @@ import {
   listSessions,
   resumePending,
   review,
+  type TaskView,
 } from "../client/agent-client.js";
+import { effortDetails, effortSummary, reviewExitCode } from "../client/task-output.js";
 import { http, HttpError } from "../client/http.js";
 import { BackendError, probeBackend, type Backend } from "../client/backend.js";
 import { readBinding, saveBinding, clearBinding } from "../client/backend-config.js";
@@ -105,7 +107,7 @@ async function cmdSessions(args: string[] = []): Promise<number> {
     const flag = args.includes("--session-ref") ? "--session-ref" : "--session";
     const i = args.indexOf(flag);
     if (i < 0 || !args[i + 1] || args.includes("--session-ref") && args.includes("--session"))
-      throw new Error("usage: sessions inspect|suspend|continue|refresh|open|close --session-ref REF | --session ID");
+      throw new Error("usage: sessions inspect|suspend|continue|refresh|open|close|effort --session-ref REF | --session ID");
     if (args[0] === "effort") {
       const effort = args[args.indexOf("--effort") + 1];
       const fallbackIndex = args.indexOf("--effort-fallback");
@@ -142,7 +144,7 @@ async function cmdSessions(args: string[] = []): Promise<number> {
     return 0;
   }
   console.log(
-    ["session", "pending", "active", "activeStatus", "paused", "reason", "lastSeen"].join("\t"),
+    ["session", "pending", "active", "activeStatus", "paused", "reason", "lastSeen", "effort", "fallback"].join("\t"),
   );
   for (const s of sessions) {
     console.log(
@@ -154,22 +156,12 @@ async function cmdSessions(args: string[] = []): Promise<number> {
         s.paused ? "yes" : "no",
         s.pauseReason ?? "",
         new Date(s.lastSeen).toISOString(),
+        s.effortPolicy?.effort ?? "disabled",
+        s.effortPolicy?.effortFallback ?? "-",
       ].join("\t"),
     );
   }
   return 0;
-}
-
-interface CliTask {
-  taskId: string;
-  session: string;
-  status: string;
-  submittedAt: number;
-  completedAt: number | null;
-  error: string | null;
-  reply: string | null;
-  lateReply: string | null;
-  submissionState: string;
 }
 
 async function cmdTasks(args: string[]): Promise<number> {
@@ -193,16 +185,17 @@ async function cmdTasks(args: string[]): Promise<number> {
     else if (a === "--last") q.set("limit", args[++i] ?? "20");
   }
   if (!q.has("limit")) q.set("limit", "20");
-  const r = await http.get<{ tasks: CliTask[] }>(`/v1/tasks?${q}`, {
+  const r = await http.get<{ tasks: TaskView[] }>(`/v1/tasks?${q}`, {
     baseUrl: BASE, serverId: SERVER_ID,
     timeoutMs: 5_000,
   });
+  if (args.includes("--json")) { console.log(JSON.stringify(r)); return 0; }
   if (r.tasks.length === 0) {
     console.log("(no tasks)");
     return 0;
   }
   console.log(
-    ["taskId", "session", "status", "submission", "submittedAt", "elapsedMs"].join("\t"),
+    ["taskId", "session", "status", "submission", "submittedAt", "elapsedMs", "effort", "effortVerification"].join("\t"),
   );
   for (const t of r.tasks) {
     const elapsed =
@@ -215,6 +208,8 @@ async function cmdTasks(args: string[]): Promise<number> {
         t.submissionState,
         new Date(t.submittedAt).toISOString(),
         `${elapsed}ms`,
+        effortSummary(t).effort,
+        effortSummary(t).verification,
       ].join("\t"),
     );
   }
@@ -242,10 +237,12 @@ async function cmdShow(args: string[]): Promise<number> {
     console.error(`task not found: ${id}`);
     return 1;
   }
+  if (args.includes("--json")) { console.log(JSON.stringify(t)); return 0; }
   console.log("─── task ───────────────────────────────────────");
   console.log(`  id:          ${t.taskId}`);
   console.log(`  session:     ${t.session}`);
   console.log(`  status:      ${t.status}`);
+  console.log(effortDetails(t));
   console.log(`  submission:  ${t.submissionState}`);
   if (t.submissionState === "verifying" && t.submissionVerificationDeadlineAt) {
     console.log(
@@ -293,6 +290,7 @@ async function cmdShow(args: string[]): Promise<number> {
   if (t.error) {
     console.log("\n─── error ──────────────────────────────────────");
     console.log(t.error);
+    if (t.errorInfo) console.log(JSON.stringify(t.errorInfo));
   }
   if (t.status === "recovering") {
     console.log("\nNOTE: ChatGPT may still be producing this reply. Do not resubmit the prompt.");
@@ -312,8 +310,9 @@ async function cmdCancel(args: string[]): Promise<number> {
   return 0;
 }
 
-async function cmdResume(): Promise<number> {
+async function cmdResume(args: string[]): Promise<number> {
   const rows = await resumePending(BASE, SERVER_ID);
+  if (args.includes("--json")) { console.log(JSON.stringify({ results: rows })); return 0; }
   if (rows.length === 0) {
     console.log("(no pending tasks)");
     return 0;
@@ -338,7 +337,8 @@ async function cmdResume(): Promise<number> {
       `"${preview}"`,
     ].join("\t");
     console.log(line);
-    if (task.status === "done" && task.reply) {
+    console.log(effortDetails(task));
+    if (task.reply !== null) {
       console.log("─── reply ────────────────");
       console.log(task.reply);
       console.log("──────────────────────────");
@@ -361,6 +361,7 @@ async function cmdResume(): Promise<number> {
       );
     }
     if (task.error) console.log(`  error: ${task.error}`);
+    if (task.errorInfo) console.log(`  errorInfo: ${JSON.stringify(task.errorInfo)}`);
   }
   return 0;
 }
@@ -428,18 +429,15 @@ async function cmdReview(args: string[]): Promise<number> {
   });
   if (args.includes("--json")) {
     console.log(JSON.stringify(r));
-    return "reply" in r && r.reply !== undefined && r.status !== "done" ? 2 : 0;
+    return r.reply !== undefined ? reviewExitCode(r) : 0;
   }
   if ("reply" in r && r.reply !== undefined) {
-    if (r.effortPolicy) console.error(JSON.stringify({
-      effortPolicy: r.effortPolicy, effortSelection: r.effortSelection, effortVerification: r.effortVerification,
-    }));
-    if (r.status === "done" || r.lateReply) {
-      process.stdout.write(r.reply ?? r.lateReply ?? "");
-      return 0;
-    }
-    console.error(`task ${r.taskId} ${r.status}: ${r.error ?? "(no error)"}`);
-    return 2;
+    if (r.effortPolicy) console.error(effortDetails(r));
+    process.stdout.write(r.reply ?? r.lateReply ?? "");
+    const code = reviewExitCode(r);
+    if (code !== 0) console.error(`task ${r.taskId} ${r.status}: ${r.error ?? "required effort verification missing"}`);
+    if (r.errorInfo) console.error(JSON.stringify({ errorInfo: r.errorInfo }));
+    return code;
   }
   console.log(JSON.stringify(r));
   return 0;
@@ -517,18 +515,18 @@ commands:
   sessions inspect|suspend|continue --session-ref REF (or --session ID)
   sessions refresh --session-ref REF [--recover-task TASK_ID] [--operation-id ID]
   sessions open --session-ref REF [--instance INSTANCE_ID] [--operation-id ID]
-  sessions effort --session-ref REF --effort none|medium|high|max|pro [--effort-fallback error|lower|max]
+  sessions effort --session-ref REF --effort none|medium|high|max|pro [--effort-fallback error|lower|max] [--operation-id ID]
   sessions close --session-ref REF [--operation-id ID]
                            all session controls also accept --session ID
   doctor [--session-ref REF]  diagnose service, extension and observed DOM
   tasks trace TASK_ID       read durable lifecycle events
   tasks recover|stop TASK_ID [--operation-id ID]
   operations OPERATION_ID   read asynchronous control result
-  tasks [--session ID] [--status S] [--last N]
+  tasks [--session ID | --session-ref REF] [--status S] [--last N] [--json]
                            list recent tasks
-  show <taskId>            show full prompt + reply
+  show <taskId> [--json]   show prompt, replies and effort verification
   cancel <taskId>          cancel a task
-  resume                   check pending tasks from previous run
+  resume [--json]          check pending tasks from previous run
   review --session ID (--text T | --stdin)
   review --session-ref REF (--text T | --stdin | --file F)
   review --new-session --session-ref REF (--project-id ID | --no-project)
@@ -598,7 +596,7 @@ async function main(): Promise<number> {
       case "cancel":
         return await cmdCancel(rest);
       case "resume":
-        return await cmdResume();
+        return await cmdResume(rest);
       case "review":
         return await cmdReview(rest);
       case undefined:
@@ -614,7 +612,7 @@ async function main(): Promise<number> {
     }
   } catch (err) {
     const controlCommand = ["doctor", "operations"].includes(cmd ?? "") ||
-      cmd === "sessions" && ["inspect", "suspend", "continue", "refresh", "open", "close"].includes(rest[0] ?? "") ||
+      cmd === "sessions" && ["inspect", "suspend", "continue", "refresh", "open", "close", "effort"].includes(rest[0] ?? "") ||
       cmd === "tasks" && ["trace", "recover", "stop"].includes(rest[0] ?? "");
     if (err instanceof BackendError) {
       const code = controlCommand && err.code === "invalid_arguments" ? "client_error" : err.code;
@@ -626,9 +624,7 @@ async function main(): Promise<number> {
       }
       return !controlCommand && ["invalid_arguments", "invalid_backend"].includes(err.code) ? 64 : 1;
     }
-    if (rest.includes("--json") || ["doctor", "operations"].includes(cmd ?? "") ||
-        cmd === "sessions" && ["inspect", "suspend", "continue", "refresh"].includes(rest[0] ?? "") ||
-        cmd === "tasks" && ["trace", "recover", "stop"].includes(rest[0] ?? "")) {
+    if (rest.includes("--json") || controlCommand) {
       console.error(JSON.stringify({ error: err instanceof HttpError ? err.code : "client_error",
         errorInfo: err instanceof HttpError && err.errorInfo ? err.errorInfo : {
           code: "client_error", message: (err as Error).message, deliveryState: "unknown",

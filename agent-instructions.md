@@ -61,7 +61,7 @@ Wait for `succeeded`, inspect requested/effective effort, and persist it with th
 
 When the workflow must retain max after a Pro-to-max fallback, run a new `sessions effort --effort max --effort-fallback error` control with the same session selector before the next message. Wait for success and preserve the original Pro request/fallback evidence in the execution record. The saved Pro policy otherwise attempts Pro again on later messages.
 
-Read effort-enabled review results using `--json` or `show <task-id>`. Require `effortSelection` to match the resolved policy or its allowed fallback and `effortVerification.status` to be `verified`. A failed/unknown control or mismatched/unverifiable reply blocks dependent submission or advancement under the workflow policy. For accepted values, other fallback policies and error fields, consult [effort API semantics](./api.md#effort-selection).
+Read effort-enabled review results using `review --json` or `show <task-id> --json`; `tasks --json` and `resume --json` expose observed task results too. Require `effortSelection` to match the resolved policy or its allowed fallback and `effortVerification.status` to be `verified`. Query success and the presence of a captured reply alone do not establish that verification passed. A failed/unknown control or mismatched/unverifiable reply blocks dependent submission or advancement under the workflow policy. For accepted values, other fallback policies and error fields, consult [effort API semantics](./api.md#effort-selection).
 
 ## Artifact review
 
