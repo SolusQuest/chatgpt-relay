@@ -35,11 +35,16 @@ Mode: default | auto
 Milestone: <existing open milestone url or owner/repo milestone number>
 Refinement parent: <issue url>
 Design authority: <document or merged PR url>@<exact commit SHA>
+Graph structure: auto | compact | tracked
 Relay session: <optional existing session ID or sessionRef>
 Relay Project: <optional Project ID/name, or no-project, for a new session>
 Relay effort: <optional explicit override>
 Close refinement parent: yes | no
 ```
+
+For milestone graphs, both structures require an existing refinement parent with a coordination role; independent tasks without one use the repository's ordinary issue publication rules. Omitted structure means `auto`: use `compact` (`parent → leaf`) when the parent can provide all delivery tracking, or `tracked` (`parent → tracker → leaf`) when delivery directions need independent coordination. Compact content is reviewed as one complete graph batch followed by deterministic remote verification; an additional final remote Relay review requires explicit user or binding project authority for a distinct independent acceptance check. Tracked content uses tracker and per-tracker leaf batches plus final remote review. `Close refinement parent` applies only to `tracked`; the compact parent remains open as the delivery tracker. Resume preserves the recorded structure and review requirements; older executions use `tracked`.
+
+The initial graph content review also checks workflow applicability and structure choice, including whether ordinary publication without a parent is sufficient. This check is part of the existing first content submission. A justified no-parent recommendation routes to the repository's ordinary publication procedure; it adds no third graph structure or separate review gate.
 
 Omitted mode means `default`. Record it before the first workflow phase and preserve it unless the user changes it. Standalone stages stop at their own outcome and grant no downstream authority. Compositions consume intermediate handoffs and continue their authorized stages without adding routine approval checkpoints.
 
@@ -134,7 +139,7 @@ Repetition, severity wording, style, unsupported/contradicted claims, and determ
 | [`design.md`](./design.md) | Decision discovery, issue contract, publication/readback |
 | [`plan.md`](./plan.md) | Readiness, implementation/test plan, one-time fallback |
 | [`implementation.md`](./implementation.md) | Code/tests, PR convergence, exact-head handoff, authorized re-entry |
-| [`milestone-to-issue-graph.md`](./milestone-to-issue-graph.md) | Reviewed tracker/leaf batches, idempotent graph publication, exact remote verification |
+| [`milestone-to-issue-graph.md`](./milestone-to-issue-graph.md) | Compact graph or tracker/leaf content review, idempotent publication, exact remote verification and review |
 | [`review-convergence.md`](./review-convergence.md) | Shared review budget, prompts, finding ledger, continuation |
 
 ## Authoring rule
