@@ -583,6 +583,55 @@ for (const timing of ["preclaim", "postclaim", "run-task"]) {
   });
 }
 
+for (const scenario of ['owned','foreign-owner','foreign-tab','foreign-project','bound','hydrating','other-first-task',
+  'cancelled','prior-send','edited-after-claim'] as const) {
+  test(`only an owned unsent first task can initialize a dirty new page: ${scenario}`, async () => {
+    const w = await worker('opening', true);
+    w.context.initializationScenario = scenario;
+    const result = await vm.runInContext(`(async()=>{
+      const scenario=initializationScenario,calls=[];
+      let claimed=false,run=null;
+      const managed={sessionRef:'sr_new',owner:scenario==='foreign-owner'?'other':'browser',
+        token:'token',initialTaskId:'task',projectId:scenario==='foreign-project'?'g-p-'+'a'.repeat(32):null};
+      getPageState=async()=>({session:'sr_new',documentId:'doc',ready:false,observationReady:scenario!=='hydrating',
+        generating:false,composerClean:false,baseline:{},reason:'composer-not-clean',
+        initialCreation:claimed&&scenario==='edited-after-claim'?null:managed});
+      httpJson=async(method,path)=>{
+        calls.push(path);
+        if(path.endsWith('/inspect'))return {tabId:scenario==='foreign-tab'?8:7,conversationId:null,projectId:null,
+          creationStatus:scenario==='bound'?'created':'pending',initialTaskId:'task',
+          initialTaskStatus:claimed?'in_progress':'queued'};
+        if(path.startsWith('/internal/next_task')){claimed=true;return {task:{taskId:scenario==='other-first-task'?'other':'task',text:'new prompt'}};}
+        if(path==='/v1/tasks/task')return {status:scenario==='cancelled'?'cancelled':'in_progress',
+          sendAttemptedAt:scenario==='prior-send'?123:null};
+        if(path.endsWith('/complete')||path.endsWith('/defer'))stopDispatchLoop('sr_new');
+        return {};
+      };
+      sendTabMessage=async(tab,msg)=>{
+        if(msg.type==='run-task'){
+          run=msg;calls.push('run-task');
+          return {error:'initialization failed',errorCode:'new_session_initialization_failed',submissionState:'not-submitted'};
+        }
+        return {};
+      };
+      setTimeout=fn=>{stopDispatchLoop('sr_new');fn();return 1;};
+      await startDispatchLoop('sr_new',7);
+      return {calls,run};
+    })()`, w.context);
+    if (scenario === 'owned') {
+      assert.deepEqual(JSON.parse(JSON.stringify(result.run.initializeComposer)), {token:'token',documentId:'doc'});
+      assert.ok(result.calls.indexOf('/v1/tasks/task') < result.calls.indexOf('run-task'));
+      assert.ok(result.calls.some((p: string) => p.endsWith('/complete')));
+      assert.ok(!result.calls.some((p: string) => p.endsWith('/defer')), 'initialization failure must not spin forever');
+    } else {
+      assert.equal(result.run, null);
+    }
+    if (['foreign-owner','foreign-tab','foreign-project','bound','hydrating'].includes(scenario)) {
+      assert.ok(!result.calls.some((p: string) => p.startsWith('/internal/next_task')));
+    }
+  });
+}
+
 for (const stopLoop of [false, true]) {
   test(`reconciliation does not recover a live preparing dispatch (loop stopped: ${stopLoop})`, async () => {
     const w = await worker("opening", true);

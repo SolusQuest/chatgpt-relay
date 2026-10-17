@@ -48,15 +48,18 @@ export class SessionDiagnostics {
     const pages = rows.map(r => ({ ...JSON.parse(r.payload), observedAt: r.observed_at,
       stale: now - r.observed_at > SNAPSHOT_TTL_MS }));
     const instances = this.instances.list(now);
+    const matchesTab = (owner: string, tab: { tabId: number; conversationId: string | null }) =>
+      ref.conversation != null ? tab.conversationId === ref.conversation :
+        owner === ref.owner && tab.tabId === ref.tab_id && tab.conversationId == null;
     const live = pages.filter(p => {
       if (p.stale) return false;
       const instance = instances.find(i => i.instanceId === p.owner);
       if (!instance) return true; // Compatibility with extensions without inventory.
       const tab = instance.tabs.find(t => t.tabId === p.tabId);
-      return !instance.stale && p.generation === instance.generation && !!tab && tab.conversationId === ref.conversation;
+      return !instance.stale && p.generation === instance.generation && !!tab && matchesTab(p.owner, tab);
     });
     const matching = instances.filter(i => !i.stale).flatMap(i => i.tabs
-      .filter(t => t.conversationId === ref.conversation && ref.conversation != null)
+      .filter(t => matchesTab(i.instanceId, t))
       .map(t => ({ instanceId: i.instanceId, generation: i.generation, ...t })));
     const expectedOwners = new Set([ref.owner, ...pages.map(p => p.owner)].filter(Boolean));
     const known = instances.filter(i => expectedOwners.has(i.instanceId));

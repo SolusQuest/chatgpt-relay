@@ -34,3 +34,34 @@ test("diagnostics distinguish missing, ambiguous and stale pages without leaking
     assert.equal(diagnostics.doctor("diag").checks[0]!.capabilities.assistantMessages, null);
   } finally { db.close(); }
 });
+
+test('unbound creation diagnostics match only the owned tab, including before the first send', () => {
+  const db = openDatabase(':memory:');
+  try {
+    const store = new TaskStore(db, loadConfig());
+    const ref = 'sr_pending';
+    const registry = store.registry;
+    registry.create(ref, null, 'fingerprint', () => store.createTask({session:ref,text:'prompt'}));
+    const owned = registry.claim('browser')!;
+    registry.opening(ref, 'browser', owned.token!);
+    registry.attach(ref, 'browser', owned.token!, 7);
+    const diagnostics = new SessionDiagnostics(db, store);
+    const inventory = {owner:'browser',generation:1,revision:1,tabs:[
+      {tabId:7,conversationId:null,loading:false}, {tabId:8,conversationId:null,loading:false},
+    ]};
+    diagnostics.instances.report(inventory);
+    assert.equal(diagnostics.inspect(ref)!.browser.status, 'script_unreachable');
+    diagnostics.report({owner:'browser',generation:1,tabId:7,session:ref,protocol:1,
+      ready:false,composerClean:false,reason:'composer-not-clean'});
+    diagnostics.report({owner:'browser',generation:1,tabId:8,session:ref,protocol:1});
+    const result = diagnostics.inspect(ref)!;
+    assert.equal(result.browser.status, 'observed');
+    assert.deepEqual(result.browser.tabs.map(t => t.tabId), [7]);
+    assert.equal(result.pageStatus, 'observed');
+    assert.equal(result.page.tabId, 7);
+    assert.equal(result.page.composerClean, false);
+    diagnostics.instances.report({...inventory,revision:2,tabs:[inventory.tabs[1]!]});
+    assert.equal(diagnostics.inspect(ref)!.browser.status, 'tab_missing');
+    assert.equal(diagnostics.inspect(ref)!.pageStatus, 'unknown');
+  } finally { db.close(); }
+});

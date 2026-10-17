@@ -214,6 +214,8 @@ An existing ID does not imply the page is ready, unpaused or finished generating
 
 Creation commands are independent of any existing session. The extension polls `POST /internal/session-creations/claim` using its persisted owner identity. Commands include the ref, Project ID, attempt token and open state. It fences `opening` before opening a marked tab, then records `attach` and validates `bind`. The owned token and tab must match; an unrelated tab cannot bind the ref. An uncertain open is reported unknown instead of opening another page. After browser restoration changes tab IDs, reassociation requires the extension to verify the old tab no longer exists and present the prior ownership through `reattach`. The ownership token provides local execution correlation, not an authentication boundary.
 
+Before its first Send, a verified owned new page initializes automatically restored text through the composer. Only the claimed initial task with no Send evidence can initialize, and the composer must remain empty before effort selection and prompt injection. Existing conversations keep draft protection. User edits, attachments, uploads or changed page identity prevent initialization; bounded initialization failure does not resend or create another page.
+
 The internal endpoints are implementation details, not agent integration APIs.
 
 ### Project discovery

@@ -200,6 +200,9 @@ function createHarness({ advanceTimers = false, managed = null as null | Record<
       type: string; clipboardData: any;
       constructor(type: string, options: any) { this.type = type; this.clipboardData = options.clipboardData; }
     },
+    InputEvent: class {
+      constructor(public type: string, options: any) { Object.assign(this, options); }
+    },
     console: { log() {}, warn() {}, error() {} },
     setTimeout: (callback: () => void, ms: number) => {
       if (advanceTimers) {
@@ -1287,3 +1290,104 @@ test("a parsed attachment-only first turn satisfies conversation hydration", asy
   assert.equal(page.ready, true);
   assert.equal((page.baseline as any).lastUserId, "attachment-user");
 });
+
+function newSessionDraftHarness(projectId: string | null = null) {
+  const managed = {sessionRef:'sr_new',owner:'browser',token:'creation-token',initialTaskId:'first-task',projectId};
+  const h = createHarness({advanceTimers:true,managed});
+  h.state.pathname = projectId ? `/g/${projectId}/project` : '/';
+  h.state.readyState = 'complete';
+  const input = h.state.input as any;
+  input.isConnected = true;
+  input.textContent = 'CACHED OLD PROMPT';
+  input.focus = () => {};
+  let removals = 0;
+  const savedDrafts: string[] = [], sentPrompts: string[] = [];
+  const attachments: FakeElement[] = [], uploads: FakeElement[] = [];
+  Object.defineProperty(input, 'firstChild', {get:() => input.textContent ? {} : null});
+  input.removeChild = () => { removals++; input.textContent = ''; };
+  input.dispatchEvent = (event: any) => {
+    if (event.type === 'paste') input.textContent = event.clipboardData.value;
+    if (event.type === 'input') savedDrafts.push(input.textContent);
+  };
+  const send = element('send') as any;
+  send.click = () => {
+    sentPrompts.push(input.textContent);
+    input.textContent = '';
+    h.state.users.push(element('new-user', sentPrompts.at(-1)));
+  };
+  const root = {
+    contains:(node: unknown) => node === input,
+    querySelectorAll:(selector: string) => {
+      if (selector === '[data-testid="send-button"]' && input.textContent) return [send];
+      if (selector === '[data-composer-attachments][data-visible-attachments]') return attachments;
+      if (selector === '[role="progressbar"]') return uploads;
+      return [];
+    },
+  };
+  input.closest = () => root;
+  h.state.onSendMessage = msg => msg.type === 'send-attempted' ? {status:'fenced'} : null;
+  return {...h,input,attachments,uploads,savedDrafts,sentPrompts,removals:() => removals,
+    async request() {
+      await h.pageState(); h.state.now += 5000;
+      const page = await h.pageState();
+      return {type:'run-task',taskId:'first-task',text:'FRESH PROMPT',expectedSession:managed.sessionRef,
+        initializeComposer:{token:managed.token,documentId:page.documentId}};
+    }};
+}
+
+for (const project of [null, 'g-p-' + 'a'.repeat(32)]) {
+  test(`owned new session clears restored text through the editor and sends only its first prompt: ${project}`, async () => {
+    const h = newSessionDraftHarness(project);
+    const request = await h.request();
+    assert.equal((await h.pageState()).ready, false);
+    assert.equal((await h.pageState()).observationReady, true);
+    const result = await h.message(request);
+    assert.equal(result.status, 'submitted');
+    assert.equal(h.savedDrafts[0], '', 'deletion must notify the editor, not only remove DOM text');
+    assert.deepEqual(h.sentPrompts, ['FRESH PROMPT']);
+    assert.equal(h.removals(), 1);
+    assert.equal((await h.message(request)).errorCode, 'new_session_initialization_blocked');
+    assert.deepEqual(h.sentPrompts, ['FRESH PROMPT'], 'initialization cannot replay a sent first task');
+  });
+}
+
+for (const scenario of ['wrong-task','wrong-token','wrong-document','history','existing-conversation',
+  'prior-send','user-before-dispatch','user-on-focus','user-during-reset','restored-again','restored-before-paste','attachment','upload'] as const) {
+  test(`new session initialization preserves protected payloads and never sends: ${scenario}`, async () => {
+    const h = newSessionDraftHarness();
+    const request = await h.request();
+    if (scenario === 'wrong-task') request.taskId = 'other-task';
+    if (scenario === 'wrong-token') request.initializeComposer.token = 'other-token';
+    if (scenario === 'wrong-document') request.initializeComposer.documentId = 'other-document';
+    if (scenario === 'history') h.state.users.push(element('old-user', 'old prompt'));
+    if (scenario === 'existing-conversation') h.state.pathname = '/c/6a61e3cc-3160-83ee-9aa7-f79a39d93b3e';
+    if (scenario === 'prior-send') h.seedInflight({taskId:'first-task',session:'sr_new',phase:'send-fenced'});
+    const userEdit = () => { h.input.textContent = 'HUMAN DRAFT'; h.userEvent('input', h.input); };
+    if (scenario === 'user-before-dispatch') userEdit();
+    if (scenario === 'user-on-focus') h.input.focus = userEdit;
+    if (scenario === 'restored-before-paste') {
+      let focuses = 0;
+      h.input.focus = () => { if (++focuses === 2) h.input.textContent = 'RESTORED AGAIN'; };
+    }
+    if (scenario === 'user-during-reset' || scenario === 'restored-again') h.state.onTimer = () => {
+      h.state.onTimer = null;
+      if (scenario === 'user-during-reset') userEdit();
+      else h.input.textContent = 'RESTORED AGAIN';
+    };
+    if (scenario === 'attachment') h.attachments.push(element('file', 'Private file'));
+    if (scenario === 'upload') h.uploads.push(element('upload', 'Uploading'));
+    const result = await h.message(request);
+    assert.equal(result.submissionState, 'not-submitted');
+    assert.deepEqual(h.sentPrompts, []);
+    if (scenario === 'restored-again' || scenario === 'restored-before-paste') {
+      assert.equal(result.errorCode, 'new_session_initialization_failed');
+      assert.equal(h.input.textContent, 'RESTORED AGAIN');
+    } else if (scenario.startsWith('user-')) {
+      assert.equal(h.input.textContent, 'HUMAN DRAFT');
+    } else {
+      assert.equal(result.errorCode, 'new_session_initialization_blocked');
+      assert.equal(h.input.textContent, 'CACHED OLD PROMPT');
+    }
+    assert.equal(h.removals(), ['user-during-reset','restored-again','restored-before-paste'].includes(scenario) ? 1 : 0);
+  });
+}

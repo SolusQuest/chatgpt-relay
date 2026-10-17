@@ -118,12 +118,7 @@ the recovery lease and is cleared when the task becomes terminal.
 
 A recovering task reserves the session. A visible submitted message continues to block until a terminal transition, and active generation always blocks. An unacknowledged Send fence gets a fixed two-minute verification window that queued successors cannot shorten. A fully observed idle page plus recorded composer residue becomes `submission_not_observed`; missing or ambiguous page evidence becomes `submission_outcome_unknown`. Advancing never requeues or resends the original task. A reply discovered after either eligible terminal result can still be stored as `lateReply` during the remaining bounded window.
 
-Before each new dispatch, the content script spends up to three seconds trying
-to remove stale text and attachments. It selects existing text before injection,
-so the new prompt replaces old text rather than appending to it. This reset is
-best effort: incomplete cleanup is logged but does not block Send. Failure paths
-make the same bounded cleanup attempt after first recording whether composer
-payload was present for the submission verdict.
+Existing conversations require a clean composer before dispatch; drafts, attachments and uploads are preserved. A Relay-owned new page may initialize restored text only for its original unsent first task, after the worker verifies creation ownership and claims that task. Initialization deletes through the editor, waits for one second of continuous emptiness within a three-second limit, then applies effort and injects the prompt. Attachments, uploads, user edits, navigation, existing history and prior Send evidence prevent initialization. A draft that keeps returning fails the first task explicitly rather than being repeatedly erased or silently waiting until expiry. No ChatGPT storage keys are deleted directly.
 
 See [`task-lifecycle.md`](../task-lifecycle.md) for the complete state diagram,
 lease rules, and Agent behavior.

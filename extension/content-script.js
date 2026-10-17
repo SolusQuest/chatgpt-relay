@@ -237,11 +237,26 @@
     return error;
   }
 
+  let relayComposerMutation = false;
   let userOwnedComposer = readInflight()?.preserveComposer === true;
+  // Track edits before dispatch, too: a restored draft on an owned new page
+  // may be discarded, but text entered by a person on that page may not.
+  for (const type of ['beforeinput', 'input', 'paste', 'cut', 'drop', 'change', 'click']) {
+    document.addEventListener(type, event => {
+      if (!event.isTrusted || relayComposerMutation) return;
+      const managed = managedSessionForRoute();
+      if (!managed || managed.boundConversation || routeConversation()) return;
+      const node = event.target, root = getComposerRoot();
+      const fileChange = type === 'change' && node?.type === 'file';
+      if (!fileChange && (!root?.contains?.(node) ||
+          (type === 'click' && !node?.closest?.('button, input[type="file"]')))) return;
+      sessionStorage.setItem('gpt_relay_creation_user_edit', managed.sessionRef);
+    }, true);
+  }
   function watchComposerEdits(target, inflight) {
     const types = ['beforeinput', 'input', 'paste', 'cut', 'drop', 'change', 'click'];
     const listener = event => {
-      if (!event.isTrusted) return; // Relay injection and React upload updates are not user edits.
+      if (!event.isTrusted || relayComposerMutation) return;
       const node = event.target;
       const fileChange = event.type === 'change' && node?.type === 'file';
       const inComposer = node === target.input || target.root?.contains?.(node);
@@ -544,6 +559,15 @@
       postSend: !!inflight && inflight.session === getSessionId() &&
         (!managed || inflight.taskId === managed.initialTaskId) && inflight.phase !== "preparing" };
   }
+  function initialCreation() {
+    const managed = managedSessionForRoute();
+    const baseline = captureBaseline();
+    if (!managed || managed.boundConversation || routeConversation() || !managedRouteMatches() ||
+        !managed.initialTaskId || readInflight()?.taskId || userOwnedComposer ||
+        sessionStorage.getItem('gpt_relay_creation_user_edit') === managed.sessionRef ||
+        baseline.userCount + baseline.assistantCount > 0 || isGenerating()) return null;
+    return managed;
+  }
   function configureManagedSession(m) {
     const old = managedSession();
     if (!m || !/^sr_[A-Za-z0-9_-]{1,120}$/.test(m.sessionRef) || typeof m.token !== "string" ||
@@ -747,10 +771,12 @@
     return null;
   }
 
-  function clearComposerText(inp) {
+  function clearComposerText(inp, target = null) {
     if (!inp) return;
+    inp.focus?.({ preventScroll: true });
+    if (target) assertSubmissionTarget(target);
+    relayComposerMutation = true;
     try {
-      inp.focus?.({ preventScroll: true });
       if (document.activeElement === inp) {
         document.execCommand?.("selectAll", false);
         document.execCommand?.("delete", false);
@@ -765,6 +791,36 @@
         data: null,
       }));
     } catch { /* best effort */ }
+    finally { relayComposerMutation = false; }
+  }
+
+  async function initializeNewSessionComposer(target, managed) {
+    const assert = () => {
+      assertSubmissionTarget(target);
+      const current = managedSessionForRoute(), baseline = captureBaseline();
+      if (current?.sessionRef !== managed.sessionRef || current?.token !== managed.token ||
+          current?.boundConversation || routeConversation() || !managedRouteMatches() ||
+          baseline.userCount + baseline.assistantCount > 0 || isGenerating() ||
+          sessionStorage.getItem('gpt_relay_creation_user_edit') === managed.sessionRef) {
+        throw makeRelayError('submission_target_changed', 'New session initialization target changed');
+      }
+      const payload = getComposerPayloadState(target.input);
+      if (payload.attachmentPresent || payload.uploading) {
+        throw makeRelayError('new_session_initialization_blocked', 'New session composer has attachments or uploads');
+      }
+      return payload;
+    };
+    if (!assert().clean) clearComposerText(target.input, target);
+    let cleanSince = null;
+    await waitForCondition(() => {
+      const payload = assert();
+      if (!payload.clean) { cleanSince = null; return null; }
+      cleanSince ??= Date.now();
+      return Date.now() - cleanSince >= 1000 ? payload : null;
+    }, COMPOSER_RESET_TIMEOUT_MS, 200, 'new-session-composer').catch(error => {
+      if (error.code) throw error;
+      throw makeRelayError('new_session_initialization_failed', 'New session composer did not remain empty');
+    });
   }
 
   async function resetComposer(
@@ -1213,7 +1269,7 @@
         } else if (msg.type === "get-inflight") {
           sendResponse({ inflight: readInflight() });
         } else if (msg.type === "get-page-state") {
-          sendResponse({ ...getPageReadiness(), documentId, controlProtocol: 1,
+          sendResponse({ ...getPageReadiness(), initialCreation: initialCreation(), documentId, controlProtocol: 1,
             capabilities: { composer: !!findInput(), effort: !!globalThis.GptRelayEffort && !!getComposerRoot()?.querySelector?.('[data-composer-navigation-target="reasoning"]'),
               userMessages: getUserMessages().length > 0 ? true : null,
               assistantMessages: getAssistantMessages().length > 0 ? true : null } });
@@ -1270,9 +1326,17 @@
         } else if (msg.type === "run-task") {
           const block = findSafetyBlock();
           if (block) throw new Error(`safety: ${block.reason}`);
+          const creation = msg.initializeComposer ? initialCreation() : null;
+          if (msg.initializeComposer && (!creation || creation.initialTaskId !== msg.taskId ||
+              creation.sessionRef !== msg.expectedSession || msg.initializeComposer.token !== creation.token ||
+              msg.initializeComposer.documentId !== documentId || !getPageReadiness().observationReady)) {
+            sendResponse({ error: 'New session initialization is no longer allowed',
+              errorCode: 'new_session_initialization_blocked', submissionState: 'not-submitted' });
+            return;
+          }
           // This check and ownership acquisition are synchronous: never erase a
           // draft that appeared between the worker's preflight and this message.
-          if (!getComposerPayloadState(findInput()).clean) {
+          if (!creation && !getComposerPayloadState(findInput()).clean) {
             sendResponse({ error: "Composer contains an existing draft", errorCode: "composer_not_clean",
               submissionState: "not-submitted", composerPayloadObserved: true });
             return;
@@ -1300,6 +1364,7 @@
 
           try {
             assertSubmissionTarget(target);
+            if (creation) await initializeNewSessionComposer(target, creation);
             if (msg.effortPolicy) {
               if (!globalThis.GptRelayEffort) throw makeRelayError("reload_extension_and_page", "reload_extension_and_page");
               target.effortController = globalThis.GptRelayEffort.create({
@@ -1353,6 +1418,9 @@
               submittedUserMessageId: acceptance.submittedUserMessageId,
             });
           } catch (e) {
+            if (creation && e.code === 'composer_not_clean') {
+              e = makeRelayError('new_session_initialization_failed', 'New session draft returned before prompt injection');
+            }
             console.warn("[relay content] run-task failed", e);
             updateBanner(`Error: ${e.message.slice(0, 40)}`, "#e74c3c");
             const failedComposer = (() => {
@@ -1363,7 +1431,8 @@
             const composerPayloadObserved = failedComposer?.clean === false;
             inflight.composerPayloadObservedAfterFailure = composerPayloadObserved;
             inflight.preserveComposer = e.code === "composer_not_clean" || e.code === "submission_target_changed" ||
-              e.code === "submission_payload_changed" || target.userModified === true;
+              e.code === "submission_payload_changed" || target.userModified === true ||
+              (creation && composerPayloadObserved);
             if (inflight.preserveComposer) userOwnedComposer = true;
             writeInflight(inflight);
             if (inflight.phase !== "preparing") {

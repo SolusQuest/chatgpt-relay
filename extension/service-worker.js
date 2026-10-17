@@ -521,6 +521,19 @@ async function getPageState(tabId) {
   return state;
 }
 
+async function initialCreationForDispatch(state, session, tabId, taskId = null) {
+  const managed = state.initialCreation;
+  if (state.session !== session || !state.observationReady || state.generating ||
+      typeof state.documentId !== 'string' || !managed || managed.sessionRef !== session ||
+      managed.owner !== await creationOwner() || (taskId && managed.initialTaskId !== taskId)) return null;
+  const creation = await creationAction(managed, 'inspect');
+  if (creation.tabId !== tabId || creation.projectId !== managed.projectId ||
+      creation.creationStatus !== 'pending' || creation.conversationId != null ||
+      creation.initialTaskId !== managed.initialTaskId ||
+      creation.initialTaskStatus !== (taskId ? 'in_progress' : 'queued')) return null;
+  return managed;
+}
+
 // Independent of task dispatch: a busy conversation must remain diagnosable.
 let snapshotsRunning = false;
 async function reportSessionSnapshots() {
@@ -1245,9 +1258,12 @@ async function startDispatchLoop(session, tabId) {
 
       // Do not claim while the page hydrates or finishes prior generation,
       // including a late reply, because React may overwrite a new prompt.
+      let creationPreparation = null;
       try {
         const state = await getPageState(tabId);
-        if (state.session !== session || !state.ready || state.generating || state.composerClean === false) {
+        creationPreparation = await initialCreationForDispatch(state, session, tabId);
+        if (state.session !== session || state.generating ||
+            ((!state.ready || state.composerClean === false) && !creationPreparation)) {
           dlog(
             "[relay sw] page not dispatchable",
             session.slice(0, 8),
@@ -1311,11 +1327,20 @@ async function startDispatchLoop(session, tabId) {
           await delay(DISPATCH_LOOP_RETRY_MS);
           continue;
         }
-        if (pageState.session !== session || !pageState.ready || pageState.generating || pageState.composerClean === false) {
+        const initialize = creationPreparation?.initialTaskId === taskId
+          ? await initialCreationForDispatch(pageState, session, tabId, taskId) : null;
+        if (pageState.session !== session || pageState.generating ||
+            ((!pageState.ready || pageState.composerClean === false) && !initialize)) {
           await httpJson("POST", `/internal/tasks/${taskId}/defer`, {}).catch(() => {});
           await clearRecoveredTask(taskId, session, tabId);
           await delay(DISPATCH_LOOP_RETRY_MS);
           continue;
+        }
+        if (initialize) {
+          const task = await httpJson('GET', `/v1/tasks/${taskId}`);
+          if (task.status !== 'in_progress' || task.sendAttemptedAt !== null) {
+            throw new Error('new_session_initialization_blocked');
+          }
         }
         await markInflight(session, taskId, {
           tabId,
@@ -1332,7 +1357,8 @@ async function startDispatchLoop(session, tabId) {
         try {
           runRes = await sendTabMessage(
             tabId,
-            { type: "run-task", taskId, text, effortPolicy: claim.task.effortPolicy, baseline: pageState?.baseline, expectedSession: session },
+            { type: "run-task", taskId, text, effortPolicy: claim.task.effortPolicy, baseline: pageState?.baseline, expectedSession: session,
+              ...(initialize ? { initializeComposer: { token: initialize.token, documentId: pageState.documentId } } : {}) },
             RUN_TASK_ACK_TIMEOUT_MS,
             "run-task acknowledgement",
           );

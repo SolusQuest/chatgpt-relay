@@ -23,9 +23,7 @@ account's plan limits and the applicable OpenAI terms.
   after a fixed two-minute observation window as acknowledged, not observed, or
   genuinely unknown, with late replies able to correct an early operational
   failure.
-- **Liveness-first composer cleanup**: stale composer content is cleared on a
-  bounded best-effort basis and new text replaces old text without blocking a
-  usable Send path.
+- **New-session composer initialization**: an owned new page clears restored text before its first prompt and verifies that the composer stays empty. Existing conversations retain draft protection.
 - **Soft-deadline recovery**: a page-submitted task becomes non-terminal
   `recovering` after its normal lifetime. Strong page evidence renews a bounded
   lease, so a long ChatGPT reply can still finish without inviting a duplicate
