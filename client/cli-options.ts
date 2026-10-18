@@ -3,11 +3,15 @@ import type { BackendOptions } from "./backend-resolver.js";
 
 const VALUES = new Set(["--session", "--session-ref", "--operation-id", "--recover-task", "--instance", "--status",
   "--last", "--project-id", "--name", "--description", "--text", "--file", "--timeout", "--wait-timeout", "--task-timeout", "--cri", "--effort", "--effort-fallback"]);
-export function parseGlobalOptions(argv: string[]): { args: string[]; options: BackendOptions } {
+export function parseGlobalOptions(argv: string[]): { args: string[]; options: BackendOptions; output?: string } {
   const args: string[] = [], options: BackendOptions = {};
+  let output: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
-    if (arg === "--server") {
+    if (arg === "--output") {
+      if (output !== undefined || !argv[i + 1] || argv[i + 1]!.startsWith("--")) throw new BackendError("invalid_arguments", "provide exactly one --output path");
+      output = argv[++i];
+    } else if (arg === "--server") {
       if (options.server !== undefined || !argv[i + 1] || argv[i + 1]!.startsWith("--")) throw new BackendError("invalid_arguments", "provide exactly one --server address");
       options.server = argv[++i];
     } else if (arg === "--local") {
@@ -19,7 +23,7 @@ export function parseGlobalOptions(argv: string[]): { args: string[]; options: B
     }
   }
   if (options.server && options.local) throw new BackendError("invalid_arguments", "--server and --local are mutually exclusive");
-  return { args, options };
+  return { args, options, ...(output !== undefined ? { output } : {}) };
 }
 
 export function validateBusinessArgs(command: string, args: string[]): void {

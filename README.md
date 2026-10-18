@@ -101,8 +101,7 @@ The relay listens on `127.0.0.1:8765` by default. Its data is stored under
 With the CLI:
 
 ```bash
-printf '%s' 'Review this code...' |
-  gpt-relay review --session <session-id> --stdin
+gpt-relay review --session <session-id> --file <prompt-file>
 ```
 
 With the REST API:
@@ -127,6 +126,25 @@ gpt-relay review --session-ref <ref> --file <follow-up-file> --no-wait
 Use `--project-id <id>` instead of `--no-project` for a Project chat. Maintain the local catalog with `gpt-relay projects set --project-id <id> --name "Name" --description "Purpose"` and `gpt-relay projects remove --project-id <id>`. Use `gpt-relay projects discover` to preview visible Project links in open ChatGPT tabs, or add `--save` to merge them into the catalog. Discovery preserves descriptions and unseen entries and reports partial coverage. It does not expand the sidebar or navigate tabs. See the agent guide for first-message context, creation failure boundaries and request recovery.
 
 After a created session is bound, its `sessionRef` and ChatGPT conversation ID address the same Relay queue. Reopen the ordinary ChatGPT conversation URL after closing its tab; the extension restores the canonical identity from the server during registration. No creation marker or manual rebinding is needed. A different conversation opened in the same tab registers independently.
+
+### Save CLI results
+
+Use `--output <path>` to save results directly, without shell redirection, pipes, or wrapper scripts:
+
+```bash
+gpt-relay review --session-ref <ref> --file <prompt-file> --no-wait --server <host>:8765 --json --output <result.json>
+gpt-relay show <task-id> --json --output <task.json>
+gpt-relay tasks --session-ref <ref> --json --output <tasks.json>
+gpt-relay resume --json --output <resume.json>
+```
+
+All client commands accept `--output`, including `bind`, `detect`, `health`, `doctor`, `sessions` and its controls, `projects` and its subcommands, `tasks` and its controls/trace, `operations`, `show`, `cancel`, `resume`, and `review`. Server/service commands and help do not accept it.
+
+The file contains an exact UTF-8 copy of stdout, including its existing newline behavior; stdout and stderr retain their usual behavior. `--output` does not select JSON: add `--json` wherever the command supports JSON output. Paths are relative to the caller's working directory, parent directories must already exist, and existing files are replaced. A path such as `-` is a literal filename. Symlinks at the destination are replaced rather than followed.
+
+The CLI creates a private temporary file in the destination directory before executing the command, then atomically renames it over the destination only after the command returns a complete result. Thrown validation/backend/transport errors, and nonzero exits without a stdout result, leave an existing destination untouched and remove the temporary file. Returned results are saved even when their exit code is nonzero (for example, a review with failed effort verification); the result's original exit code is preserved. A file creation/write/rename failure reports `output_write_failed` on stderr and exits 1, without publishing partial JSON. A failure or abrupt interruption can leave a temporary file, but cannot publish it as the result. This is atomic replacement, not a power-loss durability guarantee.
+
+If saving fails after submission, the task/operation may already exist: preserve IDs from stdout/stderr and inspect `show`, `operations`, or `resume` before retrying. Native output avoids the shell-redirection matching issue with command-prefix approval rules; it does not guarantee approval under every active policy.
 
 ## Separate CLI and server computers
 

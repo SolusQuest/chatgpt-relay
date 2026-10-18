@@ -27,9 +27,11 @@ interface SpawnResult { stdout: string; stderr: string; code: number }
 function runCli(
   args: string[],
   extraEnv: Record<string, string> = {},
+  cwd = REPO_ROOT,
 ): Promise<SpawnResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [CLI, ...args], {
+      cwd,
       env: { ...process.env, GPT_RELAY_URL: baseUrl, ...extraEnv },
     });
     let stdout = "";
@@ -41,7 +43,7 @@ function runCli(
       child.kill("SIGKILL");
       reject(new Error(`timeout: gpt-relay ${args.join(" ")}`));
     }, 10_000);
-    child.on("exit", (code) => {
+    child.on("close", (code) => {
       clearTimeout(timer);
       resolve({ stdout, stderr, code: code ?? -1 });
     });
@@ -61,6 +63,7 @@ before(async () => {
   const addr = server!.address() as AddressInfo;
   baseUrl = `http://127.0.0.1:${addr.port}`;
 });
+
 
 after(async () => {
   stop?.();
@@ -321,4 +324,89 @@ test("CLI and client open and close accept both identities and preserve idempote
     ["sessions", "close", "--session", session, "--instance", owner],
     ["sessions", "open", "--session", session, "--force"],
   ]) assert.equal((await runCli(args)).code, 1);
+});
+
+test("--output saves review JSON with relative paths and keeps stdout unchanged", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "relay-output-"));
+  try {
+    fs.mkdirSync(path.join(dir, "results"));
+    fs.writeFileSync(path.join(dir, "prompt.md"), "\u5ba1\u67e5 Unicode input\n");
+    const args = ["review", "--new-session", "--session-ref", "sr_cli_output", "--no-project",
+      "--file", "prompt.md", "--no-wait", "--json", "--server", baseUrl, "--cri", "cli-output"];
+    const env = { GPT_RELAY_PENDING_DIR: path.join(dir, "pending") };
+    const saved = await runCli([...args, "--output", "results/\u5ba1\u67e5 result.json"], env, dir);
+    assert.equal(saved.code, 0, saved.stderr);
+    const target = path.join(dir, "results/\u5ba1\u67e5 result.json");
+    assert.equal(fs.readFileSync(target, "utf8"), saved.stdout);
+    const result = JSON.parse(saved.stdout);
+    assert.equal(result.sessionRef, "sr_cli_output");
+    assert.equal(result.status, "queued");
+    assert.ok(result.taskId);
+    const legacy = await runCli(args, env, dir);
+    assert.deepEqual(legacy, saved);
+    fs.writeFileSync(target, "old longer content".repeat(100));
+    const replaced = await runCli([...args, "--output", target], env, dir);
+    assert.equal(replaced.code, 0, replaced.stderr);
+    assert.equal(fs.readFileSync(target, "utf8"), replaced.stdout);
+    assert.deepEqual(fs.readdirSync(path.dirname(target)), [path.basename(target)]);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("--output covers observation and control commands and excludes stderr", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "relay-output-"));
+  try {
+    await fetch(`${baseUrl}/internal/heartbeat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session: "output-controls" }) });
+    await fetch(`${baseUrl}/internal/session-snapshots`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ owner: "output-browser", tabId: 99, session: "output-controls", protocol: 1,
+        ready: true, generating: false, composerClean: true, capabilities: { composer: true } }) });
+    const target = path.join(dir, "result.json");
+    const env = { GPT_RELAY_PENDING_DIR: path.join(dir, "pending"), GPT_RELAY_CLIENT_CONFIG: path.join(dir, "config.json"),
+      GPT_RELAY_DISCOVERY: "0", GPT_RELAY_REGISTRY_DIR: path.join(dir, "registry") };
+    for (const args of [["sessions", "--json"], ["tasks", "--json"], ["projects", "--json"],
+      ["resume", "--json"], ["bind", "--json"], ["detect", "--list", "--json"],
+      ["sessions", "refresh", "--session", "output-controls", "--operation-id", "output-refresh", "--json"],
+      ["operations", "output-refresh", "--json"], ["doctor", "--json"]]) {
+      const result = await runCli([...args, "--output", target], env);
+      assert.ok([0, 2].includes(result.code), result.stderr);
+      assert.equal(fs.readFileSync(target, "utf8"), result.stdout);
+      JSON.parse(result.stdout);
+      if (args[1] === "refresh") assert.deepEqual(JSON.parse(result.stderr), { operationId: "output-refresh" });
+    }
+    const health = await runCli(["health", "--output", target], env);
+    assert.equal(health.code, 0, health.stderr);
+    assert.equal(fs.readFileSync(target, "utf8"), health.stdout);
+    assert.match(health.stdout, /^ok /);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("--output rejects invalid paths before submitting and preserves files on command errors", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "relay-output-"));
+  try {
+    for (const target of [dir, path.join(dir, "missing", "result.json")]) {
+      const r = await runCli(["review", "--session", "output-must-not-submit", "--text", "test", "--no-wait", "--json", "--output", target]);
+      assert.equal(r.code, 1);
+      assert.equal(r.stdout, "");
+      assert.equal(JSON.parse(r.stderr).error, "output_write_failed");
+      assert.ok(JSON.parse(r.stderr).message.includes(target));
+    }
+    const tasks = await runCli(["tasks", "--session", "output-must-not-submit", "--json"]);
+    assert.deepEqual(JSON.parse(tasks.stdout), { tasks: [] });
+    const target = path.join(dir, "previous.json");
+    const previous = '{"previous":true}\n';
+    fs.writeFileSync(target, previous);
+    const r = await runCli(["sessions", "inspect", "--session", "output-missing-session", "--json", "--output", target]);
+    assert.equal(r.code, 1);
+    assert.equal(r.stdout, "");
+    assert.equal(fs.readFileSync(target, "utf8"), previous);
+    assert.deepEqual(fs.readdirSync(dir), ["previous.json"]);
+    const missingTask = await runCli(["show", "nonexistent-output-task", "--json", "--output", target]);
+    assert.equal(missingTask.code, 1);
+    assert.equal(missingTask.stdout, "");
+    assert.equal(fs.readFileSync(target, "utf8"), previous);
+    for (const args of [["health", "--output"], ["health", "--output", ""],
+      ["health", "--output", target, "--output", target], ["start", "--output", target], ["service", "status", "--output", target]]) {
+      assert.equal((await runCli(args)).code, 64);
+    }
+    assert.equal(fs.readFileSync(target, "utf8"), previous);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

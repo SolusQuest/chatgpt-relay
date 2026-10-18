@@ -86,12 +86,14 @@ Then compare shared/agent-only/Relay-only findings, verify repository claims loc
 ## CLI lifecycle
 
 ```bash
-gpt-relay review --session <task-session-id> --file <prompt-file> --no-wait
-gpt-relay show <task-id>
-gpt-relay tasks --session <task-session-id> --last 20
-gpt-relay resume
+gpt-relay review --session <task-session-id> --file <prompt-file> --no-wait --json --output <submission.json>
+gpt-relay show <task-id> --json --output <task.json>
+gpt-relay tasks --session <task-session-id> --last 20 --json --output <tasks.json>
+gpt-relay resume --json --output <resume.json>
 gpt-relay cancel <task-id>
 ```
+
+When retaining CLI results, use native `--output <path>` rather than `>`, pipes, or wrapper scripts. All client commands and their controls support it; add `--json` for supported JSON views. It saves exactly stdout while preserving stdout, stderr, and the command's result exit code. Relative paths use the caller's working directory; create the parent directory first. Atomic replacement preserves an existing result on thrown command errors or write failures; complete returned failure results are saved too. File errors exit 1 with `output_write_failed`. Submission may already have happened: retain stdout/stderr task/operation IDs and inspect existing work before retrying. See [full output semantics](./README.md#save-cli-results). Native output avoids shell redirection in command-prefix matching, but approval still depends on the active policies.
 
 Use `--stdin` instead of a file, or omit `--no-wait` to wait. Async acceptance returns `{"taskId":"...","status":"queued"}`. Prefer bounded waits scaled to prompt/review cost and prior duration: roughly 1–2 minutes small, 3–5 ordinary, 5–10 large. Shorten only on concrete completion progress; unchanged observations keep/lengthen intervals. Preserve task ID and do independent work between observations; non-terminal status/wait timeout never justifies resubmission.
 

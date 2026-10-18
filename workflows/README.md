@@ -62,7 +62,7 @@ Stage outcomes report existing completion conditions, adding no review, approval
 
 **Reference loading:** read the active entry/stage and relevant sections of its **Required shared rules**. Load **Boundary references** only for routing, running/delegating that stage, fallback, or return. Links and the catalog are not recursive reading lists. A coordinator loads each stage when active/delegated; a delegated agent needs its stage, shared rules, relevant repository/contract sources, and complete handoff. It reads the full entry only when coordinating the composition. Deferred reading never omits an active-stage rule or weakens handoff validation; consuming a valid handoff does not repeat its producing procedure.
 
-Persist complete handoff content or accessible references using the target project's artifact conventions:
+Persist complete handoff content or accessible references using the target project's artifact conventions. To retain Relay CLI results, use `--json --output <path>` as described in the [CLI lifecycle](../agent-instructions.md#cli-lifecycle), preserving the command's exit code and task/operation identity:
 
 | Field | Required content |
 |---|---|

@@ -125,6 +125,34 @@ test("late replies without effort preserve success behavior in both output modes
   }
 });
 
+test("--output preserves terminal review text, JSON and nonzero result exit codes", async () => {
+  const task = fixture({ verification: "mismatch" });
+  for (const json of [false, true]) {
+    const args = ["review", "--session", task.session, "--text", "audit", "--cri", task.session, ...(json ? ["--json"] : [])];
+    const legacy = await cli(args);
+    const target = path.join(temp, `review-result-${json}.txt`);
+    const saved = await cli([...args, "--output", target]);
+    assert.equal(saved.code, 2);
+    if (json) {
+      const { elapsedMs: savedMs, ...savedResult } = JSON.parse(saved.stdout);
+      const { elapsedMs: legacyMs, ...legacyResult } = JSON.parse(legacy.stdout);
+      assert.equal(typeof savedMs, "number");
+      assert.equal(typeof legacyMs, "number");
+      assert.deepEqual(savedResult, legacyResult);
+    } else assert.equal(saved.stdout, legacy.stdout);
+    assert.equal(saved.stderr, legacy.stderr);
+    assert.equal(fs.readFileSync(target, "utf8"), saved.stdout);
+    if (json) assert.equal(JSON.parse(saved.stdout).effortVerification.status, "mismatch");
+    else assert.equal(saved.stdout, "CAPTURED_AUDIT_REPLY");
+    for (const command of [["show", task.id, "--json"], ["tasks", "trace", task.id, "--json"]]) {
+      const view = await cli([...command, "--output", target]);
+      assert.equal(view.code, 0, view.stderr);
+      assert.equal(fs.readFileSync(target, "utf8"), view.stdout);
+      JSON.parse(view.stdout);
+    }
+  }
+});
+
 test("resume exposes failed captured replies and verification in text and JSON", async () => {
   for (const late of [false, true]) {
     const task = fixture({ late, verification: "mismatch" });

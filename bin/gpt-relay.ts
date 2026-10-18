@@ -23,6 +23,7 @@ import { readBinding, saveBinding, clearBinding } from "../client/backend-config
 import { resolveBackend, type BackendOptions } from "../client/backend-resolver.js";
 import { discoverBackends, uniqueBackend } from "../client/discovery.js";
 import { parseGlobalOptions, validateBusinessArgs } from "../client/cli-options.js";
+import { CliOutput, OutputWriteError } from "../client/cli-output.js";
 import { createInterface } from "node:readline/promises";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -32,19 +33,20 @@ const TSX_LOADER = pathToFileURL(require.resolve("tsx")).href;
 const PORT = Number(process.env.GPT_RELAY_PORT ?? 8765);
 let BASE = process.env.GPT_RELAY_URL ?? `http://127.0.0.1:${PORT}`;
 let SERVER_ID: string | undefined;
+const output = new CliOutput();
 
 async function cmdBind(args: string[], options: BackendOptions): Promise<number> {
   if (new Set(args).size !== args.length) throw new BackendError("invalid_arguments", "duplicate bind option");
   if (options.server || args.some(a => a.startsWith("--") && !["--clear", "--json"].includes(a))) throw new BackendError("invalid_arguments", "usage: bind [address | --local | --clear] [--json]");
   const addresses = args.filter(a => !a.startsWith("--"));
   if (addresses.length > 1 || Number(addresses.length > 0) + Number(!!options.local) + Number(args.includes("--clear")) > 1) throw new BackendError("invalid_arguments", "choose exactly one bind target or --clear");
-  if (args.includes("--clear")) { await clearBinding(); console.log(JSON.stringify({ cleared: true })); return 0; }
+  if (args.includes("--clear")) { await clearBinding(); output.log(JSON.stringify({ cleared: true })); return 0; }
   if (!options.local && !addresses.length) {
-    console.log(JSON.stringify({ binding: readBinding(), source: process.env.GPT_RELAY_URL ? "environment" : readBinding() ? "binding" : "discovery", environmentUrl: process.env.GPT_RELAY_URL ?? null }));
+    output.log(JSON.stringify({ binding: readBinding(), source: process.env.GPT_RELAY_URL ? "environment" : readBinding() ? "binding" : "discovery", environmentUrl: process.env.GPT_RELAY_URL ?? null }));
     return 0;
   }
   const backend = options.local ? uniqueBackend(await discoverBackends(true)) : await probeBackend(addresses[0]!);
-  console.log(JSON.stringify({ binding: await saveBinding(backend) }));
+  output.log(JSON.stringify({ binding: await saveBinding(backend) }));
   return 0;
 }
 
@@ -52,7 +54,7 @@ async function cmdDetect(args: string[], options: BackendOptions): Promise<numbe
   if (new Set(args).size !== args.length) throw new BackendError("invalid_arguments", "duplicate detect option");
   if (options.server || args.some(a => !["--list", "--json"].includes(a))) throw new BackendError("invalid_arguments", "usage: detect [--local] [--list] [--json]");
   const candidates = await discoverBackends(!!options.local);
-  if (args.includes("--list")) { console.log(JSON.stringify({ candidates })); return 0; }
+  if (args.includes("--list")) { output.log(JSON.stringify({ candidates })); return 0; }
   let selected: Backend;
   if (candidates.length > 1 && process.stdin.isTTY && process.stdout.isTTY && !args.includes("--json")) {
     candidates.forEach((backend, index) => console.error(`${index + 1}. ${backend.name}\t${backend.baseUrl}\t${backend.serverId}`));
@@ -65,7 +67,7 @@ async function cmdDetect(args: string[], options: BackendOptions): Promise<numbe
     } finally { input.close(); }
   } else selected = uniqueBackend(candidates);
   selected = await probeBackend(selected.baseUrl, { expectedId: selected.serverId });
-  console.log(JSON.stringify({ binding: await saveBinding(selected) }));
+  output.log(JSON.stringify({ binding: await saveBinding(selected) }));
   return 0;
 }
 
@@ -92,7 +94,7 @@ async function cmdStart(args: string[]): Promise<number> {
 async function cmdHealth(): Promise<number> {
   const ok = await healthCheck(BASE, SERVER_ID);
   if (ok) {
-    console.log(`ok (${BASE})`);
+    output.log(`ok (${BASE})`);
     return 0;
   }
   console.error(`relay not reachable at ${BASE}`);
@@ -125,7 +127,7 @@ async function cmdSessions(args: string[] = []): Promise<number> {
       return submitControl({ kind: "refresh", session: args[i + 1], taskId: recovery < 0 ? null : args[recovery + 1] }, args);
     }
     const route = `/v1/sessions/${encodeURIComponent(args[i + 1]!)}/${args[0]}`;
-    console.log(JSON.stringify(args[0] === "inspect" ? await http.get(route, { baseUrl: BASE, serverId: SERVER_ID }) :
+    output.log(JSON.stringify(args[0] === "inspect" ? await http.get(route, { baseUrl: BASE, serverId: SERVER_ID }) :
       await http.post(route, {}, { baseUrl: BASE, serverId: SERVER_ID })));
     return 0;
   }
@@ -134,20 +136,20 @@ async function cmdSessions(args: string[] = []): Promise<number> {
     const ref = args[refIndex + 1];
     if (!ref) throw new Error("missing session ref");
     const row = await http.get(`/v1/sessions/${encodeURIComponent(ref)}`, { baseUrl: BASE, serverId: SERVER_ID });
-    console.log(JSON.stringify(row));
+    output.log(JSON.stringify(row));
     return 0;
   }
   const sessions = await listSessions(BASE, SERVER_ID);
-  if (args.includes("--json")) { console.log(JSON.stringify({ sessions })); return 0; }
+  if (args.includes("--json")) { output.log(JSON.stringify({ sessions })); return 0; }
   if (sessions.length === 0) {
-    console.log("(no active sessions)");
+    output.log("(no active sessions)");
     return 0;
   }
-  console.log(
+  output.log(
     ["session", "pending", "active", "activeStatus", "paused", "reason", "lastSeen", "effort", "fallback"].join("\t"),
   );
   for (const s of sessions) {
-    console.log(
+    output.log(
       [
         s.session.slice(0, 12) + "…",
         s.pendingTasks,
@@ -173,7 +175,7 @@ async function cmdTasks(args: string[]): Promise<number> {
   if (args[0] === "trace") {
     if (!args[1]) throw new Error("usage: tasks trace TASK_ID");
     validateControlOptions(args.slice(2), []);
-    console.log(JSON.stringify(await http.get(`/v1/tasks/${encodeURIComponent(args[1])}/trace`, { baseUrl: BASE, serverId: SERVER_ID })));
+    output.log(JSON.stringify(await http.get(`/v1/tasks/${encodeURIComponent(args[1])}/trace`, { baseUrl: BASE, serverId: SERVER_ID })));
     return 0;
   }
   const q = new URLSearchParams();
@@ -189,18 +191,18 @@ async function cmdTasks(args: string[]): Promise<number> {
     baseUrl: BASE, serverId: SERVER_ID,
     timeoutMs: 5_000,
   });
-  if (args.includes("--json")) { console.log(JSON.stringify(r)); return 0; }
+  if (args.includes("--json")) { output.log(JSON.stringify(r)); return 0; }
   if (r.tasks.length === 0) {
-    console.log("(no tasks)");
+    output.log("(no tasks)");
     return 0;
   }
-  console.log(
+  output.log(
     ["taskId", "session", "status", "submission", "submittedAt", "elapsedMs", "effort", "effortVerification"].join("\t"),
   );
   for (const t of r.tasks) {
     const elapsed =
       t.completedAt != null ? t.completedAt - t.submittedAt : Date.now() - t.submittedAt;
-    console.log(
+    output.log(
       [
         t.taskId.slice(0, 8),
         t.session.slice(0, 10),
@@ -222,7 +224,7 @@ async function submitControl(body: Record<string, unknown>, args: string[]): Pro
   if (!operationId) throw new Error("missing operation ID");
   // Keep the identifier even when the HTTP response is lost: retry with the same ID.
   console.error(JSON.stringify({ operationId }));
-  console.log(JSON.stringify(await http.post("/v1/session-controls", { ...body, operationId }, { baseUrl: BASE, serverId: SERVER_ID })));
+  output.log(JSON.stringify(await http.post("/v1/session-controls", { ...body, operationId }, { baseUrl: BASE, serverId: SERVER_ID })));
   return 0;
 }
 
@@ -237,64 +239,64 @@ async function cmdShow(args: string[]): Promise<number> {
     console.error(`task not found: ${id}`);
     return 1;
   }
-  if (args.includes("--json")) { console.log(JSON.stringify(t)); return 0; }
-  console.log("─── task ───────────────────────────────────────");
-  console.log(`  id:          ${t.taskId}`);
-  console.log(`  session:     ${t.session}`);
-  console.log(`  status:      ${t.status}`);
-  console.log(effortDetails(t));
-  console.log(`  submission:  ${t.submissionState}`);
+  if (args.includes("--json")) { output.log(JSON.stringify(t)); return 0; }
+  output.log("─── task ───────────────────────────────────────");
+  output.log(`  id:          ${t.taskId}`);
+  output.log(`  session:     ${t.session}`);
+  output.log(`  status:      ${t.status}`);
+  output.log(effortDetails(t));
+  output.log(`  submission:  ${t.submissionState}`);
   if (t.submissionState === "verifying" && t.submissionVerificationDeadlineAt) {
-    console.log(
+    output.log(
       `  verify until: ${new Date(t.submissionVerificationDeadlineAt).toISOString()}`,
     );
   }
   if (t.status === "recovering") {
-    console.log(`  recovery:    ${t.recoveryReason ?? "deadline exceeded"}`);
-    console.log(
+    output.log(`  recovery:    ${t.recoveryReason ?? "deadline exceeded"}`);
+    output.log(
       `  lease until: ${t.recoveryLeaseDeadlineAt
         ? new Date(t.recoveryLeaseDeadlineAt).toISOString()
         : "(awaiting extension evidence)"}`,
     );
-    console.log(`  hard limit:  ${new Date(t.recoveryDeadlineAt).toISOString()}`);
+    output.log(`  hard limit:  ${new Date(t.recoveryDeadlineAt).toISOString()}`);
   }
-  console.log(`  submitted:   ${new Date(t.submittedAt).toISOString()}`);
-  console.log(
+  output.log(`  submitted:   ${new Date(t.submittedAt).toISOString()}`);
+  output.log(
     `  dispatched:  ${t.dispatchedAt ? new Date(t.dispatchedAt).toISOString() : "(pending)"}`,
   );
-  console.log(
+  output.log(
     `  completed:   ${t.completedAt ? new Date(t.completedAt).toISOString() : "(pending)"}`,
   );
-  console.log(`  requeues:    ${t.requeueCount}`);
+  output.log(`  requeues:    ${t.requeueCount}`);
   if (t.progress) {
-    console.log("\n─── progress (provisional) ─────────────────────");
-    console.log(`  phase:       ${t.progress.phase}`);
-    if (t.progress.activity) console.log(`  activity:    ${t.progress.activity}`);
-    console.log(`  outputChars: ${t.progress.outputChars}`);
-    console.log(`  changed:     ${new Date(t.progress.changedAt).toISOString()}`);
-    console.log(`  observed:    ${new Date(t.progress.observedAt).toISOString()}`);
-    console.log("  note:        scheduling signal only; wait for a final reply");
+    output.log("\n─── progress (provisional) ─────────────────────");
+    output.log(`  phase:       ${t.progress.phase}`);
+    if (t.progress.activity) output.log(`  activity:    ${t.progress.activity}`);
+    output.log(`  outputChars: ${t.progress.outputChars}`);
+    output.log(`  changed:     ${new Date(t.progress.changedAt).toISOString()}`);
+    output.log(`  observed:    ${new Date(t.progress.observedAt).toISOString()}`);
+    output.log("  note:        scheduling signal only; wait for a final reply");
   }
   if (t.text) {
-    console.log("\n─── prompt ─────────────────────────────────────");
-    console.log(t.text);
+    output.log("\n─── prompt ─────────────────────────────────────");
+    output.log(t.text);
   }
   if (t.reply) {
-    console.log("\n─── reply ──────────────────────────────────────");
-    console.log(t.reply);
+    output.log("\n─── reply ──────────────────────────────────────");
+    output.log(t.reply);
   }
   if (t.lateReply) {
-    console.log("\n─── late reply ────────────────────────────────");
-    console.log(t.lateReply);
+    output.log("\n─── late reply ────────────────────────────────");
+    output.log(t.lateReply);
   }
   if (t.error) {
-    console.log("\n─── error ──────────────────────────────────────");
-    console.log(t.error);
-    if (t.errorInfo) console.log(JSON.stringify(t.errorInfo));
+    output.log("\n─── error ──────────────────────────────────────");
+    output.log(t.error);
+    if (t.errorInfo) output.log(JSON.stringify(t.errorInfo));
   }
   if (t.status === "recovering") {
-    console.log("\nNOTE: ChatGPT may still be producing this reply. Do not resubmit the prompt.");
-    console.log("Use `gpt-relay show` or `gpt-relay resume`, or cancel explicitly.");
+    output.log("\nNOTE: ChatGPT may still be producing this reply. Do not resubmit the prompt.");
+    output.log("Use `gpt-relay show` or `gpt-relay resume`, or cancel explicitly.");
   }
   return 0;
 }
@@ -306,29 +308,29 @@ async function cmdCancel(args: string[]): Promise<number> {
     return 64;
   }
   const t = await cancelTask(id, BASE, SERVER_ID);
-  console.log(`${t.taskId}: ${t.status}`);
+  output.log(`${t.taskId}: ${t.status}`);
   return 0;
 }
 
 async function cmdResume(args: string[]): Promise<number> {
   const rows = await resumePending(BASE, SERVER_ID);
-  if (args.includes("--json")) { console.log(JSON.stringify({ results: rows })); return 0; }
+  if (args.includes("--json")) { output.log(JSON.stringify({ results: rows })); return 0; }
   if (rows.length === 0) {
-    console.log("(no pending tasks)");
+    output.log("(no pending tasks)");
     return 0;
   }
   for (const { record, task, reason } of rows) {
     const preview = record.textPreview.replace(/\s+/g, " ");
     if (!task) {
       if (reason) {
-        console.log(`${record.taskId}\t${reason.toUpperCase()}\t${record.baseUrl ?? "unknown backend"}; pending retained`);
+        output.log(`${record.taskId}\t${reason.toUpperCase()}\t${record.baseUrl ?? "unknown backend"}; pending retained`);
         continue;
       }
       if (record.requestOnly) {
-        console.log(`${record.session}\tUNCONFIRMED\t"${preview}"; keep request ID ${record.clientRequestId}`);
+        output.log(`${record.session}\tUNCONFIRMED\t"${preview}"; keep request ID ${record.clientRequestId}`);
         continue;
       }
-      console.log(`${record.taskId.slice(0, 8)}\tGONE\t"${preview}"`);
+      output.log(`${record.taskId.slice(0, 8)}\tGONE\t"${preview}"`);
       continue;
     }
     const line = [
@@ -336,32 +338,32 @@ async function cmdResume(args: string[]): Promise<number> {
       task.status,
       `"${preview}"`,
     ].join("\t");
-    console.log(line);
-    console.log(effortDetails(task));
+    output.log(line);
+    output.log(effortDetails(task));
     if (task.reply !== null) {
-      console.log("─── reply ────────────────");
-      console.log(task.reply);
-      console.log("──────────────────────────");
+      output.log("─── reply ────────────────");
+      output.log(task.reply);
+      output.log("──────────────────────────");
     }
     if (task.lateReply) {
-      console.log("─── late reply ───────────");
-      console.log(task.lateReply);
-      console.log("──────────────────────────");
+      output.log("─── late reply ───────────");
+      output.log(task.lateReply);
+      output.log("──────────────────────────");
     }
     if (task.status === "recovering") {
-      console.log("  note: still awaiting the original reply; do not resubmit");
+      output.log("  note: still awaiting the original reply; do not resubmit");
     }
     if (task.submissionState === "verifying") {
-      console.log("  note: verifying whether ChatGPT accepted the original submission");
+      output.log("  note: verifying whether ChatGPT accepted the original submission");
     }
     if (task.progress) {
       const activity = task.progress.activity ? `, ${task.progress.activity}` : "";
-      console.log(
+      output.log(
         `  progress: ${task.progress.phase}, ${task.progress.outputChars} chars${activity} (provisional)`,
       );
     }
-    if (task.error) console.log(`  error: ${task.error}`);
-    if (task.errorInfo) console.log(`  errorInfo: ${JSON.stringify(task.errorInfo)}`);
+    if (task.error) output.log(`  error: ${task.error}`);
+    if (task.errorInfo) output.log(`  errorInfo: ${JSON.stringify(task.errorInfo)}`);
   }
   return 0;
 }
@@ -428,18 +430,18 @@ async function cmdReview(args: string[]): Promise<number> {
     ...(cri !== undefined ? { clientRequestId: cri } : {}),
   });
   if (args.includes("--json")) {
-    console.log(JSON.stringify(r));
+    output.log(JSON.stringify(r));
     return r.reply !== undefined ? reviewExitCode(r) : 0;
   }
   if ("reply" in r && r.reply !== undefined) {
     if (r.effortPolicy) console.error(effortDetails(r));
-    process.stdout.write(r.reply ?? r.lateReply ?? "");
+    output.write(r.reply ?? r.lateReply ?? "");
     const code = reviewExitCode(r);
     if (code !== 0) console.error(`task ${r.taskId} ${r.status}: ${r.error ?? "required effort verification missing"}`);
     if (r.errorInfo) console.error(JSON.stringify({ errorInfo: r.errorInfo }));
     return code;
   }
-  console.log(JSON.stringify(r));
+  output.log(JSON.stringify(r));
   return 0;
 }
 
@@ -463,13 +465,13 @@ async function cmdProjects(args: string[]): Promise<number> {
         result = await http.get(`/v1/projects/discover/${result.discoveryId}`, { baseUrl: BASE, serverId: SERVER_ID });
       }
     }
-    console.log(JSON.stringify(result));
+    output.log(JSON.stringify(result));
     return result.status === "failed" ? 2 : 0;
   }
   if (!action || action === "--json") {
     const result = await http.get<{ projects: Array<{ projectId: string; name: string; description: string | null }> }>("/v1/projects", { baseUrl: BASE, serverId: SERVER_ID });
-    if (action === "--json") console.log(JSON.stringify(result));
-    else for (const p of result.projects) console.log(`${p.projectId}\t${p.name}\t${p.description ?? ""}`);
+    if (action === "--json") output.log(JSON.stringify(result));
+    else for (const p of result.projects) output.log(`${p.projectId}\t${p.name}\t${p.description ?? ""}`);
     return 0;
   }
   const values: Record<string, string> = {};
@@ -489,12 +491,12 @@ async function cmdProjects(args: string[]): Promise<number> {
       ? { description: values["--description"] } : {}) }, { baseUrl: BASE, serverId: SERVER_ID });
   } else if (action === "remove") await http.del(url, { baseUrl: BASE, serverId: SERVER_ID });
   else throw new Error("unknown projects action");
-  console.log(JSON.stringify({ status: "ok" }));
+  output.log(JSON.stringify({ status: "ok" }));
   return 0;
 }
 
 function usage(): void {
-  console.log(`gpt-relay <command>
+  output.log(`gpt-relay <command>
 
 commands:
   bind [address] [--json]  show binding, or verify and save a server
@@ -534,7 +536,12 @@ commands:
          [--wait-timeout ms] [--task-timeout ms] [--effort VALUE] [--effort-fallback error|lower|max]
                            submit a review and wait
 
-client options (temporary; mutually exclusive):
+client output:
+  --output <path>          atomically save an exact UTF-8 copy of stdout; stderr stays separate
+                           combine with --json for JSON; parent directory must exist
+                           existing files are replaced; write failures exit 1
+
+client backend options (temporary; mutually exclusive):
   --server <address>       select an HTTP(S) origin or host:port
   --local                  select the unique locally registered server
   priority: options > GPT_RELAY_URL > binding > discovery
@@ -551,69 +558,89 @@ env:
 `);
 }
 
+async function dispatch(cmd: string | undefined, rest: string[], options: BackendOptions): Promise<number> {
+  if (cmd === "bind") return await cmdBind(rest, options);
+  if (cmd === "detect") return await cmdDetect(rest, options);
+  const business = ["health", "doctor", "sessions", "projects", "tasks", "operations", "show", "cancel", "resume", "review"];
+  if (business.includes(cmd ?? "")) {
+    validateBusinessArgs(cmd!, rest);
+    const backend = await resolveBackend(options);
+    BASE = backend.baseUrl; SERVER_ID = backend.serverId;
+  } else if (options.server || options.local) throw new BackendError("invalid_arguments", "backend options apply to client commands, not start or help");
+  switch (cmd) {
+    case "start":
+      return await cmdStart(rest);
+    case "service":
+      await (await import("../service/index.js")).serviceCommand(rest);
+      return 0;
+    case "health":
+      return await cmdHealth();
+    case "doctor": {
+      validateControlOptions(rest, ["--session", "--session-ref"]);
+      const i = rest.findIndex(x => x === "--session" || x === "--session-ref");
+      if (i >= 0 && !rest[i + 1]) throw new Error("missing session");
+      const result = await http.get<{ status: string }>(`/v1/doctor${i < 0 ? "" : `?session=${encodeURIComponent(rest[i + 1]!)}`}`, { baseUrl: BASE, serverId: SERVER_ID });
+      output.log(JSON.stringify(result));
+      return result.status === "ok" ? 0 : 2;
+    }
+    case "sessions":
+      return await cmdSessions(rest);
+    case "projects":
+      return await cmdProjects(rest);
+    case "tasks":
+      return await cmdTasks(rest);
+    case "operations":
+      if (!rest[0]) throw new Error("usage: operations OPERATION_ID");
+      validateControlOptions(rest.slice(1), []);
+      output.log(JSON.stringify(await http.get(`/v1/operations/${encodeURIComponent(rest[0])}`, { baseUrl: BASE, serverId: SERVER_ID })));
+      return 0;
+    case "show":
+      return await cmdShow(rest);
+    case "cancel":
+      return await cmdCancel(rest);
+    case "resume":
+      return await cmdResume(rest);
+    case "review":
+      return await cmdReview(rest);
+    case undefined:
+    case "-h":
+    case "--help":
+    case "help":
+      usage();
+      return 0;
+    default:
+      console.error(`unknown command: ${cmd}`);
+      usage();
+      return 64;
+  }
+}
+
 async function main(): Promise<number> {
   let cmd: string | undefined, rest: string[] = [];
   try {
     const parsed = parseGlobalOptions(process.argv.slice(2));
     [cmd, ...rest] = parsed.args;
-    if (cmd === "bind") return await cmdBind(rest, parsed.options);
-    if (cmd === "detect") return await cmdDetect(rest, parsed.options);
-    const business = ["health", "doctor", "sessions", "projects", "tasks", "operations", "show", "cancel", "resume", "review"];
-    if (business.includes(cmd ?? "")) {
-      validateBusinessArgs(cmd!, rest);
-      const backend = await resolveBackend(parsed.options);
-      BASE = backend.baseUrl; SERVER_ID = backend.serverId;
-    } else if (parsed.options.server || parsed.options.local) throw new BackendError("invalid_arguments", "backend options apply to client commands, not start or help");
-    switch (cmd) {
-      case "start":
-        return await cmdStart(rest);
-      case "service":
-        await (await import("../service/index.js")).serviceCommand(rest);
-        return 0;
-      case "health":
-        return await cmdHealth();
-      case "doctor": {
-        validateControlOptions(rest, ["--session", "--session-ref"]);
-        const i = rest.findIndex(x => x === "--session" || x === "--session-ref");
-        if (i >= 0 && !rest[i + 1]) throw new Error("missing session");
-        const result = await http.get<{ status: string }>(`/v1/doctor${i < 0 ? "" : `?session=${encodeURIComponent(rest[i + 1]!)}`}`, { baseUrl: BASE, serverId: SERVER_ID });
-        console.log(JSON.stringify(result));
-        return result.status === "ok" ? 0 : 2;
+    if (parsed.output !== undefined) {
+      if (!["bind", "detect", "health", "doctor", "sessions", "projects", "tasks", "operations", "show", "cancel", "resume", "review"].includes(cmd ?? "")) {
+        throw new BackendError("invalid_arguments", "--output applies only to client commands");
       }
-      case "sessions":
-        return await cmdSessions(rest);
-      case "projects":
-        return await cmdProjects(rest);
-      case "tasks":
-        return await cmdTasks(rest);
-      case "operations":
-        if (!rest[0]) throw new Error("usage: operations OPERATION_ID");
-        validateControlOptions(rest.slice(1), []);
-        console.log(JSON.stringify(await http.get(`/v1/operations/${encodeURIComponent(rest[0])}`, { baseUrl: BASE, serverId: SERVER_ID })));
-        return 0;
-      case "show":
-        return await cmdShow(rest);
-      case "cancel":
-        return await cmdCancel(rest);
-      case "resume":
-        return await cmdResume(rest);
-      case "review":
-        return await cmdReview(rest);
-      case undefined:
-      case "-h":
-      case "--help":
-      case "help":
-        usage();
-        return 0;
-      default:
-        console.error(`unknown command: ${cmd}`);
-        usage();
-        return 64;
+      output.prepare(parsed.output);
     }
+    const code = await dispatch(cmd, rest, parsed.options);
+    output.commit(code);
+    return code;
   } catch (err) {
+    output.abort();
     const controlCommand = ["doctor", "operations"].includes(cmd ?? "") ||
       cmd === "sessions" && ["inspect", "suspend", "continue", "refresh", "open", "close", "effort"].includes(rest[0] ?? "") ||
       cmd === "tasks" && ["trace", "recover", "stop", "reverify-effort"].includes(rest[0] ?? "");
+    if (err instanceof OutputWriteError) {
+      if (process.argv.includes("--json") || controlCommand) console.error(JSON.stringify({ error: err.code, message: err.message,
+        errorInfo: { code: err.code, message: err.message, deliveryState: "unknown", safeToResubmit: null,
+          nextAction: "inspect_operation_or_existing_task_before_retry" } }));
+      else console.error(`error: ${err.code}: ${err.message}`);
+      return 1;
+    }
     if (err instanceof BackendError) {
       const code = controlCommand && err.code === "invalid_arguments" ? "client_error" : err.code;
       if (process.argv.includes("--json") || controlCommand) console.error(JSON.stringify({ error: code, message: err.message, candidates: err.candidates,
