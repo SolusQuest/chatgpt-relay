@@ -658,58 +658,78 @@ async function executeCloseControl(command) {
 }
 
 // Runs in the page's MAIN world. Credentials stay inside this function; only
-// model identifiers from the exact submitted turn are returned to the worker.
+// bounded model identifiers and diagnostic codes for the exact turn leave the page.
 async function readEffortEvidence(conversationId, userId, assistantId) {
-  const unknown = { model: null, thinkingEffort: null };
-  if (location.origin !== "https://chatgpt.com" ||
-      location.pathname.match(/\/c\/([^/]+)/)?.[1] !== conversationId ||
-      !userId || !assistantId) return unknown;
-  const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 8000);
-  try {
-    const path = "/backend-api/conversations/" + encodeURIComponent(conversationId);
-    let response = await fetch(path, { credentials: "include", signal: controller.signal });
-    if (response.status === 401) {
-      const auth = await fetch("/api/auth/session", { credentials: "include", signal: controller.signal });
-      if (!auth.ok) return unknown;
-      const session = await auth.json();
-      if (typeof session.accessToken !== "string") return unknown;
-      response = await fetch(path, { credentials: "include", signal: controller.signal,
-        headers: { Authorization: "Bearer " + session.accessToken } });
-    }
-    if (!response.ok) return unknown;
-    const data = await response.json();
-    if (location.pathname.match(/\/c\/([^/]+)/)?.[1] !== conversationId) return unknown;
-    // This adapter deliberately supports the observed active-branch array only.
-    if (!Array.isArray(data.messages)) return unknown;
-    const userIndex = data.messages.findIndex(m => m.id === userId && m.author?.role === "user");
-    const answerIndex = data.messages.findIndex(m => m.id === assistantId && m.author?.role === "assistant");
-    if (userIndex < 0 || answerIndex <= userIndex ||
-        data.messages.slice(userIndex + 1, answerIndex).some(m => m.author?.role === "user")) return unknown;
-    const answer = data.messages[answerIndex];
-    if (answer.status !== "finished_successfully") return unknown;
-    const meta = answer.metadata ?? {};
-    return {
-      model: typeof meta.model_slug === "string" && meta.model_slug.length < 100 ? meta.model_slug : null,
-      thinkingEffort: typeof meta.thinking_effort === "string" && meta.thinking_effort.length < 50 ? meta.thinking_effort : null,
-    };
-  } catch { return unknown; }
-  finally { clearTimeout(timer); }
+  const unknown = (reason, extra = {}) => ({ model: null, thinkingEffort: null, reason, ...extra });
+  const samePage = () => location.origin === "https://chatgpt.com" &&
+    location.pathname.match(/\/c\/([^/]+)/)?.[1] === conversationId;
+  if (!samePage()) return unknown("identity_changed");
+  if (!userId || !assistantId) return unknown("missing_turn_ids");
+  let last;
+  // Only GET requests are retried; this never touches the composer or Send.
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    if (!samePage()) return unknown("identity_changed", { attempts: attempt });
+    const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 15000);
+    try {
+      const path = "/backend-api/conversations/" + encodeURIComponent(conversationId);
+      let response = await fetch(path, { credentials: "include", signal: controller.signal });
+      if (response.status === 401) {
+        const auth = await fetch("/api/auth/session", { credentials: "include", signal: controller.signal });
+        if (!auth.ok) return unknown("auth_unavailable", { attempts: attempt, httpStatus: auth.status });
+        const session = await auth.json();
+        if (typeof session.accessToken !== "string") return unknown("auth_unavailable", { attempts: attempt });
+        response = await fetch(path, { credentials: "include", signal: controller.signal,
+          headers: { Authorization: "Bearer " + session.accessToken } });
+      }
+      if (!samePage()) return unknown("identity_changed", { attempts: attempt });
+      if (!response.ok) {
+        last = unknown("http_error", { httpStatus: response.status });
+        if (response.status !== 429 && response.status < 500) return { ...last, attempts: attempt };
+      } else {
+        const data = await response.json();
+        if (!samePage()) return unknown("identity_changed", { attempts: attempt });
+        if (!Array.isArray(data.messages)) return unknown("unsupported_history", { attempts: attempt });
+        const userIndex = data.messages.findIndex(m => m.id === userId && m.author?.role === "user");
+        const answerIndex = data.messages.findIndex(m => m.id === assistantId && m.author?.role === "assistant");
+        if (userIndex < 0 || answerIndex <= userIndex ||
+            data.messages.slice(userIndex + 1, answerIndex).some(m => m.author?.role === "user")) last = unknown("turn_not_found");
+        else {
+          const answer = data.messages[answerIndex];
+          if (answer.status !== "finished_successfully") last = unknown("reply_not_finished");
+          else {
+            const meta = answer.metadata ?? {};
+            const model = typeof meta.model_slug === "string" && meta.model_slug.length < 100 ? meta.model_slug : null;
+            const thinkingEffort = typeof meta.thinking_effort === "string" && meta.thinking_effort.length < 50 ? meta.thinking_effort : null;
+            last = { model, thinkingEffort, reason: "metadata_missing" };
+            if (model && (!model.endsWith("-thinking") || thinkingEffort)) return { model, thinkingEffort, attempts: attempt };
+          }
+        }
+      }
+    } catch {
+      last = unknown(controller.signal.aborted ? "timeout" : "network_error");
+    } finally { clearTimeout(timer); }
+    last.attempts = attempt;
+    if (attempt < 3) await new Promise(resolve => setTimeout(resolve, attempt * 500));
+  }
+  return last;
 }
 
 async function verifyReplyEffort(tabId, session, snap) {
+  const ids = { submittedUserMessageId: snap.submittedUserMessageId, assistantMessageId: snap.assistantMessageId };
+  const unknown = reason => ({ ...ids, model: null, thinkingEffort: null, reason });
   try {
-    if (await getTabSession(tabId, { forceFresh: true }) !== session) return null;
+    if (await getTabSession(tabId, { forceFresh: true }) !== session) return unknown("identity_changed");
     const tab = await chrome.tabs.get(tabId), url = new URL(tab.url);
-    if (url.origin !== "https://chatgpt.com") return null;
+    if (url.origin !== "https://chatgpt.com") return unknown("identity_changed");
     const conversationId = url.pathname.match(/\/c\/([^/]+)/)?.[1];
-    if (!conversationId) return null;
+    if (!conversationId) return unknown("identity_changed");
     const results = await chrome.scripting.executeScript({
       target: { tabId }, world: "MAIN", func: readEffortEvidence,
-      args: [conversationId, snap.submittedUserMessageId, snap.assistantMessageId],
+      args: [conversationId, ids.submittedUserMessageId, ids.assistantMessageId],
     });
-    if (await getTabSession(tabId, { forceFresh: true }) !== session) return null;
-    return results?.[0]?.result ?? null;
-  } catch { return null; }
+    if (await getTabSession(tabId, { forceFresh: true }) !== session) return unknown("identity_changed");
+    return { ...ids, ...(results?.[0]?.result ?? unknown("script_failed")) };
+  } catch { return unknown("script_failed"); }
 }
 
 async function executeEffortControl(command) {
@@ -729,6 +749,11 @@ async function executeEffortControl(command) {
 }
 
 async function executeSessionControl(command) {
+  if (command.kind === "reverify-effort") {
+    const task = await httpJson("GET", `/v1/tasks/${encodeURIComponent(command.taskId)}`);
+    if (task.session !== command.session) throw new Error("session_identity_changed");
+    return verifyReplyEffort(command.tabId, command.session, command.target);
+  }
   if (command.kind === "set-effort") return executeEffortControl(command);
   if (command.kind === "open") return executeOpenControl(command);
   if (command.kind === "close") return executeCloseControl(command);

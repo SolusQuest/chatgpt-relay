@@ -525,8 +525,7 @@ export class TaskStore {
     }
     const isError = typeof input.error === "string" && input.error.length > 0;
     const verification = !isError && existing.effortPolicy ? verifyEffort(existing.effortSelection, input.effortEvidence) : null;
-    const effortError = verification && verification.status !== "verified"
-      ? verification.status === "mismatch" ? "effort_mismatch" : "effort_verification_unknown" : null;
+    const effortError = verification?.status === "mismatch" ? "effort_mismatch" : null;
     const status: TaskStatus = isError || effortError ? "failed" : "done";
     this.db
       .prepare(
@@ -541,11 +540,41 @@ export class TaskStore {
         isError ? (input.error ?? null) : effortError,
         id,
       );
-    if (verification) this.db.prepare("UPDATE tasks SET effort_verification=? WHERE id=?").run(JSON.stringify(verification), id);
+    if (verification) this.saveEffortVerification(id, verification, now);
     const task = this.mustGetTask(id);
     this.taskObservations.delete(id);
     this.emitTaskChange(task);
     return task;
+  }
+
+  private saveEffortVerification(id: string, verification: EffortVerification, now: number) {
+    verification.checkedAt = now;
+    this.db.prepare("UPDATE tasks SET effort_verification=? WHERE id=?").run(JSON.stringify(verification), id);
+    this.db.prepare("INSERT INTO task_events(task_id,at,event,detail) VALUES (?,?,?,?)")
+      .run(id, now, "effort_verification", JSON.stringify(verification));
+  }
+
+  reverifyEffort(id: string, evidence: unknown): Task {
+    const task = this.mustGetTask(id);
+    if (!task.effortPolicy || !(task.reply || task.lateReply) || !TERMINAL_STATUSES.includes(task.status))
+      throw new TaskStoreError("task_not_verifiable", "invalid_transition");
+    const previous = task.effortVerification;
+    const next = verifyEffort(task.effortSelection, evidence);
+    if (!previous?.submittedUserMessageId || !previous.assistantMessageId ||
+        previous.submittedUserMessageId !== next.submittedUserMessageId || previous.assistantMessageId !== next.assistantMessageId)
+      throw new TaskStoreError("effort_turn_identity_mismatch", "invalid_transition");
+    // Inconclusive reads must never erase a confirmed result, especially a mismatch.
+    if (previous.status === "mismatch" || previous.status === "verified" && next.status === "unknown") return task;
+    next.checkedAt = Date.now();
+    const error = next.status === "mismatch" && (!task.error || task.error === "effort_verification_unknown") ? "effort_mismatch" : task.error === "effort_verification_unknown" ? null : task.error;
+    const status = next.status === "mismatch" ? "failed" : task.error === "effort_verification_unknown" ? "done" : task.status;
+    this.db.prepare("UPDATE tasks SET effort_verification=?, error=?, status=? WHERE id=?")
+      .run(JSON.stringify(next), error, status, id);
+    this.db.prepare("INSERT INTO task_events(task_id,at,event,detail) VALUES (?,?,?,?)")
+      .run(id, next.checkedAt, "effort_reverified", JSON.stringify(next));
+    const updated = this.mustGetTask(id);
+    this.emitTaskChange(updated);
+    return updated;
   }
 
   captureReply(id: string, text: string, now = Date.now(), effortEvidence?: unknown): CaptureReplyResult {
@@ -577,8 +606,7 @@ export class TaskStore {
              WHERE id = ?`,
         )
         .run(text, now, now, id);
-      if (existing.effortPolicy) this.db.prepare("UPDATE tasks SET effort_verification=? WHERE id=?")
-        .run(JSON.stringify(verifyEffort(existing.effortSelection, effortEvidence)), id);
+      if (existing.effortPolicy) this.saveEffortVerification(id, verifyEffort(existing.effortSelection, effortEvidence), now);
       const task = this.mustGetTask(id);
       this.emitTaskChange(task);
       return { task, captured: true, late: true };

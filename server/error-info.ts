@@ -8,7 +8,7 @@ export function errorInfo(message: string, task?: Task) {
   const deliveryState = !task ? "unknown" : task.reply !== null || task.lateReply !== null ? "replied" :
     task.submitAcknowledgedAt !== null || task.generatingSeenAt !== null ? "acknowledged" :
     task.sendAttemptedAt !== null ? "uncertain" : "not_attempted";
-  const nextAction = code === "effort_mismatch" || code === "effort_verification_unknown" ? "inspect_captured_reply_and_effort_do_not_resend" :
+  const nextAction = code === "effort_verification_unknown" ? "inspect_warning_or_reverify_effort_do_not_resend" : code === "effort_mismatch" ? "inspect_captured_reply_and_effort_do_not_resend" :
     code === "effort_unavailable" || code === "effort_dom_unsupported" || code === "effort_model_unsupported" ? "inspect_page_effort_options" :
     code === "composer_changed" || code === "composer_not_clean" ? "inspect_session_and_preserve_draft" :
     code === "page_identity_unavailable" || code === "reload_extension_and_page" ? "run_doctor" :

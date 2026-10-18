@@ -18,6 +18,9 @@ export function effortDetails(task: EffortTask): string {
   if (task.effortPolicy) lines.push(`  fallback:    ${task.effortPolicy.effortFallback}`);
   if (task.effortSelection) lines.push(`  family:      ${task.effortSelection.modelFamily}`);
   if (task.effortVerification) {
+    if (task.effortVerification.reason) lines.push(`  verify reason: ${task.effortVerification.reason}`);
+    if (task.effortVerification.attempts) lines.push(`  verify attempts: ${task.effortVerification.attempts}`);
+    if (task.effortVerification.httpStatus) lines.push(`  verify HTTP: ${task.effortVerification.httpStatus}`);
     lines.push(`  model:       ${task.effortVerification.model ?? "(unknown)"}`);
     lines.push(`  thinking:    ${task.effortVerification.thinkingEffort ?? "(not reported)"}`);
   }
@@ -25,6 +28,8 @@ export function effortDetails(task: EffortTask): string {
 }
 
 export function reviewExitCode(result: ReviewResult): number {
-  if (result.effortPolicy && result.effortVerification?.status !== "verified") return 2;
+  if (result.error === "effort_mismatch") return 2;
+  if (result.effortPolicy && (!result.effortVerification || result.effortVerification.status === "mismatch")) return 2;
+  if (result.status === "failed" && result.error === "effort_verification_unknown" && result.reply && result.effortVerification?.status === "unknown") return 0;
   return result.status === "done" || (result.status === "failed" && typeof result.lateReply === "string") ? 0 : 2;
 }

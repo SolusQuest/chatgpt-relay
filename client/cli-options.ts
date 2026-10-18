@@ -37,7 +37,7 @@ export function validateBusinessArgs(command: string, args: string[]): void {
       } else values = ["--session-ref"];
       break;
     case "tasks":
-      if (["trace", "recover", "stop"].includes(args[0] ?? "")) {
+      if (["trace", "recover", "stop", "reverify-effort"].includes(args[0] ?? "")) {
         if (!args[1] || args[1].startsWith("--")) throw new BackendError("invalid_arguments", "tasks control requires a task ID");
         start = 2; if (args[0] !== "trace") values = ["--operation-id"];
       } else values = ["--session", "--session-ref", "--status", "--last"];

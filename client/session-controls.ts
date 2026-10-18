@@ -1,7 +1,7 @@
 import type { EffortPolicy } from "../shared/effort.js";
 import { http } from "./http.js";
 const DEFAULT_BASE = process.env.GPT_RELAY_URL ?? "http://127.0.0.1:8765";
-export type ControlKind = "open" | "close" | "refresh" | "recover" | "stop" | "set-effort";
+export type ControlKind = "open" | "close" | "refresh" | "recover" | "stop" | "set-effort" | "reverify-effort";
 export interface SessionControlRequest {
   // Retain this ID before submitting. Reuse it after a transport failure.
   effort?: EffortPolicy["effort"];

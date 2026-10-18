@@ -46,14 +46,14 @@ export class SessionControls {
     if (body?.kind === "set-effort" ? !effortPolicy || body.taskId != null : effortPolicy !== null)
       throw new ControlError("invalid_effort_policy", 400);
     if (typeof body?.operationId !== "string" || !/^[a-zA-Z0-9_-]{8,100}$/.test(body.operationId) ||
-        !["recover", "refresh", "stop", "open", "close", "set-effort"].includes(body.kind) ||
+        !["recover", "refresh", "stop", "open", "close", "set-effort", "reverify-effort"].includes(body.kind) ||
         (["refresh", "open", "close", "set-effort"].includes(body.kind) && typeof body.session !== "string") ||
         (body.taskId != null && typeof body.taskId !== "string") ||
         (["open", "close"].includes(body.kind) && body.taskId != null) ||
         (body.instanceId != null && (body.kind !== "open" || typeof body.instanceId !== "string" || !body.instanceId || body.instanceId.length > 200))) throw new ControlError("invalid_control", 400);
     const task = body.taskId ? this.store.getTask(body.taskId) : null;
     if (body.taskId && !task) throw new ControlError("task_not_found", 404);
-    const ref = this.store.registry.get(["recover", "stop"].includes(body.kind) ? task?.session ?? "" : body.session ?? "");
+    const ref = this.store.registry.get(["recover", "stop", "reverify-effort"].includes(body.kind) ? task?.session ?? "" : body.session ?? "");
     if (!ref) throw new ControlError("session_not_found", 404);
     const session = ref.canonical;
     if (task && task.session !== session) throw new ControlError("task_session_mismatch");
@@ -64,8 +64,11 @@ export class SessionControls {
           JSON.stringify(JSON.parse(old.target_json ?? "{}").effortPolicy ?? null) !== JSON.stringify(effortPolicy)) throw new ControlError("operation_id_conflict");
       return this.view(old);
     }
-    if (task && (task.sendAttemptedAt == null || !["in_progress", "recovering"].includes(task.status))) throw new ControlError("task_not_recoverable");
-    if (["recover", "stop"].includes(body.kind) && !task) throw new ControlError("task_not_found", 404);
+    if (body.kind !== "reverify-effort" && task && (task.sendAttemptedAt == null || !["in_progress", "recovering"].includes(task.status))) throw new ControlError("task_not_recoverable");
+    if (["recover", "stop", "reverify-effort"].includes(body.kind) && !task) throw new ControlError("task_not_found", 404);
+    if (body.kind === "reverify-effort" && (!task?.effortPolicy || !(task.reply || task.lateReply) ||
+        !task.effortVerification?.submittedUserMessageId || !task.effortVerification.assistantMessageId))
+      throw new ControlError("missing_turn_ids");
     const snapshot = this.diagnostics.inspect(session);
     let owner: string, tab: number, target: any = null;
     if (body.kind === "open") {
@@ -93,6 +96,10 @@ export class SessionControls {
         target = { generation: instance.generation, conversationId: ref.conversation, projectId: ref.project };
       }
     }
+    if (body.kind === "reverify-effort") target = {
+      submittedUserMessageId: task!.effortVerification!.submittedUserMessageId,
+      assistantMessageId: task!.effortVerification!.assistantMessageId,
+    };
     if (body.kind === "set-effort") {
       if (snapshot?.queuedTasks || snapshot?.activeTaskId) throw new ControlError("session_busy");
       if (snapshot?.page?.capabilities?.effort !== true) throw new ControlError("control_unsupported");
@@ -132,11 +139,13 @@ export class SessionControls {
       policyToCommit = policy;
     }
     const previous = JSON.parse(row.result ?? "null");
-    const result = JSON.stringify(row.kind === "close" && previous?.suspended === true
+    let result = JSON.stringify(row.kind === "close" && previous?.suspended === true
       ? { ...previous, ...body.result } : body.result ?? null);
     if (result.length > 4000) throw new ControlError("control_result_too_large", 400);
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      if (row.kind === "reverify-effort" && body.state === "succeeded")
+        result = JSON.stringify(this.store.reverifyEffort(row.task_id!, body.result).effortVerification);
       if (policyToCommit) this.store.registry.setEffort(row.session, policyToCommit);
       this.db.prepare("UPDATE session_controls SET state=?, error=?, result=? WHERE id=?")
         .run(body.state, typeof body.error === "string" ? body.error.slice(0, 150) : null, result, id);

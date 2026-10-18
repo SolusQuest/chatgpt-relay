@@ -165,8 +165,8 @@ async function cmdSessions(args: string[] = []): Promise<number> {
 }
 
 async function cmdTasks(args: string[]): Promise<number> {
-  if (["recover", "stop"].includes(args[0] ?? "")) {
-    if (!args[1]) throw new Error("usage: tasks recover|stop TASK_ID [--operation-id ID]");
+  if (["recover", "stop", "reverify-effort"].includes(args[0] ?? "")) {
+    if (!args[1]) throw new Error("usage: tasks recover|stop|reverify-effort TASK_ID [--operation-id ID]");
     validateControlOptions(args.slice(2), ["--operation-id"]);
     return submitControl({ kind: args[0], taskId: args[1] }, args);
   }
@@ -520,7 +520,7 @@ commands:
                            all session controls also accept --session ID
   doctor [--session-ref REF]  diagnose service, extension and observed DOM
   tasks trace TASK_ID       read durable lifecycle events
-  tasks recover|stop TASK_ID [--operation-id ID]
+  tasks recover|stop|reverify-effort TASK_ID [--operation-id ID]
   operations OPERATION_ID   read asynchronous control result
   tasks [--session ID | --session-ref REF] [--status S] [--last N] [--json]
                            list recent tasks
@@ -613,7 +613,7 @@ async function main(): Promise<number> {
   } catch (err) {
     const controlCommand = ["doctor", "operations"].includes(cmd ?? "") ||
       cmd === "sessions" && ["inspect", "suspend", "continue", "refresh", "open", "close", "effort"].includes(rest[0] ?? "") ||
-      cmd === "tasks" && ["trace", "recover", "stop"].includes(rest[0] ?? "");
+      cmd === "tasks" && ["trace", "recover", "stop", "reverify-effort"].includes(rest[0] ?? "");
     if (err instanceof BackendError) {
       const code = controlCommand && err.code === "invalid_arguments" ? "client_error" : err.code;
       if (process.argv.includes("--json") || controlCommand) console.error(JSON.stringify({ error: code, message: err.message, candidates: err.candidates,

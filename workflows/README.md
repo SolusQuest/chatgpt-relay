@@ -106,11 +106,11 @@ Resolve effort at invocation preflight with the session: an explicit user overri
 
 Preserve the model family selected by the user on the webpage. An explicit effort override uses `error` unless the user also supplies a fallback policy. Bare CLI use remains opt-in.
 
-Apply the resolved policy and inspect results using [the agent effort procedure](../agent-instructions.md#apply-the-workflow-effort-policy). It covers creation, existing-session controls, operation observation and result verification; load [API details](../api.md#effort-selection) only when needed for protocol work or diagnosis.
+Apply the resolved policy and inspect results using [the agent effort procedure](../agent-instructions.md#apply-the-workflow-effort-policy). It covers creation, existing-session controls, operation observation and result verification. Post-reply `unknown` is a recorded warning for ordinary reviews and does not alone block their dependent phases; actual `mismatch` remains blocking. Require post-reply `verified` only when the user or a binding workflow requirement explicitly requires proof of executed effort. Pre-send selection and control requirements still apply; load [API details](../api.md#effort-selection) only when needed for protocol work or diagnosis.
 
 The milestone's Pro-to-max fallback applies only before Send, when the known UI shows Pro unavailable and max can be positively verified. It never falls further to High or treats unknown page state, timeout or generic rate limiting as Pro unavailability. If fallback occurs, notify the user, record requested Pro/effective max and the reason/evidence, and retain max for the rest of this execution. A new independent invocation may reconsider the default.
 
-Platform downgrade after Send is separate from this fallback. Mismatched or unverifiable effort uses the active workflow's checkpoint/blocked outcome; keep the reply and original task identity without replaying the prompt.
+Platform downgrade after Send is separate from this fallback. Actual mismatched effort uses the active workflow's checkpoint/blocked outcome. Unverifiable post-reply effort is a recorded warning for ordinary reviews; only an explicit strict proof requirement blocks on unknown. Keep the reply and original task identity without replaying the prompt.
 
 Persist effort continuity in the shared [handoff record](#stage-handoffs-and-delegation), including the original request when the effective policy changes to max.
 

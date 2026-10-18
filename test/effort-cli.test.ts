@@ -105,7 +105,7 @@ test("review preserves failed replies and uses identical text/JSON exit codes fo
     const task = fixture({ late, verification });
     for (const json of [false, true]) {
       const result = await cli(["review", "--session", task.session, "--text", "audit", "--cri", task.session, ...(json ? ["--json"] : [])]);
-      assert.equal(result.code, verification === "verified" ? 0 : 2, JSON.stringify({ late, verification, json, result }));
+      assert.equal(result.code, verification !== "mismatch" ? 0 : 2, JSON.stringify({ late, verification, json, result }));
       assert.ok(result.stdout.includes("CAPTURED_AUDIT_REPLY"));
       if (json) {
         const view = JSON.parse(result.stdout);
@@ -177,12 +177,52 @@ test("effort controls return structured errors without requiring --json", async 
   }
 });
 
-test("review refuses missing required verification even for done or late results", () => {
+test("review requires a verification result but allows explicit unknown warnings", () => {
   const base: ReviewResult = { taskId: "test", status: "done", reply: "reply", lateReply: null,
     error: null, submissionState: "replied", elapsedMs: 1, effortPolicy: { effort: "max", effortFallback: "error" } };
   for (const status of ["done", "failed"] as const) for (const verification of [undefined, null, { status: "unknown", model: null, thinkingEffort: null }] as const) {
-    assert.equal(reviewExitCode({ ...base, status, lateReply: status === "failed" ? "late" : null, effortVerification: verification }), 2);
+    assert.equal(reviewExitCode({ ...base, status, lateReply: status === "failed" ? "late" : null, effortVerification: verification }), verification ? 0 : 2);
   }
+  assert.equal(reviewExitCode({ ...base, status: "failed", error: "effort_verification_unknown",
+    effortVerification: { status: "unknown", model: null, thinkingEffort: null } }), 0);
+  assert.equal(reviewExitCode({ ...base, status: "failed", error: "effort_mismatch",
+    effortVerification: { status: "unknown", model: null, thinkingEffort: null } }), 2);
   assert.equal(reviewExitCode({ ...base, effortPolicy: null, status: "failed", lateReply: undefined as any }), 2);
   assert.equal(reviewExitCode({ ...base, status: "cancelled", lateReply: "late", effortVerification: { status: "verified", model: "gpt-6-thinking", thinkingEffort: "max" } }), 2);
+});
+
+test("CLI post-hoc verification observes an owned operation and exposes the original task result", async () => {
+  const task = fixture({ verification: "unknown" });
+  const ids = { submittedUserMessageId: "original-user", assistantMessageId: "original-assistant" };
+  const dbTask = handle.store.getTask(task.id)!;
+  // fixture captured a legacy null evidence result; use a new identified task.
+  const identified = handle.store.createTask({ session: task.session, text: "next audit" });
+  handle.store.claimNextTask(task.session);
+  handle.store.recordEffortSelection(identified.id, dbTask.effortSelection!);
+  handle.store.markTaskProgress(identified.id, "send_attempted");
+  handle.store.captureReply(identified.id, "SAVED_REPLY", Date.now(), { ...ids, reason: "timeout", attempts: 3 });
+  // Reports go through the existing HTTP diagnostics contract.
+  const report = await fetch(`${base}/internal/session-snapshots`, { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ session: task.session, owner: "reverify-browser", tabId: 7, protocol: 1 }) });
+  assert.equal(report.status, 200);
+  const opId = `reverify-cli-${serial++}`;
+  const created = await cli(["tasks", "reverify-effort", identified.id, "--operation-id", opId, "--json"]);
+  assert.equal(created.code, 0, created.stderr);
+  assert.equal(JSON.parse(created.stdout).state, "queued");
+  const post = async (route: string, body: unknown) => {
+    const response = await fetch(`${base}${route}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    assert.equal(response.status, 200, await response.clone().text());
+    return response.json() as Promise<any>;
+  };
+  const { command } = await post("/internal/session-controls/claim", { owner: "reverify-browser" });
+  assert.deepEqual(command.target, ids);
+  await post(`/internal/session-controls/${opId}/finish`, { owner: command.owner, token: command.token, state: "succeeded",
+    result: { ...ids, model: "gpt-6-thinking", thinkingEffort: "max" } });
+  const operation = JSON.parse((await cli(["operations", opId, "--json"])).stdout);
+  assert.equal(operation.result.status, "verified");
+  const shown = JSON.parse((await cli(["show", identified.id, "--json"])).stdout);
+  assert.equal(shown.effortVerification.status, "verified");
+  assert.equal(shown.reply, "SAVED_REPLY"); assert.equal(shown.requeueCount, 0);
+  const legacy = await cli(["tasks", "reverify-effort", task.id, "--operation-id", `legacy-cli-${serial++}`]);
+  assert.equal(legacy.code, 1); assert.match(legacy.stderr, /missing_turn_ids/);
 });

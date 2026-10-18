@@ -58,7 +58,7 @@ test("effort mismatch/unknown retain captured reply and cannot replay across res
   for (const [evidence, error] of [[{ model: "gpt-6-thinking", thinkingEffort: "max" }, null],
       [{ model: "gpt-6-thinking", thinkingEffort: "extended" }, "effort_mismatch"],
       [{ model: "gpt-5.6-thinking", thinkingEffort: "max" }, "effort_mismatch"],
-      [null, "effort_verification_unknown"]] as const) {
+      [null, null]] as const) {
     const db = openDatabase(":memory:");
     try {
       let store = new TaskStore(db, loadConfig());
