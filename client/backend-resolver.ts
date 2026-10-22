@@ -16,7 +16,7 @@ export async function resolveBackend(options: BackendOptions = {}): Promise<Back
   let legacy: Backend | undefined;
   if (process.env.GPT_RELAY_LEGACY_FALLBACK !== "0") {
     try {
-      const backend = await probeBackend(`http://127.0.0.1:${process.env.GPT_RELAY_PORT ?? 8765}`, { allowLegacy: true, timeoutMs: 300 });
+      const backend = await probeBackend(`http://127.0.0.1:${process.env.GPT_RELAY_PORT ?? 8765}`, { allowLegacy: true, timeoutMs: 300, maxAttempts: 1 });
       if (backend.legacy) legacy = backend;
     } catch { /* Use the normal identity-aware discovery path. */ }
   }

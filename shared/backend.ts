@@ -18,8 +18,29 @@ export interface Backend {
   legacy?: boolean;
 }
 
+export interface ProbeAttempt {
+  timestamp: string;
+  path: string;
+  attempt: number;
+  timeoutMs: number;
+  elapsedMs: number;
+  status?: number;
+  outcome: "success" | "failure";
+  retryable?: boolean;
+  errors?: { name: string; message: string; code?: string; status?: number;
+    syscall?: string; address?: string; port?: number }[];
+}
+
+export interface ProbeDiagnostics {
+  probeId: string;
+  baseUrl: string;
+  elapsedMs: number;
+  attempts: ProbeAttempt[];
+  logFile?: string;
+}
+
 export class BackendError extends Error {
-  constructor(public code: string, message: string, public candidates?: Backend[]) {
+  constructor(public code: string, message: string, public candidates?: Backend[], public probe?: ProbeDiagnostics) {
     super(message);
   }
 }

@@ -643,10 +643,11 @@ async function main(): Promise<number> {
     }
     if (err instanceof BackendError) {
       const code = controlCommand && err.code === "invalid_arguments" ? "client_error" : err.code;
-      if (process.argv.includes("--json") || controlCommand) console.error(JSON.stringify({ error: code, message: err.message, candidates: err.candidates,
+      if (process.argv.includes("--json") || controlCommand) console.error(JSON.stringify({ error: code, message: err.message, candidates: err.candidates, probe: err.probe,
         errorInfo: { code, message: err.message, deliveryState: "unknown", safeToResubmit: null } }));
       else {
         console.error(`error: ${err.code}: ${err.message}`);
+        if (err.probe) console.error(JSON.stringify({ probe: err.probe }));
         for (const backend of err.candidates ?? []) console.error(`  ${backend.name}\t${backend.baseUrl}\t${backend.serverId ?? "legacy"}`);
       }
       return !controlCommand && ["invalid_arguments", "invalid_backend"].includes(err.code) ? 64 : 1;

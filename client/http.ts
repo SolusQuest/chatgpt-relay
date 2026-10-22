@@ -5,6 +5,7 @@ export interface HttpOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
   serverId?: string;
+  onResponseStatus?: (status: number) => void;
 }
 
 async function request<T>(
@@ -28,6 +29,7 @@ async function request<T>(
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal: controller.signal,
     });
+    opts.onResponseStatus?.(res.status);
     const text = await res.text();
     if (opts.serverId && res.headers.get("X-Gpt-Relay-Server-Id") !== opts.serverId) {
       throw new HttpError("backend identity changed", 409, "backend_identity_mismatch");

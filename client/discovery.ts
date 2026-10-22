@@ -59,7 +59,7 @@ export async function verifyCandidates(candidates: Candidate[]): Promise<Backend
     while (index < work.length) {
       const candidate = work[index++]!;
       try {
-        const backend = await probeBackend(candidate.baseUrl, { expectedId: candidate.serverId, timeoutMs: 500 });
+        const backend = await probeBackend(candidate.baseUrl, { expectedId: candidate.serverId, timeoutMs: 500, maxAttempts: 1 });
         const old = found.get(backend.serverId!);
         if (!old || backend.baseUrl.localeCompare(old.baseUrl) < 0) found.set(backend.serverId!, backend);
       } catch { /* Stale, unreachable and incompatible candidates are not selectable. */ }

@@ -33,6 +33,7 @@ beforeEach(() => {
   process.env.GPT_RELAY_CLIENT_CONFIG = path.join(directory, "client", "config.json");
   process.env.GPT_RELAY_REGISTRY_DIR = path.join(directory, "registry");
   process.env.GPT_RELAY_PENDING_DIR = path.join(directory, "pending");
+  process.env.GPT_RELAY_LOG_DIR = path.join(directory, "logs");
   process.env.GPT_RELAY_DISCOVERY = "0";
   process.env.GPT_RELAY_LEGACY_FALLBACK = "0";
   delete process.env.GPT_RELAY_URL;
@@ -100,6 +101,54 @@ function runCli(args: string[], env: NodeJS.ProcessEnv = {}) {
 }
 
 const hasCode = (code: string) => (error: unknown) => error instanceof BackendError && error.code === code;
+
+test("show JSON exposes failed pre-command probe details without reading the task", async () => {
+  let probes = 0, taskReads = 0;
+  const server = await listen((req, res) => {
+    if (req.url === "/v1/server") probes++;
+    else taskReads++;
+    res.writeHead(503, { "Content-Type": "application/json" });
+    res.end('{"error":"temporarily_unavailable"}');
+  });
+  const result = await runCli(["show", "existing-task", "--server", server.baseUrl, "--json"]);
+  assert.equal(result.code, 1);
+  assert.equal(result.stdout, "");
+  const error = JSON.parse(result.stderr);
+  assert.equal(error.error, "backend_unreachable");
+  assert.equal(error.errorInfo.deliveryState, "unknown");
+  assert.equal(error.errorInfo.safeToResubmit, null);
+  assert.equal(error.probe.baseUrl, server.baseUrl);
+  assert.equal(error.probe.attempts.length, 3);
+  assert.ok(error.probe.elapsedMs >= 600);
+  assert.ok(error.probe.attempts.every((attempt: any) => attempt.path === "/v1/server" && attempt.errors[0].status === 503));
+  assert.equal(probes, 3);
+  assert.equal(taskReads, 0);
+});
+
+test("show retries a failed probe, then reads the task exactly once with clean JSON output", async () => {
+  let probes = 0, taskReads = 0;
+  const serverId = randomUUID();
+  const server = await listen((req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.setHeader("X-Gpt-Relay-Server-Id", serverId);
+    if (req.url === "/v1/server") {
+      if (++probes === 1) { res.statusCode = 503; res.end('{"error":"busy"}'); }
+      else res.end(JSON.stringify({ product: "gpt-relay", apiVersion: 1, serverId, name: "test", version: "1.0.1" }));
+    } else {
+      taskReads++;
+      res.end(JSON.stringify({ taskId: "existing-task", status: "completed" }));
+    }
+  });
+  const result = await runCli(["show", "existing-task", "--server", server.baseUrl, "--json"]);
+  assert.equal(result.code, 0, result.stderr);
+  assert.equal(result.stderr, "");
+  assert.equal(JSON.parse(result.stdout).taskId, "existing-task");
+  assert.equal(probes, 2);
+  assert.equal(taskReads, 1);
+  const rows = fs.readFileSync(path.join(process.env.GPT_RELAY_LOG_DIR!, "client-probes.jsonl"), "utf8")
+    .trim().split("\n").map(line => JSON.parse(line));
+  assert.deepEqual(rows.map(row => row.outcome), ["failure", "success"]);
+});
 
 test("server identity persists across database restart and is independent of listener address", async () => {
   const db = path.join(directory, "durable.db");
