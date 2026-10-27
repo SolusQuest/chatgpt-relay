@@ -94,7 +94,7 @@ The relay listens on `127.0.0.1:8765` by default. Its data is stored under
 2. Enable **Developer mode**.
 3. Select **Load unpacked** and choose the repository's `extension/` directory.
 4. Open or refresh `https://chatgpt.com/`.
-5. Confirm that a green `Relay: <session-id>` banner appears.
+5. Confirm that the Relay floating status button appears near the lower-right corner. Click it to inspect the session and task status; drag it to move it.
 
 ### 4. Submit a review
 
@@ -325,7 +325,7 @@ To reset local relay data, stop the relay and remove the database files from
 | Symptom | Suggested action |
 |---|---|
 | `gpt-relay health` fails | Confirm that `pnpm start` or `gpt-relay start` is running |
-| Relay banner is missing | Reload the extension, then refresh `chatgpt.com` |
+| Relay status button is missing | Reload the extension, then refresh `chatgpt.com` |
 | Popup reports `unreachable` | Check the relay URL and local firewall |
 | Session is paused | Resolve the reported captcha or rate limit, then resume |
 | Prompt submission fails | ChatGPT UI changes may require selector updates |

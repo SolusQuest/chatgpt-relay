@@ -178,7 +178,7 @@ function createHarness({ advanceTimers = false, managed = null as null | Record<
     },
   };
 
-  vm.runInNewContext(contentScript, {
+  const context = vm.createContext({
     window,
     document,
     location,
@@ -221,6 +221,13 @@ function createHarness({ advanceTimers = false, managed = null as null | Record<
     clearTimeout() {},
     clearInterval() {},
   });
+  if (dom) {
+    vm.runInContext(fs.readFileSync(path.resolve(__dirname, "..", "extension", "status-widget.js"), "utf8"), context);
+  } else {
+    // Task/DOM fixtures do not simulate the status display's shadow tree.
+    context.GptRelayStatus = { create: () => ({ update() {} }) };
+  }
+  vm.runInContext(contentScript, context);
 
   assert.ok(onMessage, "content script did not register onMessage");
   return {
@@ -687,8 +694,10 @@ for (const projectId of [null, "g-p-" + "a".repeat(32)]) {
   test(`first-message registration preserves the active banner (project: ${!!projectId})`, async () => {
     const managed = { sessionRef: "sr_banner", owner: "browser", token: "token", projectId, initialTaskId: "first-task" };
     const h = createHarness({ managed, html: "<main></main>" });
-    const banner = h.dom!.document.body.lastElementChild! as any;
-    const idleColor = banner.style.background;
+    const widget = h.dom!.document.querySelector("#gpt-relay-status")!.shadowRoot!;
+    const banner = widget.querySelector(".status")!;
+    const orb = widget.querySelector(".orb")! as any;
+    const idleColor = orb.style.getPropertyValue("--relay-color");
     const conversationId = "6ac0da0c-f304-83e8-ac0f-25235ca1d760";
     h.state.pathname = projectId ? `/g/${projectId}/project` : "/";
     h.tickInterval(3000);
@@ -698,13 +707,13 @@ for (const projectId of [null, "g-p-" + "a".repeat(32)]) {
     ]) {
       h.seedInflight({ taskId: "first-task", session: managed.sessionRef, phase });
       await h.message({ type: "update-banner", text, color });
-      const expectedColor = banner.style.background;
+      const expectedColor = orb.style.getPropertyValue("--relay-color");
       // Simulate the SPA URL change and worker binding after the first Send.
       h.state.pathname = projectId ? `/g/${projectId}/c/${conversationId}` : `/c/${conversationId}`;
       h.tickInterval(3000);
       await h.message({ type: "configure-session", managed: { ...managed, boundConversation: conversationId } });
       assert.equal(banner.textContent, text);
-      assert.equal(banner.style.background, expectedColor);
+      assert.equal(orb.style.getPropertyValue("--relay-color"), expectedColor);
       assert.equal((h.sentMessages.at(-1) as any).conversationId, conversationId);
       assert.equal((h.sentMessages.at(-1) as any).session, managed.sessionRef);
       // A rejected registration must also retain the task state when retried.
@@ -715,18 +724,18 @@ for (const projectId of [null, "g-p-" + "a".repeat(32)]) {
       h.state.helloAcknowledged = true;
       h.tickInterval(3000);
       assert.equal(banner.textContent, text);
-      assert.equal(banner.style.background, expectedColor);
+      assert.equal(orb.style.getPropertyValue("--relay-color"), expectedColor);
     }
     await h.message({ type: "clear-inflight", taskId: "first-task", expectedSession: managed.sessionRef });
     assert.match(banner.textContent, /^Relay:/);
-    assert.equal(banner.style.background, idleColor);
+    assert.equal(orb.style.getPropertyValue("--relay-color"), idleColor);
     // The active task belongs to its conversation, not a later manual navigation.
     h.seedInflight({ taskId: "first-task", session: managed.sessionRef, phase: "accepted" });
     await h.message({ type: "update-banner", text: "Waiting for reply", color: "#3498db" });
     h.state.pathname = "/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
     h.tickInterval(3000);
     assert.match(banner.textContent, /^Relay: aaaaaaaa/);
-    assert.equal(banner.style.background, idleColor);
+    assert.equal(orb.style.getPropertyValue("--relay-color"), idleColor);
     await h.dom!.happyDOM.close();
   });
 }

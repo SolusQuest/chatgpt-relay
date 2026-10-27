@@ -644,26 +644,16 @@
     return sid;
   }
 
-  // ── banner ──
-  const banner = document.createElement("div");
-  banner.style.cssText = `
-    position: fixed; top: 0; left: 50%; transform: translateX(-50%);
-    background: #10a37f; color: white; padding: 4px 16px;
-    border-radius: 0 0 8px 8px; font-size: 13px; z-index: 999999;
-    font-family: monospace; box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-    pointer-events: none;
-  `;
+  // Status display; task lifecycle remains independent of the widget.
+  const statusWidget = globalThis.GptRelayStatus.create({ document, window, storage: sessionStorage });
   function updateBanner(text, color) {
-    banner.textContent = text;
-    banner.style.background = color || "#10a37f";
-  }
-  function attachBanner() {
-    if (!document.body) return;
-    if (!banner.isConnected) document.body.appendChild(banner);
+    const session = getSessionId();
+    const inflight = readInflight();
+    statusWidget.update(text, color || "#10a37f", {
+      session, taskId: inflight?.session === session ? inflight.taskId : null,
+    });
   }
   updateBanner(`Relay: ${getSessionId().slice(0, 8)}…`);
-  if (document.body) attachBanner();
-  else document.addEventListener("DOMContentLoaded", attachBanner);
 
   // In-flight state that survives page refresh.
   function readInflight() {

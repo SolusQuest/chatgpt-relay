@@ -27,6 +27,7 @@
       ],
       "js": [
         "effort-controls.js",
+        "status-widget.js",
         "content-script.js"
       ],
       "run_at": "document_idle",

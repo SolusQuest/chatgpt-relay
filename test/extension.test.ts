@@ -42,6 +42,14 @@ test("content-script.js parses as script", () => {
   new vm.Script(src, { filename: "content-script.js" });
 });
 
+test("status widget loads before the content script and parses as a script", () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(EXT, "manifest.json"), "utf8"));
+  const scripts = manifest.content_scripts[0].js;
+  assert.ok(scripts.indexOf("status-widget.js") >= 0);
+  assert.ok(scripts.indexOf("status-widget.js") < scripts.indexOf("content-script.js"));
+  new vm.Script(fs.readFileSync(path.join(EXT, "status-widget.js"), "utf8"));
+});
+
 test("service-worker.js parses when imports stripped", () => {
   const src = fs.readFileSync(path.join(EXT, "service-worker.js"), "utf8");
   const stripped = src.replace(/^import[^;]+;$/gm, "// stripped import");

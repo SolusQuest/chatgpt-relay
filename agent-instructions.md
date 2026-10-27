@@ -121,7 +121,7 @@ Controls return operation IDs immediately, also printed before submission on std
 | Signal | Action |
 |---|---|
 | Health fails | Ask user to start `gpt-relay start` |
-| Supplied session absent | Ask user to open that conversation/confirm Relay banner |
+| Supplied session absent | Ask user to open that conversation/confirm Relay status button |
 | Paused/captcha/rate limited | Report `pauseReason`; stop submission, no automatic retry |
 | Client wait timeout | Preserve task ID; `show`/`resume`, no resubmission |
 | `recovering` | Original request may complete; observe same task |

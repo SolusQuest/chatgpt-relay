@@ -11,7 +11,7 @@ Project discovery uses visible DOM entries in open ChatGPT tabs, including class
 2. Enable **Developer mode**.
 3. Select **Load unpacked** and choose the repository's `extension/` directory.
 4. Open or refresh `https://chatgpt.com/`.
-5. Confirm that a green `Relay: <session-id>` banner appears.
+5. Confirm that the Relay floating status button appears near the lower-right corner. Click it to inspect the session and task status.
 6. Select the extension icon to inspect relay health, sessions, and recent
    tasks.
 
@@ -29,6 +29,12 @@ Project discovery uses visible DOM entries in open ChatGPT tabs, including class
 - Windows can overlap, remain small, or stay on a secondary display.
 - If fully occluded windows are still throttled, launch Chromium with
   `--disable-features=CalculateNativeWinOcclusion`.
+
+## In-page status
+
+The floating Relay button replaces the top banner. Its indicator is green when idle, blue while waiting for a reply, orange while submitting or recovering, gray while offline, and red for reported errors. Active work also has a subtle animated ring, disabled when reduced motion is preferred. Click to expand the current status and session/task identifiers; click outside, use the close button, or press Escape to collapse it.
+
+Drag the button to move it, or focus it and use the arrow keys (Shift for larger steps). A drag does not expand the panel. Position is saved in the current tab's session storage and restored after refresh; window resizing keeps the control and panel within the viewport. Styles are isolated in a shadow root. The widget does not read or edit the composer or add any task controls.
 
 ## Popup
 
