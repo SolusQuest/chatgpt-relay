@@ -35,6 +35,30 @@ test("diagnostics distinguish missing, ambiguous and stale pages without leaking
   } finally { db.close(); }
 });
 
+test("conversation blocks remain visible to inspect and doctor without forwarding arbitrary page data", () => {
+  const db = openDatabase(":memory:");
+  try {
+    const store = new TaskStore(db, loadConfig());
+    const diagnostics = new SessionDiagnostics(db, store);
+    store.touchSession("blocked");
+    const report = { owner: "edge", tabId: 1, session: "blocked", protocol: 1,
+      capabilities: { composer: true }, ready: false, reason: "conversation_blocked",
+      block: { code: "conversation_blocked", text: "会話の上限に達しました。", draft: "PRIVATE" } };
+    diagnostics.report(report);
+    assert.deepEqual(diagnostics.inspect("blocked")!.page.block,
+      { code: "conversation_blocked", message: report.block.text });
+    assert.ok(!JSON.stringify(diagnostics.inspect("blocked")).includes("PRIVATE"));
+    assert.equal(diagnostics.doctor("blocked").status, "attention");
+    assert.equal(diagnostics.doctor("blocked").checks[0]!.code, "conversation_blocked");
+    assert.equal(diagnostics.doctor("blocked").checks[0]!.block.message, report.block.text);
+    diagnostics.report({ ...report, block: { code: "arbitrary", text: "PRIVATE" } });
+    assert.equal(diagnostics.inspect("blocked")!.page.block, null);
+    diagnostics.report({ ...report, ready: true, reason: null, block: null });
+    assert.equal(diagnostics.doctor("blocked").status, "ok");
+    assert.equal(diagnostics.inspect("blocked", Date.now() + SNAPSHOT_TTL_MS + 1)!.page, null);
+  } finally { db.close(); }
+});
+
 test('unbound creation diagnostics match only the owned tab, including before the first send', () => {
   const db = openDatabase(':memory:');
   try {

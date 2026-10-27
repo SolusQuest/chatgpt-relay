@@ -201,6 +201,32 @@ test("session pause fails in-flight tasks", async () => {
   assert.match(r.json.error ?? "", /captcha/);
 });
 
+test("conversation blocks are observable in diagnostics, task results and rejected submissions", async () => {
+  const session = "conversation-blocked";
+  const first = await post("/v1/tasks", { session, text: "original" });
+  const second = await post("/v1/tasks", { session, text: "queued" });
+  await get(`/internal/next_task?session=${session}`);
+  await post(`/internal/tasks/${first.json.taskId}/progress`, { phase: "send_attempted" });
+  const report = await post("/internal/session-snapshots", { owner: "browser", tabId: 7, session, protocol: 1,
+    ready: false, reason: "conversation_blocked", capabilities: { composer: true },
+    block: { code: "conversation_blocked", text: "你已达到此对话的长度上限" } });
+  assert.equal(report.status, 200);
+  assert.equal((await get(`/v1/sessions/${session}/inspect`)).json.page.block.code, "conversation_blocked");
+  assert.equal((await get(`/v1/doctor?session=${session}`)).json.status, "attention");
+  await post(`/internal/sessions/${session}/status`, { paused: true, reason: "conversation_blocked: 你已达到此对话的长度上限" });
+  for (const id of [first.json.taskId, second.json.taskId]) {
+    const task = (await get(`/v1/tasks/${id}`)).json;
+    assert.equal(task.status, "failed");
+    assert.equal(task.errorInfo.code, "conversation_blocked");
+  }
+  const sent = (await get(`/v1/tasks/${first.json.taskId}`)).json;
+  assert.equal(sent.errorInfo.safeToResubmit, false);
+  const blocked = await post("/v1/tasks", { session, text: "must not send" });
+  assert.equal(blocked.status, 409);
+  assert.equal(blocked.json.error, "session_paused");
+  assert.equal(blocked.json.errorInfo.code, "conversation_blocked");
+});
+
 test("internal attachment pause can preserve queued successors", async () => {
   const first = await post("/v1/tasks", { session: "attachment-pause", text: "upload" });
   const second = await post("/v1/tasks", { session: "attachment-pause", text: "next" });

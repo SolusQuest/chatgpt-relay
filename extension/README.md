@@ -107,6 +107,7 @@ Agent -> POST /v1/tasks -> Relay server (Express + SQLite)
 | Service worker sleeps | Service worker | Loads `pending_replies` at the next alarm and resumes sampling |
 | Extension or browser restarts | Service worker reconciliation | Restores the durable send fence before claiming more work and removes terminal orphan records |
 | Network changes | Content script | Observes connectivity and repeated request failures and reloads when needed |
+| Conversation length limit or another turn error | Content script and service worker | Detects a visible danger alert outside message content in the latest turn, reports `conversation_blocked` regardless of language, and pauses dispatch without resending |
 
 The browser path provides at-most-once automatic delivery. Once `send_attempted` has been durably recorded, an empty or still-hydrating DOM is treated as unknown evidence and never makes the task resendable. When the normal task lifetime plus active grace passes, the server exposes non-terminal `recovering` instead of immediately failing the task. A reply captured in that state completes normally and is stored as `reply`.
 

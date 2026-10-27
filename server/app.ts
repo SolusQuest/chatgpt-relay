@@ -41,7 +41,7 @@ export function createApp(config: Config): AppHandle {
     const json = res.json.bind(res);
     res.json = ((body: any) => {
       if (res.statusCode >= 400 && typeof body?.error === "string")
-        body = { ...body, errorInfo: errorInfo(body.error) };
+        body = { ...body, errorInfo: errorInfo(body.error === "session_paused" && typeof body.message === "string" ? body.message : body.error) };
       return json(body);
     }) as typeof res.json;
     next();

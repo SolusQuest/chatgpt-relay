@@ -138,6 +138,7 @@
     const found = [];
     for (const sel of SELECTORS.safetyAlerts) {
       for (const el of document.querySelectorAll(sel)) {
+        if (isMessageContent(el)) continue;
         const text = getVisibleText(el);
         if (!text) continue;
         found.push(text);
@@ -147,12 +148,35 @@
   }
 
   function findSafetyBlock() {
+    const conversationBlock = findConversationBlock();
+    if (conversationBlock) return conversationBlock;
     for (const text of scanAlerts()) {
       for (const item of SAFETY_PATTERNS) {
         if (item.pattern.test(text)) {
           return { reason: item.reason, text: text.slice(0, 240).replace(/\s+/g, " ") };
         }
       }
+    }
+    return null;
+  }
+
+  function findConversationBlock() {
+    if (!routeConversation()) return null;
+    // The length-limit banner has no dedicated test ID or error code. In the
+    // current UI it is a danger alert outside the message body in the last
+    // conversation turn. Treat that structure as an error in every language;
+    // do not infer a specific cause from color or a localized button label.
+    const turns = Array.from(document.querySelectorAll(
+      '[data-content-search-turn-key], [data-testid^="conversation-turn-"]',
+    ));
+    const lastTurn = turns[turns.length - 1];
+    if (!lastTurn) return null;
+    for (const alert of lastTurn.querySelectorAll('aside[role="alert"]')) {
+      if (isMessageContent(alert) || !isVisible(alert)) continue;
+      const classes = (alert.getAttribute('class') ?? '').split(/\s+/);
+      if (!classes.includes('text-danger') && !classes.includes('text-token-text-error')) continue;
+      const text = getVisibleText(alert).replace(/\s+/g, ' ').slice(0, 240);
+      if (text) return { code: 'conversation_blocked', reason: 'Conversation error alert detected', text };
     }
     return null;
   }
@@ -291,6 +315,8 @@
         getComposerRoot(target.input) !== target.root || !isVisible(target.input)) {
       throw makeRelayError("submission_target_changed", "Submission conversation or composer changed");
     }
+    const block = findConversationBlock();
+    if (block) throw makeRelayError(block.code, block.code);
     if (checkPayload) {
       const attachments = queryComposerAll(target.root, SELECTORS.attachment);
       if (target.input.textContent !== target.text || attachments.length !== target.attachments.length ||
@@ -444,11 +470,14 @@
     const input = findInput();
     const composer = getComposerPayloadState(input);
     const conversationRoute = location.pathname.match(/\/c\/([a-f0-9-]+)/);
+    const block = findSafetyBlock();
     if (composer.clean) userOwnedComposer = false;
 
     let reason = null;
     if (!managedRouteMatches()) {
       reason = "creation-route-mismatch";
+    } else if (block) {
+      reason = block.code ?? "safety_blocked";
     } else if (document.readyState !== "complete") {
       reason = "document-loading";
     } else if (generating) {
@@ -471,6 +500,7 @@
         ready: false,
         observationReady: false,
         reason,
+        block,
         stableForMs: 0,
         generating,
         baseline,
@@ -504,6 +534,7 @@
       ready,
       observationReady,
       reason: draftReason ?? (ready ? null : "page-stabilizing"),
+      block: null,
       stableForMs,
       generating,
       baseline,
@@ -1147,7 +1178,7 @@
             }
             const block = findSafetyBlock();
             if (block) {
-              sendSnapshot({ status: "safety", reason: block.reason });
+              sendSnapshot({ status: "safety", code: block.code, reason: block.reason });
               return;
             }
             const readiness = getPageReadiness();
@@ -1325,7 +1356,11 @@
           sendResponse({});
         } else if (msg.type === "run-task") {
           const block = findSafetyBlock();
-          if (block) throw new Error(`safety: ${block.reason}`);
+          if (block) {
+            sendResponse({ error: block.code ?? `safety: ${block.reason}`,
+              errorCode: block.code ?? null, submissionState: "not-submitted" });
+            return;
+          }
           const creation = msg.initializeComposer ? initialCreation() : null;
           if (msg.initializeComposer && (!creation || creation.initialTaskId !== msg.taskId ||
               creation.sessionRef !== msg.expectedSession || msg.initializeComposer.token !== creation.token ||
@@ -1511,7 +1546,10 @@
           lastReportedPath = "";
         }
       });
-    updateBanner(`Relay: ${sid.slice(0, 8)}…`);
+    // The first Send changes the URL before/while the worker binds the new
+    // conversation. Registration must preserve that task's submitting/waiting
+    // banner; a different conversation still gets its own idle banner.
+    if (readInflight()?.session !== sid) updateBanner(`Relay: ${sid.slice(0, 8)}…`);
   }
   reportSid();
   chrome.runtime.sendMessage({ type: "get-managed-session" }).then(response => {

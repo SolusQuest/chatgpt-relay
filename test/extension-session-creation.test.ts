@@ -160,14 +160,62 @@ test("snapshot reason distinguishes ready pages from unreachable pages", async (
     httpJson=async(method,url,body)=>{reports.push(body);return {};};
     getPageState=async()=>({session:'session',ready:true,generating:false,composerClean:true,reason:null});
     await reportSessionSnapshots();
+    getPageState=async()=>({session:'session',ready:false,reason:'conversation_blocked',
+      block:{code:'conversation_blocked',text:'会話の上限'}});
+    await reportSessionSnapshots();
     getPageState=async()=>{throw new Error('unreachable');};
     await reportSessionSnapshots();
     return reports;
   })()`, w.context);
   assert.equal(reports[0].ready, true);
   assert.equal(reports[0].reason, null);
-  assert.equal(reports[1].ready, null);
-  assert.equal(reports[1].reason, "page_unreachable");
+  assert.equal(reports[1].block.code, "conversation_blocked");
+  assert.equal(reports[1].block.text, "会話の上限");
+  assert.equal(reports[2].ready, null);
+  assert.equal(reports[2].reason, "page_unreachable");
+  assert.equal(reports[2].block, null);
+});
+
+test("a conversation error pauses dispatch before claiming or sending another task", async () => {
+  const w = await worker("opening", true);
+  const calls = await vm.runInContext(`(async()=>{
+    const calls=[];
+    tabSessionCache.set(7,'session');
+    sendTabMessage=async(tab,msg)=>{
+      calls.push({type:msg.type});
+      if(msg.type!=='check-safety') throw new Error('must not send');
+      return {block:{code:'conversation_blocked',reason:'Conversation error alert detected',text:'会話の上限'}};
+    };
+    httpJson=async(method,path,body)=>{calls.push({path,body});return {};};
+    await startDispatchLoop('session',7);
+    return calls;
+  })()`, w.context);
+  const pause = calls.find((call: any) => call.path?.endsWith('/status'));
+  assert.equal(pause.body.paused, true);
+  assert.equal(pause.body.reason, "conversation_blocked: 会話の上限");
+  assert.ok(!calls.some((call: any) => call.path?.startsWith('/internal/next_task')));
+  assert.ok(!calls.some((call: any) => call.type === 'run-task'));
+});
+
+test("a conversation error after Send fails the original task without resetting or resending", async () => {
+  const w = await worker("opening", true);
+  const calls = await vm.runInContext(`(async()=>{
+    const calls=[];
+    const rec={session:'session',tabId:7,submittedAt:Date.now(),deliveryPhase:'accepted',
+      submittedUserMessageId:'user',baseline:{},completionDeadlineAt:Date.now()+60000};
+    sendTabMessage=async(tab,msg)=>{
+      calls.push({type:msg.type});
+      if(msg.type==='clear-inflight') return {cleared:true};
+      if(msg.type!=='poll-reply') throw new Error('must not touch composer or Send');
+      return {status:'safety',code:'conversation_blocked',reason:'Conversation error alert detected'};
+    };
+    httpJson=async(method,path,body)=>{calls.push({path,body});return {};};
+    await pollOnePending('task',rec);
+    return calls;
+  })()`, w.context);
+  assert.equal(calls.find((call: any) => call.path?.endsWith('/status')).body.reason, "conversation_blocked");
+  assert.equal(calls.find((call: any) => call.path?.endsWith('/complete')).body.error, "conversation_blocked");
+  assert.ok(!calls.some((call: any) => ['run-task', 'reset-composer'].includes(call.type)));
 });
 
 test("reopened ref-created chats normalize page and worker identity before the send fence", async () => {

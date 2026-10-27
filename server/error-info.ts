@@ -2,13 +2,15 @@ import type { Task } from "./task-store.js";
 
 export function errorInfo(message: string, task?: Task) {
   let code = /^[a-z][a-z0-9_]+$/i.test(message) ? message.toLowerCase() : "operation_failed";
-  if (/composer.*changed|composer.*edit/i.test(message)) code = "composer_changed";
+  if (/^(?:(?:session paused|safety):\s*)?conversation_blocked(?::|$)/i.test(message)) code = "conversation_blocked";
+  else if (/composer.*changed|composer.*edit/i.test(message)) code = "composer_changed";
   else if (/^session paused|^safety:/i.test(message)) code = "session_paused";
   else if (/user stopped/i.test(message)) code = "generation_stopped";
   const deliveryState = !task ? "unknown" : task.reply !== null || task.lateReply !== null ? "replied" :
     task.submitAcknowledgedAt !== null || task.generatingSeenAt !== null ? "acknowledged" :
     task.sendAttemptedAt !== null ? "uncertain" : "not_attempted";
-  const nextAction = code === "effort_verification_unknown" ? "inspect_warning_or_reverify_effort_do_not_resend" : code === "effort_mismatch" ? "inspect_captured_reply_and_effort_do_not_resend" :
+  const nextAction = code === "conversation_blocked" ? "inspect_conversation_error_and_start_new_session_if_required" :
+    code === "effort_verification_unknown" ? "inspect_warning_or_reverify_effort_do_not_resend" : code === "effort_mismatch" ? "inspect_captured_reply_and_effort_do_not_resend" :
     code === "effort_unavailable" || code === "effort_dom_unsupported" || code === "effort_model_unsupported" ? "inspect_page_effort_options" :
     code === "composer_changed" || code === "composer_not_clean" ? "inspect_session_and_preserve_draft" :
     code === "page_identity_unavailable" || code === "reload_extension_and_page" ? "run_doctor" :

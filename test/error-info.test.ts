@@ -20,3 +20,12 @@ test("structured failures never confuse missing delivery evidence with safe repl
     assert.equal(info.nextAction, "inspect_trace_and_recover_original_task");
   } finally { db.close(); }
 });
+
+test("conversation errors retain a language-independent code through session pauses", () => {
+  for (const message of ["conversation_blocked", "session paused: conversation_blocked", "session paused: conversation_blocked: 会話の上限", "safety: conversation_blocked"]) {
+    const info = errorInfo(message);
+    assert.equal(info.code, "conversation_blocked");
+    assert.equal(info.nextAction, "inspect_conversation_error_and_start_new_session_if_required");
+    assert.equal(info.safeToResubmit, null);
+  }
+});

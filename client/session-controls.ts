@@ -31,7 +31,8 @@ export interface SessionInspection {
   pageStatus: "observed" | "ambiguous" | "unknown";
   activeTaskId: string | null; queuedTasks: number;
   server: { suspended: boolean; paused: boolean; pauseReason: string | null } | null;
-  page: { owner: string; tabId: number; ready: boolean | null; composerClean: boolean | null; generating: boolean | null; observedAt: number } | null;
+  page: { owner: string; tabId: number; ready: boolean | null; composerClean: boolean | null; generating: boolean | null; observedAt: number;
+    block?: { code: "conversation_blocked"; message: string | null } | null } | null;
   browser: { status: "observed" | "loading" | "script_unreachable" | "tab_missing" | "ambiguous" | "instance_stale" | "unknown";
     tabs: (BrowserInstanceView["tabs"][number] & { instanceId: string; generation: number })[];
     instances: Omit<BrowserInstanceView, "tabs">[] };

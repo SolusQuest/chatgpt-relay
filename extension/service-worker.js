@@ -554,6 +554,7 @@ async function reportSessionSnapshots() {
         version: chrome.runtime.getManifest?.().version ?? null,
         ready: state?.ready ?? null, generating: state?.generating ?? null,
         composerClean: state?.composerClean ?? null, reason: state ? state.reason ?? null : "page_unreachable",
+        block: state?.block ?? null,
         capabilities: state?.capabilities,
       }, 5000);
     }));
@@ -1272,7 +1273,7 @@ async function startDispatchLoop(session, tabId) {
       } catch { /* content script gone */ }
       if (safety) {
         await httpJson("POST", `/internal/sessions/${encodeURIComponent(session)}/status`, {
-          paused: true, reason: `${safety.reason}: ${safety.text}`,
+          paused: true, reason: `${safety.code ?? safety.reason}: ${safety.text}`,
         }).catch(() => {});
         console.log("[relay sw] dispatch loop exit: safety", session.slice(0, 8), safety.reason);
         break;
@@ -1747,10 +1748,10 @@ async function pollOnePendingSnapshot(taskId, rec) {
   if (snap.status === "safety") {
     console.warn("[relay sw] pending hit safety", taskId, snap.reason);
     await httpJson("POST", `/internal/sessions/${encodeURIComponent(rec.session)}/status`, {
-      paused: true, reason: snap.reason ?? "safety",
+      paused: true, reason: snap.code === "conversation_blocked" ? snap.code : snap.reason ?? "safety",
     }).catch(() => {});
     // Fail the task so the agent can observe the problem.
-    await failPending(taskId, rec, `safety: ${snap.reason ?? "unknown"}`);
+    await failPending(taskId, rec, snap.code === "conversation_blocked" ? snap.code : `safety: ${snap.reason ?? "unknown"}`);
     return;
   }
 

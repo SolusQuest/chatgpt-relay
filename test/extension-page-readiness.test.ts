@@ -297,6 +297,70 @@ function modernMessage(role: "user" | "assistant", id: string, text: string, key
   return { unit, marker };
 }
 
+function conversationErrorPage(text: string) {
+  // Sanitized structure observed on a real length-limited Project conversation.
+  return `<main><div data-content-search-turn-key="fallback-turn-11">
+    <div data-chatgpt-search-unit-key="fallback-turn-11:0:user" data-chatgpt-search-message-ids="user-id">
+      <div data-user-message-bubble>Last prompt</div>
+    </div>
+    <div><aside class="border-text-danger/20 text-danger" role="alert">
+      <div>${text}</div><button type="button">↗</button>
+    </aside></div>
+  </div></main><form data-chatgpt-composer><div id="prompt-textarea" contenteditable="true">PRIVATE DRAFT</div></form>`;
+}
+
+for (const text of [
+  "你已达到此对话的长度上限，你可以开始新聊天以继续对话。",
+  "You have reached the maximum length for this conversation.",
+  "この会話の長さの上限に達しました。",
+  "لقد وصلت إلى الحد الأقصى لطول هذه المحادثة.",
+  "Unrecognized localized error",
+]) {
+  test(`conversation error detection is independent of UI language: ${text}`, async () => {
+    const h = createHarness({ html: conversationErrorPage(text) });
+    h.state.readyState = "complete";
+    const page = await h.pageState();
+    assert.equal(page.ready, false);
+    assert.equal(page.reason, "conversation_blocked");
+    assert.equal((page.block as any).code, "conversation_blocked");
+    assert.ok((page.block as any).text.includes(text));
+    const safety = await h.message({ type: "check-safety" });
+    assert.equal((safety.block as any).code, "conversation_blocked");
+    const poll = await h.pollReply({});
+    assert.equal(poll.status, "safety");
+    assert.equal(poll.code, "conversation_blocked");
+    const run = await h.message({ type: "run-task", taskId: "blocked", text: "must not send" });
+    assert.equal(run.errorCode, "conversation_blocked");
+    assert.equal(run.submissionState, "not-submitted");
+    assert.equal(h.dom!.document.querySelector("#prompt-textarea")!.textContent, "PRIVATE DRAFT");
+    assert.ok(!h.sentMessages.some((m: any) => m.type === "send-attempted"));
+    await h.dom!.happyDOM.close();
+  });
+}
+
+for (const mode of ["historical", "quoted-user", "quoted-assistant", "hidden", "non-danger", "unrelated", "new-chat"]) {
+  test(`conversation error detection ignores ${mode} alerts`, async () => {
+    const h = createHarness({ html: conversationErrorPage("Localized error") });
+    const doc = h.dom!.document;
+    const alert = doc.querySelector("aside")!;
+    const turn = doc.querySelector("[data-content-search-turn-key]")!;
+    if (mode === "historical") turn.insertAdjacentHTML("afterend", '<div data-content-search-turn-key="next"><div data-message-author-role="assistant">Later answer</div></div>');
+    if (mode === "quoted-user") doc.querySelector("[data-user-message-bubble]")!.appendChild(alert);
+    if (mode === "quoted-assistant") {
+      const message = doc.createElement("div");
+      message.setAttribute("data-message-author-role", "assistant");
+      turn.appendChild(message); message.appendChild(alert);
+    }
+    if (mode === "hidden") Object.defineProperty(alert, "getBoundingClientRect", { value: () => ({ width: 0, height: 0 }) });
+    if (mode === "non-danger") alert.className = "text-default";
+    if (mode === "unrelated") doc.body.appendChild(alert);
+    if (mode === "new-chat") h.state.pathname = "/";
+    assert.equal((await h.message({ type: "check-safety" })).block, null);
+    assert.equal((await h.pageState()).block, null);
+    await h.dom!.happyDOM.close();
+  });
+}
+
 test("close preflight rejects changed documents, drafts and local in-flight work", async () => {
   const h = createHarness();
   h.state.readyState = "complete";
@@ -618,6 +682,54 @@ test("session registration retries after the worker rejects a hello", async () =
   assert.equal((harness.sentMessages.at(-1) as { session: string }).session,
     "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
 });
+
+for (const projectId of [null, "g-p-" + "a".repeat(32)]) {
+  test(`first-message registration preserves the active banner (project: ${!!projectId})`, async () => {
+    const managed = { sessionRef: "sr_banner", owner: "browser", token: "token", projectId, initialTaskId: "first-task" };
+    const h = createHarness({ managed, html: "<main></main>" });
+    const banner = h.dom!.document.body.lastElementChild! as any;
+    const idleColor = banner.style.background;
+    const conversationId = "6ac0da0c-f304-83e8-ac0f-25235ca1d760";
+    h.state.pathname = projectId ? `/g/${projectId}/project` : "/";
+    h.tickInterval(3000);
+    for (const [phase, text, color] of [
+      ["preparing", "Submitting: first-ta…", "#e67e22"],
+      ["accepted", "Waiting for reply: first-ta…", "#3498db"],
+    ]) {
+      h.seedInflight({ taskId: "first-task", session: managed.sessionRef, phase });
+      await h.message({ type: "update-banner", text, color });
+      const expectedColor = banner.style.background;
+      // Simulate the SPA URL change and worker binding after the first Send.
+      h.state.pathname = projectId ? `/g/${projectId}/c/${conversationId}` : `/c/${conversationId}`;
+      h.tickInterval(3000);
+      await h.message({ type: "configure-session", managed: { ...managed, boundConversation: conversationId } });
+      assert.equal(banner.textContent, text);
+      assert.equal(banner.style.background, expectedColor);
+      assert.equal((h.sentMessages.at(-1) as any).conversationId, conversationId);
+      assert.equal((h.sentMessages.at(-1) as any).session, managed.sessionRef);
+      // A rejected registration must also retain the task state when retried.
+      h.state.helloAcknowledged = false;
+      h.state.pathname += "/";
+      h.tickInterval(3000);
+      await Promise.resolve();
+      h.state.helloAcknowledged = true;
+      h.tickInterval(3000);
+      assert.equal(banner.textContent, text);
+      assert.equal(banner.style.background, expectedColor);
+    }
+    await h.message({ type: "clear-inflight", taskId: "first-task", expectedSession: managed.sessionRef });
+    assert.match(banner.textContent, /^Relay:/);
+    assert.equal(banner.style.background, idleColor);
+    // The active task belongs to its conversation, not a later manual navigation.
+    h.seedInflight({ taskId: "first-task", session: managed.sessionRef, phase: "accepted" });
+    await h.message({ type: "update-banner", text: "Waiting for reply", color: "#3498db" });
+    h.state.pathname = "/c/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    h.tickInterval(3000);
+    assert.match(banner.textContent, /^Relay: aaaaaaaa/);
+    assert.equal(banner.style.background, idleColor);
+    await h.dom!.happyDOM.close();
+  });
+}
 
 test("refreshed conversation is not ready until history and composer stabilize", async () => {
   const harness = createHarness();

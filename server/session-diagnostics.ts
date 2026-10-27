@@ -34,6 +34,8 @@ export class SessionDiagnostics {
       capabilities: { composer: bool(body.capabilities?.composer), effort: bool(body.capabilities?.effort),
         userMessages: bool(body.capabilities?.userMessages), assistantMessages: bool(body.capabilities?.assistantMessages) },
       ready: bool(body.ready), generating: bool(body.generating), composerClean: bool(body.composerClean),
+      block: body.block?.code === "conversation_blocked" ? { code: "conversation_blocked",
+        message: typeof body.block.text === "string" ? body.block.text.slice(0, 240) : null } : null,
       reason: typeof body.reason === "string" ? body.reason.slice(0, 100) : null };
     this.db.prepare(`INSERT INTO session_snapshots VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(owner, tab) DO UPDATE SET session=excluded.session,
@@ -81,9 +83,11 @@ export class SessionDiagnostics {
     const checks = sessions.map(s => ({ session: s.session, pageStatus: s.pageStatus,
       extensionVersion: s.page?.version ?? null, protocolCompatible: s.page ? s.page.protocol === 1 : null,
       capabilities: s.page?.capabilities ?? null,
+      block: s.page?.block ?? null,
       browser: s.browser,
       code: s.browser.status !== "unknown" && s.browser.status !== "observed" ? `browser_${s.browser.status}` :
         s.pageStatus !== "observed" ? `page_${s.pageStatus}` : s.page.protocol !== 1 ? "reload_extension_and_page" :
+        s.page.block?.code === "conversation_blocked" ? "conversation_blocked" :
         s.page.capabilities?.composer !== true ? "composer_unavailable" : "ok" }));
     return { server: { reachable: true, version: serverVersion, controlProtocol: 1 },
       status: checks.length > 0 && checks.every(c => c.code === "ok") ? "ok" : "attention",
