@@ -17,6 +17,8 @@ const pendingDir = () => process.env.GPT_RELAY_PENDING_DIR ??
 const TERMINAL = new Set(["done", "failed", "cancelled", "expired"]);
 
 export interface ReviewOptions {
+  stateless?: boolean;
+  onRecovery?: (identity: TaskRecovery) => void;
   session?: string;
   sessionRef?: string;
   newSession?: boolean;
@@ -44,6 +46,7 @@ export interface TaskErrorInfo {
 }
 
 export interface ReviewResult {
+  recovery?: TaskRecovery;
   errorInfo?: TaskErrorInfo | null;
   effortPolicy?: import("../shared/effort.js").EffortPolicy | null;
   effortSelection?: import("../shared/effort.js").EffortSelection | null;
@@ -55,6 +58,27 @@ export interface ReviewResult {
   error: string | null;
   submissionState: TaskView["submissionState"];
   elapsedMs: number;
+}
+
+/** Keep this identity in the caller's context when local persistence is disabled. */
+export interface TaskRecovery {
+  baseUrl: string;
+  serverId: string;
+  session?: string;
+  sessionRef?: string;
+  clientRequestId?: string;
+  taskId: string | null;
+}
+
+export class StatelessRequestError extends Error {
+  constructor(cause: unknown, public recovery: TaskRecovery) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause });
+  }
+}
+
+export interface SubmittedReview {
+  taskId: string; status: string; sessionRef?: string; clientRequestId: string;
+  reply?: undefined; lateReply?: undefined; error?: undefined; recovery?: TaskRecovery;
 }
 
 export interface TaskProgressView {
@@ -227,7 +251,7 @@ export async function waitForTask(
 export async function review(
   text: string,
   opts: ReviewOptions,
-): Promise<ReviewResult | { taskId: string; status: string; sessionRef?: string; clientRequestId: string; reply?: undefined; lateReply?: undefined; error?: undefined }> {
+): Promise<ReviewResult | SubmittedReview> {
   const started = Date.now();
   if (Boolean(opts.session) === Boolean(opts.sessionRef)) throw new Error("provide exactly one of session or sessionRef");
   if (opts.newSession && (!opts.sessionRef || !Object.hasOwn(opts, "projectId"))) {
@@ -236,11 +260,14 @@ export async function review(
   if (opts.clientRequestId !== undefined && (!opts.clientRequestId.trim() || opts.clientRequestId.length > 128)) {
     throw new Error("invalid clientRequestId");
   }
+  if (opts.stateless && !opts.clientRequestId) throw new BackendError("invalid_arguments", "stateless review requires an explicit clientRequestId (--cri)");
   opts = { ...opts, clientRequestId: opts.clientRequestId ?? randomUUID() };
   const effortPolicy = parseEffortPolicy(opts);
   if (effortPolicy && !opts.newSession) throw new Error("effort is set using session controls for existing sessions");
-  const backend = await probeBackend(opts.baseUrl ?? DEFAULT_BASE, { expectedId: opts.serverId, allowLegacy: true });
+  const backend = await probeBackend(opts.baseUrl ?? DEFAULT_BASE, { expectedId: opts.serverId,
+    allowLegacy: !opts.stateless, persistDiagnostics: !opts.stateless });
   opts = { ...opts, baseUrl: backend.baseUrl, serverId: backend.serverId };
+  if (opts.stateless) return reviewStateless(text, opts, started);
   const identity = opts.sessionRef ?? opts.session!;
   const requestHash = createHash("sha256").update(JSON.stringify({ text, project: opts.projectId,
     newSession: !!opts.newSession, timeout: opts.taskTimeoutMs, ...(effortPolicy ? { effortPolicy } : {}) })).digest("hex");
@@ -310,6 +337,44 @@ export async function review(
     // Keep the pending record so a later resume can recover the task.
     throw err;
   }
+}
+
+async function reviewStateless(text: string, opts: ReviewOptions, started: number): Promise<ReviewResult | SubmittedReview> {
+  let recovery: TaskRecovery = { baseUrl: opts.baseUrl!, serverId: opts.serverId!,
+    ...(opts.sessionRef ? { sessionRef: opts.sessionRef } : { session: opts.session }),
+    clientRequestId: opts.clientRequestId!, taskId: null };
+  try {
+    // Publish the lookup key before the mutating request, including when its response is lost.
+    opts.onRecovery?.(recovery);
+    const submitted = await submitTask(text, opts);
+    recovery = { ...recovery, taskId: submitted.taskId };
+    opts.onRecovery?.(recovery);
+    if (submitted.encodingWarning) process.stderr.write(`[gpt-relay] WARNING: server flagged suspicious encoding: ${submitted.encodingWarning}\n`);
+    if (submitted.encodingFixed) process.stderr.write(`[gpt-relay] note: server auto-fixed encoding (${submitted.encodingFixed})\n`);
+    if (opts.wait === false) return { taskId: submitted.taskId, status: submitted.status,
+      sessionRef: opts.sessionRef, clientRequestId: opts.clientRequestId!, recovery };
+    const t = await waitForTask(submitted.taskId, { baseUrl: opts.baseUrl, serverId: opts.serverId,
+      timeoutMs: opts.waitTimeoutMs ?? opts.timeoutMs, waitChunkMs: opts.waitChunkMs, signal: opts.signal });
+    return { taskId: t.taskId, status: t.status as ReviewResult["status"], reply: t.reply, lateReply: t.lateReply,
+      error: t.error, errorInfo: t.errorInfo, effortPolicy: t.effortPolicy, effortSelection: t.effortSelection,
+      effortVerification: t.effortVerification, submissionState: t.submissionState, elapsedMs: Date.now() - started, recovery };
+  } catch (error) { throw new StatelessRequestError(error, recovery); }
+}
+
+export async function findTaskByRequest(opts: { session?: string; sessionRef?: string; clientRequestId: string;
+  baseUrl?: string; serverId?: string }): Promise<TaskView | null> {
+  if (Boolean(opts.session) === Boolean(opts.sessionRef) || !opts.clientRequestId.trim() || opts.clientRequestId.length > 128)
+    throw new BackendError("invalid_arguments", "request lookup requires one session selector and a nonempty --cri (at most 128 characters)");
+  const query = new URLSearchParams({ clientRequestId: opts.clientRequestId, limit: "2" });
+  query.set(opts.sessionRef ? "sessionRef" : "session", (opts.sessionRef ?? opts.session)!);
+  const result = await http.get<{ tasks: TaskView[] }>(`/v1/tasks?${query}`, {
+    baseUrl: opts.baseUrl ?? DEFAULT_BASE, serverId: opts.serverId });
+  if (result.tasks.length > 1) throw new BackendError("request_ambiguous", "request matched multiple tasks; inspect the original session");
+  const task = result.tasks[0];
+  if (task && (task.clientRequestId !== opts.clientRequestId ||
+      ![task.session, task.sessionRef, task.conversationId].includes(opts.sessionRef ?? opts.session)))
+    throw new BackendError("task_identity_mismatch", "request lookup returned a different task identity");
+  return task ?? null;
 }
 
 export async function listSessions(baseUrl = DEFAULT_BASE, serverId?: string): Promise<SessionView[]> {

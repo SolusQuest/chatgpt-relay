@@ -17,7 +17,7 @@ export function normalizeUrl(address: string): string {
   return url.origin;
 }
 
-export async function probeBackend(address: string, options: { expectedId?: string; allowLegacy?: boolean; timeoutMs?: number; maxAttempts?: number } = {}): Promise<Backend> {
+export async function probeBackend(address: string, options: { expectedId?: string; allowLegacy?: boolean; timeoutMs?: number; maxAttempts?: number; persistDiagnostics?: boolean } = {}): Promise<Backend> {
   const baseUrl = normalizeUrl(address);
   const timeoutMs = options.timeoutMs ?? 1500;
   // Discovery and the opportunistic legacy check opt out to retain their short
@@ -26,12 +26,12 @@ export async function probeBackend(address: string, options: { expectedId?: stri
   const probe = createProbe(baseUrl), started = performance.now();
   try {
     let info: ServerInfo;
-    try { info = await probeGet<ServerInfo>(probe, "/v1/server", timeoutMs, maxAttempts); }
+    try { info = await probeGet<ServerInfo>(probe, "/v1/server", timeoutMs, maxAttempts, options.persistDiagnostics); }
     catch (error) {
       if (error instanceof HttpError && error.status === 404) {
         if (options.allowLegacy && !options.expectedId) {
           try {
-            const doctor = await probeGet<any>(probe, "/v1/doctor", timeoutMs, maxAttempts);
+            const doctor = await probeGet<any>(probe, "/v1/doctor", timeoutMs, maxAttempts, options.persistDiagnostics);
             if (typeof doctor?.server?.version === "string" && doctor.server.controlProtocol === 1 &&
                 Array.isArray(doctor.instances) && Array.isArray(doctor.checks)) {
               return { baseUrl, name: "Legacy Relay", version: doctor.server.version, legacy: true };

@@ -34,8 +34,9 @@ function describeError(error: unknown): NonNullable<ProbeAttempt["errors"]> {
 
 // Diagnostics must never turn a successful probe into a failure. Keep one rotated
 // file and omit response bodies, task text, headers and CLI arguments.
-function recordAttempt(probe: ProbeDiagnostics, attempt: ProbeAttempt): void {
+function recordAttempt(probe: ProbeDiagnostics, attempt: ProbeAttempt, persist: boolean): void {
   probe.attempts.push(attempt);
+  if (!persist) return;
   try {
     const dataDir = process.env.GPT_RELAY_DATA_DIR || path.join(os.homedir(), ".gpt-relay");
     const logDir = process.env.GPT_RELAY_LOG_DIR || path.join(dataDir, "logs");
@@ -55,7 +56,7 @@ export function createProbe(baseUrl: string): ProbeDiagnostics {
 }
 
 export async function probeGet<T>(probe: ProbeDiagnostics, requestPath: string, timeoutMs: number,
-  maxAttempts: number): Promise<T> {
+  maxAttempts: number, persist = true): Promise<T> {
   for (let attempt = 1; ; attempt++) {
     const timestamp = new Date().toISOString(), started = performance.now();
     let status: number | undefined;
@@ -63,7 +64,7 @@ export async function probeGet<T>(probe: ProbeDiagnostics, requestPath: string, 
       const result = await http.get<T>(requestPath, { baseUrl: probe.baseUrl, timeoutMs,
         onResponseStatus: value => { status = value; } });
       recordAttempt(probe, { timestamp, path: requestPath, attempt, timeoutMs,
-        elapsedMs: Math.round(performance.now() - started), status, outcome: "success" });
+        elapsedMs: Math.round(performance.now() - started), status, outcome: "success" }, persist);
       return result;
     } catch (error) {
       const errors = describeError(error);
@@ -71,7 +72,7 @@ export async function probeGet<T>(probe: ProbeDiagnostics, requestPath: string, 
         errors.some(item => item.name === "AbortError" || item.name === "TimeoutError" ||
           item.code !== undefined && TRANSIENT_CODES.has(item.code));
       recordAttempt(probe, { timestamp, path: requestPath, attempt, timeoutMs,
-        elapsedMs: Math.round(performance.now() - started), status, outcome: "failure", retryable, errors });
+        elapsedMs: Math.round(performance.now() - started), status, outcome: "failure", retryable, errors }, persist);
       if (!retryable || attempt >= maxAttempts) throw error;
     }
     await delay(200 * attempt);

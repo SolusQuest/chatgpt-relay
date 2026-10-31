@@ -45,7 +45,7 @@ export async function browseNetwork(localOnly: boolean, timeoutMs: number,
   });
 }
 
-export async function verifyCandidates(candidates: Candidate[]): Promise<Backend[]> {
+export async function verifyCandidates(candidates: Candidate[], options: { persistDiagnostics?: boolean } = {}): Promise<Backend[]> {
   const unique = new Map<string, Candidate>();
   for (const candidate of candidates) {
     try {
@@ -59,7 +59,7 @@ export async function verifyCandidates(candidates: Candidate[]): Promise<Backend
     while (index < work.length) {
       const candidate = work[index++]!;
       try {
-        const backend = await probeBackend(candidate.baseUrl, { expectedId: candidate.serverId, timeoutMs: 500, maxAttempts: 1 });
+        const backend = await probeBackend(candidate.baseUrl, { expectedId: candidate.serverId, timeoutMs: 500, maxAttempts: 1, ...options });
         const old = found.get(backend.serverId!);
         if (!old || backend.baseUrl.localeCompare(old.baseUrl) < 0) found.set(backend.serverId!, backend);
       } catch { /* Stale, unreachable and incompatible candidates are not selectable. */ }
@@ -68,7 +68,7 @@ export async function verifyCandidates(candidates: Candidate[]): Promise<Backend
   return [...found.values()].sort((a, b) => a.name.localeCompare(b.name) || a.baseUrl.localeCompare(b.baseUrl));
 }
 
-export async function discoverBackends(localOnly = false): Promise<Backend[]> {
+export async function discoverBackends(localOnly = false, options: { persistDiagnostics?: boolean } = {}): Promise<Backend[]> {
   const candidates: Candidate[] = localRegistrations().filter(record => {
     try { return isLocalAddress(new URL(record.baseUrl).hostname); } catch { return false; }
   });
@@ -77,12 +77,12 @@ export async function discoverBackends(localOnly = false): Promise<Backend[]> {
     const window = Number.isFinite(configured) ? Math.max(100, Math.min(configured, 10000)) : 2000;
     try { candidates.push(...await browseNetwork(false, window)); }
     catch (error) {
-      const local = await verifyCandidates(candidates);
+      const local = await verifyCandidates(candidates, options);
       if (local.length) return local;
       throw error;
     }
   }
-  return verifyCandidates(candidates);
+  return verifyCandidates(candidates, options);
 }
 
 export function uniqueBackend(backends: Backend[]): Backend {

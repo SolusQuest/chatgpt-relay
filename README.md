@@ -192,6 +192,32 @@ Every probe request records its UTC timestamp, correlation ID, backend URL, requ
 
 The server stores a stable identity in its SQLite database, while the CLI stores binding configuration separately in `~/.gpt-relay/client.json`. Pending records remain in the CLI computer's pending directory and include the originating server identity. `resume` checks only the selected backend, retains other-backend and missing-task records, and never resubmits them. Use `resume --server <original-server>` to observe work on another backend. Identity follows the database when its address changes. Legacy records with a matching origin are migrated only after matching task evidence; records without an origin remain retained.
 
+### Stateless clients and workspace-only agents
+
+Use `--stateless` when the CLI must not access local pending records or write client configuration and probe logs. It requires an explicit backend (`--server`, `--local`, or `GPT_RELAY_URL`) or an existing binding that can be read; it never discovers and saves a binding automatically. The server still persists tasks normally. An explicitly requested `--output` file is supported and remains the caller's chosen write.
+
+Stateless review requires a caller-supplied `--cri`. Choose a unique key for each logical request and retain it with the backend identity and session. Retrying that same request must keep the same key, session and effective payload. It returns the original task; a changed payload conflicts. New conversations also retain their original `--session-ref` and explicit project choice.
+
+```bash
+gpt-relay review --stateless --server relay-host:8765 \
+  --session-ref sr_existing --cri review-round-1 --file review.md --json
+```
+
+Before submission, the CLI emits a JSON line on stderr containing `event: "recovery"` and the known `baseUrl`, `serverId`, session selector, `clientRequestId` and `taskId: null`. A second recovery line adds the task ID when acceptance is confirmed. JSON success output includes `recovery`; errors after submission starts include the known recovery identity even if the response was lost. `--json` stdout stays a single result, and text-mode stdout remains the reply. Stderr is a stream of diagnostic lines, not a single JSON document.
+
+Recover using server queries instead of local `resume`. Replace `SERVER_UUID` with `recovery.serverId`; `--server-id` rejects a different backend identity before querying or submitting. The following commands never submit a message:
+
+```bash
+gpt-relay tasks --stateless --server relay-host:8765 --server-id SERVER_UUID \
+  --session-ref sr_existing --cri review-round-1 --json
+gpt-relay wait --stateless --server relay-host:8765 --server-id SERVER_UUID \
+  --session-ref sr_existing --cri review-round-1 --wait-timeout 600000 --json
+# When taskId is already known:
+gpt-relay wait TASK_ID --stateless --server relay-host:8765 --server-id SERVER_UUID --json
+```
+
+`tasks --cri` requires a session selector. `wait` accepts either a task ID or a session selector plus `--cri`, and uses review's terminal/effort exit codes. Its timeout only ends this wait; it does not cancel or resubmit the task. An unresolved lookup does not authorize a new request key. `--stateless resume`, `bind` and `detect` are rejected; ordinary mode and its pending-based recovery remain unchanged. The JavaScript client accepts `review(text, { stateless: true, clientRequestId, ... })`, returns recovery metadata, and exposes it on `StatelessRequestError` after submission starts; `onRecovery` can retain the identity before the network mutation.
+
 Already running older servers remain usable through `GPT_RELAY_URL`, `--server`, or the legacy loopback fallback. Persisted binding and discovery require the new server identity API, activated when the server is next restarted. This change does not require an extension reload.
 
 The default listener stays on loopback. A LAN listener trusts computers that can reach it; server identity prevents accidental backend switching and is not authentication. See [trust boundaries](./SECURITY.md#trust-boundaries).

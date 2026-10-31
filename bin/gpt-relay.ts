@@ -14,6 +14,12 @@ import {
   listSessions,
   resumePending,
   review,
+  findTaskByRequest,
+  waitForTask,
+  StatelessRequestError,
+  type TaskRecovery,
+  type ReviewResult,
+  type SubmittedReview,
   type TaskView,
 } from "../client/agent-client.js";
 import { effortDetails, effortSummary, reviewExitCode } from "../client/task-output.js";
@@ -33,7 +39,14 @@ const TSX_LOADER = pathToFileURL(require.resolve("tsx")).href;
 const PORT = Number(process.env.GPT_RELAY_PORT ?? 8765);
 let BASE = process.env.GPT_RELAY_URL ?? `http://127.0.0.1:${PORT}`;
 let SERVER_ID: string | undefined;
+let STATELESS = false;
+let recovery: TaskRecovery | undefined;
 const output = new CliOutput();
+
+function publishRecovery(identity: TaskRecovery): void {
+  recovery = identity;
+  console.error(JSON.stringify({ event: "recovery", recovery: identity }));
+}
 
 async function cmdBind(args: string[], options: BackendOptions): Promise<number> {
   if (new Set(args).size !== args.length) throw new BackendError("invalid_arguments", "duplicate bind option");
@@ -185,6 +198,7 @@ async function cmdTasks(args: string[]): Promise<number> {
     else if (a === "--session-ref") q.set("sessionRef", args[++i] ?? "");
     else if (a === "--status") q.set("status", args[++i] ?? "");
     else if (a === "--last") q.set("limit", args[++i] ?? "20");
+    else if (a === "--cri") q.set("clientRequestId", args[++i] ?? "");
   }
   if (!q.has("limit")) q.set("limit", "20");
   const r = await http.get<{ tasks: TaskView[] }>(`/v1/tasks?${q}`, {
@@ -424,11 +438,16 @@ async function cmdReview(args: string[]): Promise<number> {
     newSession, effort, effortFallback,
     ...(newSession ? { projectId } : {}),
     baseUrl: BASE, serverId: SERVER_ID,
+    stateless: STATELESS, onRecovery: STATELESS ? publishRecovery : undefined,
     wait,
     ...(waitTimeoutMs !== undefined ? { waitTimeoutMs } : {}),
     ...(taskTimeoutMs !== undefined ? { taskTimeoutMs } : {}),
     ...(cri !== undefined ? { clientRequestId: cri } : {}),
   });
+  return printReviewResult(r, args);
+}
+
+function printReviewResult(r: ReviewResult | SubmittedReview, args: string[]): number {
   if (args.includes("--json")) {
     output.log(JSON.stringify(r));
     return r.reply !== undefined ? reviewExitCode(r) : 0;
@@ -443,6 +462,27 @@ async function cmdReview(args: string[]): Promise<number> {
   }
   output.log(JSON.stringify(r));
   return 0;
+}
+
+async function cmdWait(args: string[]): Promise<number> {
+  const value = (flag: string) => args.includes(flag) ? args[args.indexOf(flag) + 1] : undefined;
+  const started = Date.now();
+  let taskId = args[0]?.startsWith("--") ? undefined : args[0];
+  const session = value("--session"), sessionRef = value("--session-ref"), clientRequestId = value("--cri");
+  if (STATELESS) publishRecovery({ baseUrl: BASE, serverId: SERVER_ID!, session, sessionRef, clientRequestId, taskId: taskId ?? null });
+  if (!taskId) {
+    const task = await findTaskByRequest({ session, sessionRef, clientRequestId: clientRequestId!, baseUrl: BASE, serverId: SERVER_ID });
+    if (!task) throw new HttpError("no task found for this request; retain its identity and query again", 404, "request_not_found");
+    taskId = task.taskId;
+    if (STATELESS) publishRecovery({ ...recovery!, taskId });
+  }
+  const timeout = value("--wait-timeout") ?? value("--timeout");
+  const t = await waitForTask(taskId, { baseUrl: BASE, serverId: SERVER_ID,
+    ...(timeout ? { timeoutMs: Number(timeout) } : {}) });
+  return printReviewResult({ taskId: t.taskId, status: t.status as ReviewResult["status"], reply: t.reply,
+    lateReply: t.lateReply, error: t.error, errorInfo: t.errorInfo, submissionState: t.submissionState,
+    effortPolicy: t.effortPolicy, effortSelection: t.effortSelection, effortVerification: t.effortVerification,
+    elapsedMs: Date.now() - started, ...(STATELESS ? { recovery } : {}) }, args);
 }
 
 async function readAllStdin(): Promise<string> {
@@ -524,9 +564,12 @@ commands:
   tasks trace TASK_ID       read durable lifecycle events
   tasks recover|stop|reverify-effort TASK_ID [--operation-id ID]
   operations OPERATION_ID   read asynchronous control result
-  tasks [--session ID | --session-ref REF] [--status S] [--last N] [--json]
+  tasks [--session ID | --session-ref REF] [--cri KEY] [--status S] [--last N] [--json]
                            list recent tasks
   show <taskId> [--json]   show prompt, replies and effort verification
+  wait TASK_ID [--wait-timeout ms] [--json]
+  wait (--session ID | --session-ref REF) --cri KEY [--wait-timeout ms] [--json]
+                           observe an existing task until terminal; never submit
   cancel <taskId>          cancel a task
   resume [--json]          check pending tasks from previous run
   review --session ID (--text T | --stdin)
@@ -547,6 +590,13 @@ client backend options (temporary; mutually exclusive):
   priority: options > GPT_RELAY_URL > binding > discovery
   an unavailable selected server never causes automatic switching
 
+client recovery options:
+  --stateless              skip pending records, automatic binding and probe log files
+                           review requires --cri; resume/bind/detect are unavailable
+                           use an explicit backend or existing binding; --output remains explicit
+  --server-id <UUID>        require the backend identity from the original recovery output
+  stateless review/wait emit recovery JSON lines on stderr; --json stdout stays one result
+
 env:
   GPT_RELAY_HOST              server bind host (127.0.0.1)
   GPT_RELAY_PORT (${PORT})     server port
@@ -559,14 +609,17 @@ env:
 }
 
 async function dispatch(cmd: string | undefined, rest: string[], options: BackendOptions): Promise<number> {
+  STATELESS = options.stateless === true;
+  if (["bind", "detect"].includes(cmd ?? "") && (STATELESS || options.serverId))
+    throw new BackendError("invalid_arguments", "--stateless and --server-id apply to business commands; use --server or an existing binding");
   if (cmd === "bind") return await cmdBind(rest, options);
   if (cmd === "detect") return await cmdDetect(rest, options);
-  const business = ["health", "doctor", "sessions", "projects", "tasks", "operations", "show", "cancel", "resume", "review"];
+  const business = ["health", "doctor", "sessions", "projects", "tasks", "operations", "show", "cancel", "resume", "review", "wait"];
   if (business.includes(cmd ?? "")) {
-    validateBusinessArgs(cmd!, rest);
+    validateBusinessArgs(cmd!, rest, options);
     const backend = await resolveBackend(options);
     BASE = backend.baseUrl; SERVER_ID = backend.serverId;
-  } else if (options.server || options.local) throw new BackendError("invalid_arguments", "backend options apply to client commands, not start or help");
+  } else if (options.server || options.local || options.serverId || options.stateless) throw new BackendError("invalid_arguments", "backend options apply to client commands, not start or help");
   switch (cmd) {
     case "start":
       return await cmdStart(rest);
@@ -602,6 +655,8 @@ async function dispatch(cmd: string | undefined, rest: string[], options: Backen
       return await cmdResume(rest);
     case "review":
       return await cmdReview(rest);
+    case "wait":
+      return await cmdWait(rest);
     case undefined:
     case "-h":
     case "--help":
@@ -621,7 +676,7 @@ async function main(): Promise<number> {
     const parsed = parseGlobalOptions(process.argv.slice(2));
     [cmd, ...rest] = parsed.args;
     if (parsed.output !== undefined) {
-      if (!["bind", "detect", "health", "doctor", "sessions", "projects", "tasks", "operations", "show", "cancel", "resume", "review"].includes(cmd ?? "")) {
+      if (!["bind", "detect", "health", "doctor", "sessions", "projects", "tasks", "operations", "show", "cancel", "resume", "review", "wait"].includes(cmd ?? "")) {
         throw new BackendError("invalid_arguments", "--output applies only to client commands");
       }
       output.prepare(parsed.output);
@@ -630,12 +685,13 @@ async function main(): Promise<number> {
     output.commit(code);
     return code;
   } catch (err) {
+    if (err instanceof StatelessRequestError) { recovery = err.recovery; err = err.cause; }
     output.abort();
     const controlCommand = ["doctor", "operations"].includes(cmd ?? "") ||
       cmd === "sessions" && ["inspect", "suspend", "continue", "refresh", "open", "close", "effort"].includes(rest[0] ?? "") ||
       cmd === "tasks" && ["trace", "recover", "stop", "reverify-effort"].includes(rest[0] ?? "");
     if (err instanceof OutputWriteError) {
-      if (process.argv.includes("--json") || controlCommand) console.error(JSON.stringify({ error: err.code, message: err.message,
+      if (process.argv.includes("--json") || controlCommand) console.error(JSON.stringify({ error: err.code, message: err.message, recovery,
         errorInfo: { code: err.code, message: err.message, deliveryState: "unknown", safeToResubmit: null,
           nextAction: "inspect_operation_or_existing_task_before_retry" } }));
       else console.error(`error: ${err.code}: ${err.message}`);
@@ -643,7 +699,7 @@ async function main(): Promise<number> {
     }
     if (err instanceof BackendError) {
       const code = controlCommand && err.code === "invalid_arguments" ? "client_error" : err.code;
-      if (process.argv.includes("--json") || controlCommand) console.error(JSON.stringify({ error: code, message: err.message, candidates: err.candidates, probe: err.probe,
+      if (process.argv.includes("--json") || controlCommand) console.error(JSON.stringify({ error: code, message: err.message, candidates: err.candidates, probe: err.probe, recovery,
         errorInfo: { code, message: err.message, deliveryState: "unknown", safeToResubmit: null } }));
       else {
         console.error(`error: ${err.code}: ${err.message}`);
@@ -653,7 +709,7 @@ async function main(): Promise<number> {
       return !controlCommand && ["invalid_arguments", "invalid_backend"].includes(err.code) ? 64 : 1;
     }
     if (rest.includes("--json") || controlCommand) {
-      console.error(JSON.stringify({ error: err instanceof HttpError ? err.code : "client_error",
+      console.error(JSON.stringify({ error: err instanceof HttpError ? err.code : "client_error", recovery,
         errorInfo: err instanceof HttpError && err.errorInfo ? err.errorInfo : {
           code: "client_error", message: (err as Error).message, deliveryState: "unknown",
           safeToResubmit: null, nextAction: "inspect_operation_or_existing_task_before_retry" } }));

@@ -17,6 +17,13 @@ export function parseGlobalOptions(argv: string[]): { args: string[]; options: B
     } else if (arg === "--local") {
       if (options.local) throw new BackendError("invalid_arguments", "duplicate --local");
       options.local = true;
+    } else if (arg === "--stateless") {
+      if (options.stateless) throw new BackendError("invalid_arguments", "duplicate --stateless");
+      options.stateless = true;
+    } else if (arg === "--server-id") {
+      if (options.serverId !== undefined || !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(argv[i + 1] ?? ""))
+        throw new BackendError("invalid_arguments", "provide exactly one --server-id UUID");
+      options.serverId = argv[++i];
     } else {
       args.push(arg);
       if (VALUES.has(arg) && argv[i + 1] !== undefined) args.push(argv[++i]!);
@@ -26,7 +33,7 @@ export function parseGlobalOptions(argv: string[]): { args: string[]; options: B
   return { args, options, ...(output !== undefined ? { output } : {}) };
 }
 
-export function validateBusinessArgs(command: string, args: string[]): void {
+export function validateBusinessArgs(command: string, args: string[], options: BackendOptions = {}): void {
   let start = 0, flags: string[] = [], values: string[] = [];
   switch (command) {
     case "health": break;
@@ -44,7 +51,11 @@ export function validateBusinessArgs(command: string, args: string[]): void {
       if (["trace", "recover", "stop", "reverify-effort"].includes(args[0] ?? "")) {
         if (!args[1] || args[1].startsWith("--")) throw new BackendError("invalid_arguments", "tasks control requires a task ID");
         start = 2; if (args[0] !== "trace") values = ["--operation-id"];
-      } else values = ["--session", "--session-ref", "--status", "--last"];
+      } else values = ["--session", "--session-ref", "--status", "--last", "--cri"];
+      break;
+    case "wait":
+      if (args[0] && !args[0].startsWith("--")) start = 1;
+      values = ["--session", "--session-ref", "--cri", "--timeout", "--wait-timeout"];
       break;
     case "operations": case "show": case "cancel":
       if (!args[0] || args[0].startsWith("--")) throw new BackendError("invalid_arguments", `${command} requires an ID`);
@@ -70,10 +81,22 @@ export function validateBusinessArgs(command: string, args: string[]): void {
     if (values.includes(flag)) {
       const value = args[++i];
       if (value === undefined || value.startsWith("--") && !["--text", "--description"].includes(flag)) throw new BackendError("invalid_arguments", `missing value: ${flag}`);
+      if (["--session", "--session-ref"].includes(flag) && !value.trim()) throw new BackendError("invalid_arguments", `empty value: ${flag}`);
       if (["--timeout", "--wait-timeout", "--task-timeout", "--last"].includes(flag) && (!Number.isFinite(Number(value)) || Number(value) <= 0)) throw new BackendError("invalid_arguments", `invalid value: ${flag}`);
     }
   }
   if (seen.has("--session") && seen.has("--session-ref")) throw new BackendError("invalid_arguments", "provide exactly one session selector");
+  const hasSession = seen.has("--session") || seen.has("--session-ref");
+  if (seen.has("--cri") && (!args[args.indexOf("--cri") + 1]!.trim() || args[args.indexOf("--cri") + 1]!.length > 128))
+    throw new BackendError("invalid_arguments", "--cri must be nonempty and at most 128 characters");
+  if (command === "tasks" && seen.has("--cri") && !hasSession)
+    throw new BackendError("invalid_arguments", "--cri lookup requires --session or --session-ref");
+  if (command === "wait" && (start === 1 ? hasSession || seen.has("--cri") : !hasSession || !seen.has("--cri")))
+    throw new BackendError("invalid_arguments", "wait requires a task ID, or one session selector with --cri");
+  if (command === "review" && options.stateless && !seen.has("--cri"))
+    throw new BackendError("invalid_arguments", "stateless review requires --cri; retain the same key for retries");
+  if (command === "resume" && options.stateless)
+    throw new BackendError("invalid_arguments", "stateless mode has no local pending records; use tasks --session-ref REF --cri KEY or wait TASK_ID");
   if (command === "sessions" && start === 1 && !seen.has("--session") && !seen.has("--session-ref")) {
     throw new BackendError("invalid_arguments", "session control requires --session or --session-ref");
   }
