@@ -523,7 +523,9 @@ for (const target of ["/", "/c/6ac0da0c-f304-83e8-ac0f-25235ca1d760",
     assert.equal(metadata.postSend, false);
     assert.equal((h.sentMessages.at(-1) as any).managed, null);
     await h.pageState(); h.state.now += 5000;
-    assert.equal((await h.pageState()).ready, true);
+    assert.equal((await h.pageState()).ready, target.includes("/c/"));
+    assert.equal(metadata.pageKind, target.includes("/c/") ? "conversation" : "discovery");
+    if (!target.includes("/c/")) assert.equal(metadata.session, null);
     assert.equal((await h.message({ type: "get-inflight" }) as any).inflight.taskId, "original-task");
     h.state.pathname = `/c/${bound}`;
     assert.equal(await h.sessionId(), "sr_original");
@@ -1512,3 +1514,100 @@ for (const scenario of ['wrong-task','wrong-token','wrong-document','history','e
     assert.equal(h.removals(), ['user-during-reset','restored-again','restored-before-paste'].includes(scenario) ? 1 : 0);
   });
 }
+
+
+test("discovery navigation clears identity and later manual conversations register", async () => {
+  const h = createHarness();
+  h.state.pathname = '/'; h.tickInterval(3000);
+  assert.equal(await h.sessionId(), null);
+  assert.equal((await h.pageState()).pageKind, 'discovery');
+  assert.equal((h.sentMessages.at(-1) as any).session, null);
+  const result = await h.message({type:'run-task',taskId:'no-send',text:'must not send'});
+  assert.equal(result.submissionState, 'not-submitted');
+  h.state.pathname = '/c/abc-123'; h.tickInterval(3000);
+  assert.equal(await h.sessionId(), 'abc-123');
+  assert.equal((h.sentMessages.at(-1) as any).pageKind, 'conversation');
+});
+
+test("trusted human activity invalidates close preflight without retaining draft text", async () => {
+  const h = createHarness(); h.state.readyState = 'complete';
+  h.state.users = [element('user')];
+  await h.pageState(); h.state.now += 5000;
+  const initial = await h.pageState();
+  const request = {type:'check-close-ready',expectedSession:initial.session,documentId:initial.documentId,
+    expectedActivityRevision:initial.activityRevision};
+  assert.equal((await h.message(request)).closeAllowed, true);
+  h.userEvent('pointerdown', h.state.input);
+  const page = await h.pageState();
+  assert.equal(page.lastUserActivityAt, h.state.now);
+  assert.equal(page.activityRevision, (initial.activityRevision as number) + 1);
+  assert.equal((await h.message(request)).error,'user_activity_changed');
+  assert.equal((await h.message({...request,expectedActivityRevision:page.activityRevision,automatic:true})).error,'recent_user_activity');
+  h.state.now += 60001;
+  assert.equal((await h.message({...request,expectedActivityRevision:page.activityRevision,automatic:true})).closeAllowed,true);
+});
+
+test('stale document dispatch preserves the draft and sends no fence',async()=>{
+  const h = newSessionDraftHarness();const request=await h.request();
+  const before=h.input.textContent;
+  const response=await h.message({...request,expectedDocumentId:'old-document'});
+  assert.equal(response.errorCode,'document_identity_changed');
+  assert.equal(response.submissionState,'not-submitted');
+  assert.equal(h.input.textContent,before);assert.equal(h.removals(),0);
+  assert.equal(h.sentMessages.some((m:any)=>m.type==='send-attempted'),false);
+});
+test('document-fenced dispatch includes the page document identity in Send fencing',async()=>{
+  const h=newSessionDraftHarness();const request=await h.request();const page=await h.pageState();
+  assert.equal((await h.message({...request,expectedDocumentId:page.documentId})).status,'submitted');
+  assert.equal((h.sentMessages.find((m:any)=>m.type==='send-attempted') as any).documentId,page.documentId);
+});
+
+test('an active content executor retains its original lease and rejects concurrent run attempts',async()=>{
+  const h=newSessionDraftHarness();const request=await h.request();
+  let release!:(value:any)=>void;
+  const gate=new Promise(resolve=>{release=resolve;});
+  let entered=false;
+  h.state.onSendMessage=msg=>msg.type==='send-attempted'?(entered=true,gate):null;
+  const first=h.message({...request,claimToken:'old-lease'});
+  for(let i=0;i<200&&!entered;i++)await Promise.resolve();
+  assert.equal(entered,true);
+  assert.equal((h.sentMessages.find((m:any)=>m.type==='send-attempted') as any).claimToken,'old-lease');
+  assert.equal(((await h.message({type:'get-inflight'})).inflight as any).claimToken,'old-lease');
+  const before=h.input.textContent;
+  const second=await h.message({...request,claimToken:'new-lease'});
+  assert.equal(second.errorCode,'page_busy');assert.equal(second.submissionState,'not-submitted');
+  assert.equal(h.input.textContent,before);
+  assert.equal(((await h.message({type:'get-inflight'})).inflight as any).claimToken,'old-lease');
+  release({error:'claim_token_stale'});
+  assert.ok((await first).error);assert.deepEqual(h.sentPrompts,[]);
+  assert.equal(h.sentMessages.filter((m:any)=>m.type==='send-attempted').length,1);
+});
+
+test('stale lease cleanup cannot clear a newer same-task execution record',async()=>{
+  const h=createHarness();const session=await h.sessionId();
+  h.seedInflight({taskId:'same-task',session,claimToken:'new-lease',phase:'preparing'});
+  assert.equal((await h.pageState()).dispatchProtocol,2);
+  assert.equal((await h.message({type:'clear-inflight',taskId:'same-task',expectedSession:session,claimToken:'old-lease'})).cleared,false);
+  assert.equal(((await h.message({type:'get-inflight'})).inflight as any).claimToken,'new-lease');
+  assert.equal((await h.message({type:'clear-inflight',taskId:'same-task',expectedSession:session,claimToken:'new-lease'})).cleared,true);
+  h.seedInflight({taskId:'legacy-task',session,phase:'preparing'});
+  assert.equal((await h.message({type:'clear-inflight',taskId:'legacy-task',expectedSession:session})).cleared,true);
+});
+
+test('backend identity reset preserves human draft and removes managed marker identity',async()=>{
+  const conversation='6a61e3cc-3160-83ee-9aa7-f79a39d93b3e';
+  const h=createHarness({managed:{sessionRef:'sr_old',token:'old-token',owner:'old-backend',projectId:null,boundConversation:conversation}});
+  const page=await h.pageState();h.state.input!.textContent='PRIVATE DRAFT';
+  const messages=h.sentMessages.length;
+  const result=await h.message({type:'reset-relay-identity',documentId:page.documentId});
+  assert.equal(result.reset,true);assert.equal(result.session,conversation);assert.equal(result.managed,null);
+  assert.equal(h.state.input!.textContent,'PRIVATE DRAFT');assert.equal(h.sentMessages.length,messages);
+  assert.equal(await h.sessionId(),conversation,'old URL marker cannot restore previous backend identity');
+});
+test('backend identity reset refuses stale document and any inflight task',async()=>{
+  const h=createHarness();const page=await h.pageState();
+  assert.equal((await h.message({type:'reset-relay-identity',documentId:'stale'})).error,'document_identity_changed');
+  h.seedInflight({taskId:'busy-task',session:page.session,phase:'preparing'});
+  assert.equal((await h.message({type:'reset-relay-identity',documentId:page.documentId})).error,'page_busy');
+  assert.equal(((await h.message({type:'get-inflight'})).inflight as any).taskId,'busy-task');
+});

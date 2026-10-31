@@ -24,6 +24,12 @@ Session creation is independent of the first task's lifecycle. A stable ref is a
 7. Provisional progress is ephemeral observability only. It cannot change task
    state, renew recovery, or become a final reply.
 
+## Dispatch and page capacity
+
+Unified dispatch separates observation from reservation: one watch per backend and extension instance waits at most 20 seconds, then a durable idempotent claim binds the task to an owner, generation, tab and document. Restart reconciliation restores the original claim before further work. A new generation fences old executors; neither a watch timeout nor a lost claim response permits post-Send replay. Capability negotiation (`capabilities.dispatchV2: true`) selects this path without concurrent legacy claims.
+
+The managed tab limit defaults to 6. Manual pages remain protected unless the user explicitly marks them reclaimable. At capacity, only safe idle reclaimable pages may be closed by least recent activity and parked for later reopening. Queued/active work, drafts, generation, controls or changed activity prevent reclamation; unavailable capacity leaves work waiting. Automatic close gates claims until it finishes and preserves user suspension. Explicit Close retains its durable suspension behavior. See [dispatch details](docs/dispatch.md).
+
 ## State diagram
 
 ```mermaid

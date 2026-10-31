@@ -8,6 +8,8 @@ It does not use the OpenAI API and therefore does not create OpenAI API usage
 charges. It does use the user's ChatGPT account and remains subject to that
 account's plan limits and the applicable OpenAI terms.
 
+A capable backend (`capabilities.dispatchV2: true`) uses one watch of at most 20 seconds per backend and extension instance, with durable task claims and restart reconciliation. The popup sets a managed tab limit (default 6, range 1–100) and per-page protection. Manual tabs remain protected until the user explicitly permits reclamation; reviews do not change that policy. At capacity, safe idle reclaimable pages may be parked by least recent activity and reopened for queued work. Otherwise work waits. See [dispatch and capacity](docs/dispatch.md).
+
 ## Features
 
 - **Browser-controlled execution**: a Chrome-compatible extension submits tasks
@@ -30,7 +32,7 @@ account's plan limits and the applicable OpenAI terms.
   submission.
 - **Late-reply compatibility**: replies discovered after an early terminal
   failure can still be stored in `lateReply` during the bounded recovery window.
-- **Background processing**: an MV3 service worker drives polling and recovery
+- **Background processing**: an MV3 service worker drives unified dispatch and recovery
   without requiring the ChatGPT tab to stay focused.
 - **Network recovery**: the extension observes network failures and page
   connectivity changes and can reload when necessary.
@@ -241,7 +243,7 @@ Maintenance commands return JSON. `suspend` stops new claims while existing work
 
 All session maintenance commands accept either `--session-ref <ref>` or `--session <id>`, exactly one per command. `open` reuses or opens an already bound conversation in a background tab; it requires the extension to be online, even when no ChatGPT tab is open. Use `doctor` to inspect instance identifiers and add `--instance <id>` to Open when selection is ambiguous. `close` requires a unique idle responsive page with a clean composer and suspends dispatch before removal. It preserves the session and queued work. After reopening, inspect the page and explicitly use `sessions continue` to resume suspended work. Open does not send a message, and Close does not request Stop. Both return operation IDs and use the same durable execution and result inspection rules as Refresh.
 
-Doctor and inspection distinguish fresh instance inventory, missing tabs and unreachable page scripts. Instance heartbeats do not require a ChatGPT page, and expire after 90 seconds; stale heartbeat evidence cannot distinguish a closed browser from a disabled extension. Page evidence expires after 30 seconds. New page controls require the updated server and extension; updating source files alone does not activate the capability in an already running service.
+Doctor and inspection distinguish dispatch disconnection, fresh instance inventory, missing tabs, stale or unknown page snapshots, and recent explicit page probe failures. Instance heartbeats do not require a ChatGPT page, and expire after 90 seconds; stale heartbeat evidence cannot distinguish a closed browser from a disabled extension. Page evidence expires 30 seconds after observation; delayed receipt does not refresh it. Capacity waits report `dispatch.waitingReason: "waiting_for_capacity"` in inspection and the same doctor code. Unified dispatch requires `dispatchProtocol: 2` from the page; older page scripts report `reload_extension_and_page` before a claim. Backend switches retain separate idle state under `backend_state` and refuse active task evidence. New page controls require the updated server and extension; updating source files alone does not activate the capability in an already running service.
 
 `inspect` uses page observations with a 30-second freshness limit and explicitly reports missing or ambiguous pages. `doctor` exits 2 when attention is required; null selector capabilities mean unobserved. `trace` persists lifecycle events without prompt/reply content; tasks predating trace installation report `completeHistory: false`.
 

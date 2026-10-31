@@ -176,7 +176,7 @@ test("durable send fence precedes Send and post-attempt polling cannot requeue",
   assert.match(worker, /classifySubmissionVerification/);
   assert.match(worker, /submission_not_observed/);
   assert.doesNotMatch(worker, /status=queued&limit=500/);
-  assert.match(worker, /reportTaskProgress\(taskId, "recovery_observed"\)/);
+  assert.match(worker, /reportTaskProgress\(taskId, "recovery_observed", rec.claimToken\)/);
   assert.match(worker, /t\?\.status === "in_progress" \|\| t\?\.status === "recovering"/);
   assert.doesNotMatch(worker, /requeuePending/);
 });

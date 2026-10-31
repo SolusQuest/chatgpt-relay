@@ -310,7 +310,7 @@
     if (target?.userModified) {
       throw makeRelayError('submission_payload_changed', 'User edited the composer during submission');
     }
-    if (!target || getSessionId() !== target.session || location.pathname !== target.path ||
+    if (!target || (target.expectedDocumentId && target.expectedDocumentId !== documentId) || getSessionId() !== target.session || location.pathname !== target.path ||
         !target.input?.isConnected || findInput() !== target.input ||
         getComposerRoot(target.input) !== target.root || !isVisible(target.input)) {
       throw makeRelayError("submission_target_changed", "Submission conversation or composer changed");
@@ -462,6 +462,16 @@
     };
   }
 
+  let lastUserActivityAt = null;
+  let activityRevision = 0;
+  // Only genuine human events count; Relay DOM operations and heartbeats do not.
+  for (const type of ['pointerdown', 'keydown', 'beforeinput', 'input', 'paste', 'cut', 'drop', 'change', 'click']) {
+    document.addEventListener(type, event => {
+      if (!event.isTrusted) return;
+      lastUserActivityAt = Date.now();
+      activityRevision++;
+    }, true);
+  }
   let pageReadyCandidate = null;
 
   function getPageReadiness(now = Date.now()) {
@@ -476,6 +486,8 @@
     let reason = null;
     if (!managedRouteMatches()) {
       reason = "creation-route-mismatch";
+    } else if (!getSessionId()) {
+      reason = "discovery-page";
     } else if (block) {
       reason = block.code ?? "safety_blocked";
     } else if (document.readyState !== "complete") {
@@ -554,7 +566,7 @@
       const marker = (location.hash ?? "").match(/^#relay-create=(.+)$/)?.[1];
       const saved = sessionStorage.getItem("gpt_relay_managed");
       if (saved) return JSON.parse(saved);
-      if (marker) {
+      if (marker && marker !== sessionStorage.getItem("gpt_relay_ignored_creation_marker")) {
         const m = JSON.parse(decodeURIComponent(marker));
         if (/^sr_[A-Za-z0-9_-]{1,120}$/.test(m.sessionRef) && typeof m.token === "string" && typeof m.owner === "string") {
           sessionStorage.setItem("gpt_relay_managed", JSON.stringify(m));
@@ -585,7 +597,7 @@
     const inflight = readInflight();
     const baseline = captureBaseline();
     const managed = managedSessionForRoute();
-    return { session: getSessionId(), managed, conversationId: routeConversation(), projectId: routeProject(),
+    return { documentId, session: getSessionId(), pageKind: routeConversation() ? "conversation" : getSessionId() ? "creation" : "discovery", managed, conversationId: routeConversation(), projectId: routeProject(),
       hasHistory: baseline.userCount + baseline.assistantCount > 0,
       postSend: !!inflight && inflight.session === getSessionId() &&
         (!managed || inflight.taskId === managed.initialTaskId) && inflight.phase !== "preparing" };
@@ -636,12 +648,7 @@
       return bound?.conversationId === m[1] && /^sr_[A-Za-z0-9_-]{1,120}$/.test(bound.session ?? "")
         ? bound.session : m[1];
     }
-    let sid = sessionStorage.getItem("gpt_relay_session_id");
-    if (!sid) {
-      sid = (crypto.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`);
-      sessionStorage.setItem("gpt_relay_session_id", sid);
-    }
-    return sid;
+    return null;
   }
 
   // Status display; task lifecycle remains independent of the widget.
@@ -653,7 +660,7 @@
       session, taskId: inflight?.session === session ? inflight.taskId : null,
     });
   }
-  updateBanner(`Relay: ${getSessionId().slice(0, 8)}…`);
+  updateBanner(`Relay: ${(getSessionId() ?? "discovery").slice(0, 8)}…`);
 
   // In-flight state that survives page refresh.
   function readInflight() {
@@ -684,9 +691,10 @@
     writeInflight(rec);
     return rec;
   }
-  function clearInflight(taskId, session) {
+  function clearInflight(taskId, session, claimToken) {
     const rec = readInflight();
     if (!taskId || !session || rec?.taskId !== taskId || rec?.session !== session) return false;
+    if (claimToken !== undefined && rec.claimToken !== claimToken) return false;
     sessionStorage.removeItem(INFLIGHT_KEY);
     return true;
   }
@@ -1048,6 +1056,8 @@
     const rec = readInflight();
     if (!rec) return;
     const currentSession = getSessionId();
+    // Retain orphaned recovery evidence until its original conversation returns.
+    if (!currentSession || currentSession !== rec.session) return;
     const conversationChanged = rec.session !== currentSession;
     console.log("[relay content] found inflight from previous session", rec);
     updateBanner(`Recovering: ${rec.taskId.slice(0, 8)}…`, "#f39c12");
@@ -1129,7 +1139,7 @@
     chrome.runtime.sendMessage({ type: "offline" }).catch(() => {});
   });
   window.addEventListener("online", async () => {
-    updateBanner(`Relay: ${getSessionId().slice(0, 8)}… (recovered)`, "#10a37f");
+    updateBanner(`Relay: ${(getSessionId() ?? "discovery").slice(0, 8)}… (recovered)`, "#10a37f");
     chrome.runtime.sendMessage({ type: "online" }).catch(() => {});
     await delay(3000);
     // Reload when the page already shows a connectivity warning.
@@ -1142,6 +1152,8 @@
     const hint = findRecoveryHint();
     if (hint) maybeReload(`chatgpt recovery banner: ${hint.slice(0, 40)}`);
   }, 15_000);
+
+  let taskExecutorRunning = false;
 
   // Message handling.
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -1240,9 +1252,9 @@
           return;
         }
         if (msg.type === "clear-inflight") {
-          const cleared = clearInflight(msg.taskId, msg.expectedSession);
+          const cleared = clearInflight(msg.taskId, msg.expectedSession, msg.claimToken);
           if (cleared) {
-            try { updateBanner(`Relay: ${getSessionId().slice(0, 8)}…`, "#10a37f"); } catch {}
+            try { updateBanner(`Relay: ${(getSessionId() ?? "discovery").slice(0, 8)}…`, "#10a37f"); } catch {}
           }
           sendResponse({ status: "ok", cleared });
         } else if (msg.type === "reset-composer") {
@@ -1285,12 +1297,25 @@
           }
           sendResponse({ url: "https://chatgpt.com" + location.pathname, projects,
             ...(document.readyState !== "complete" ? { error: "page_not_loaded" } : {}) });
+        } else if (msg.type === "reset-relay-identity") {
+          if (msg.documentId !== documentId) throw new Error('document_identity_changed');
+          if (taskExecutorRunning || readInflight()?.taskId || sessionMetadata().postSend)
+            throw new Error('page_busy');
+          // Suppress the old URL creation marker across reloads. A fresh worker
+          // configuration still takes precedence via the saved managed record.
+          const marker = (location.hash ?? '').match(/^#relay-create=(.+)$/)?.[1];
+          if (marker) sessionStorage.setItem('gpt_relay_ignored_creation_marker', marker);
+          for (const key of ['gpt_relay_managed', 'gpt_relay_bound_session',
+              'gpt_relay_session_id', 'gpt_relay_creation_user_edit']) sessionStorage.removeItem(key);
+          pageReadyCandidate = null;
+          // Do not register until the worker has switched its backend.
+          sendResponse({ ...sessionMetadata(), documentId, reset: true });
         } else if (msg.type === "get-session-id") {
           sendResponse(sessionMetadata());
         } else if (msg.type === "get-inflight") {
           sendResponse({ inflight: readInflight() });
         } else if (msg.type === "get-page-state") {
-          sendResponse({ ...getPageReadiness(), initialCreation: initialCreation(), documentId, controlProtocol: 1,
+          sendResponse({ ...getPageReadiness(), ...sessionMetadata(), lastUserActivityAt, activityRevision, initialCreation: initialCreation(), documentId, controlProtocol: 1, dispatchProtocol: 2,
             capabilities: { composer: !!findInput(), effort: !!globalThis.GptRelayEffort && !!getComposerRoot()?.querySelector?.('[data-composer-navigation-target="reasoning"]'),
               userMessages: getUserMessages().length > 0 ? true : null,
               assistantMessages: getAssistantMessages().length > 0 ? true : null } });
@@ -1305,9 +1330,14 @@
                 !getComposerPayloadState(input).clean) throw makeRelayError("effort_changed", "effort_changed");
           } });
           sendResponse(await controller.set(msg.effortPolicy));
-        } else if (msg.type === "check-close") {
+        } else if (msg.type === "check-close" || msg.type === "check-close-ready") {
           const state = getPageReadiness();
           if (msg.expectedSession !== state.session || msg.documentId !== documentId) throw new Error("session_identity_changed");
+          if (msg.expectedActivityRevision !== undefined && msg.expectedActivityRevision !== activityRevision)
+            throw new Error("user_activity_changed");
+          if (msg.automatic === true && (msg.expectedActivityRevision === undefined ||
+              (lastUserActivityAt !== null && Date.now() - lastUserActivityAt < (msg.recentUserActivityMs ?? 60000))))
+            throw new Error("recent_user_activity");
           if (state.composerClean !== true) throw new Error("composer_not_clean");
           if (!state.ready || state.generating || readInflight()?.taskId) throw new Error("page_not_idle");
           sendResponse({ closeAllowed: true });
@@ -1345,6 +1375,14 @@
           updateBanner(msg.text, msg.color);
           sendResponse({});
         } else if (msg.type === "run-task") {
+          if (taskExecutorRunning) {
+            sendResponse({ error: 'page_busy', errorCode: 'page_busy', submissionState: 'not-submitted' });
+            return;
+          }
+          if (msg.expectedDocumentId && msg.expectedDocumentId !== documentId) {
+            sendResponse({ error: 'document_identity_changed', errorCode: 'document_identity_changed', submissionState: 'not-submitted' });
+            return;
+          }
           const block = findSafetyBlock();
           if (block) {
             sendResponse({ error: block.code ?? `safety: ${block.reason}`,
@@ -1375,10 +1413,12 @@
             path: location.pathname,
             input: findInput(),
             sourceText: msg.text,
+            expectedDocumentId: msg.expectedDocumentId,
           };
           target.root = getComposerRoot(target.input);
           const inflight = {
             taskId: msg.taskId,
+            claimToken: msg.claimToken,
             session: getSessionId(),
             submittedAt: Date.now(),
             baseline,
@@ -1386,6 +1426,7 @@
           };
           writeInflight(inflight);
           const stopWatching = watchComposerEdits(target, inflight);
+          taskExecutorRunning = true;
 
           try {
             assertSubmissionTarget(target);
@@ -1409,6 +1450,8 @@
             writeInflight(inflight);
             const fence = await chrome.runtime.sendMessage({
               type: "send-attempted",
+              documentId,
+              claimToken: inflight.claimToken,
               effortSelection: inflight.effortSelection,
               taskId: msg.taskId,
               baseline,
@@ -1492,6 +1535,7 @@
                 : "send-attempted",
             });
           } finally {
+            taskExecutorRunning = false;
             stopWatching();
           }
         } else {
@@ -1500,7 +1544,7 @@
       } catch (e) {
         console.warn("[relay content] error handling", msg.type, e);
         updateBanner(`Error: ${e.message.slice(0, 40)}`, "#e74c3c");
-        setTimeout(() => updateBanner(`Relay: ${getSessionId().slice(0, 8)}…`, "#10a37f"), 5000);
+        setTimeout(() => updateBanner(`Relay: ${(getSessionId() ?? "discovery").slice(0, 8)}…`, "#10a37f"), 5000);
         // Keep in-flight state so a later refresh can attempt recovery.
         sendResponse({ error: e.message });
       }
@@ -1539,7 +1583,7 @@
     // The first Send changes the URL before/while the worker binds the new
     // conversation. Registration must preserve that task's submitting/waiting
     // banner; a different conversation still gets its own idle banner.
-    if (readInflight()?.session !== sid) updateBanner(`Relay: ${sid.slice(0, 8)}…`);
+    if (readInflight()?.session !== sid) updateBanner(`Relay: ${(sid ?? "discovery").slice(0, 8)}…`);
   }
   reportSid();
   chrome.runtime.sendMessage({ type: "get-managed-session" }).then(response => {

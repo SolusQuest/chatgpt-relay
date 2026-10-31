@@ -8,6 +8,7 @@ export interface ServerInfo {
   name: string;
   version: string;
   apiVersion: number;
+  capabilities?: { dispatchV2: boolean };
 }
 
 export interface Backend {

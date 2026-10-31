@@ -1,0 +1,4 @@
+export interface PagePolicyInput { pathname?: string; managed?: { sessionRef?: string; token?: string; owner?: string; projectId?: string | null; boundConversation?: string | null } | null }
+export function classifyPage(input?: PagePolicyInput): { pageKind: 'conversation' | 'creation' | 'discovery'; conversationId: string | null; projectId: string | null };
+export interface EvictionTab { managementGranted?: boolean; tabId: number; lifecyclePolicy?: 'protected' | 'reclaimable'; provenance?: 'relay' | 'manual'; conversationId?: string | null; safeIdle?: boolean; queued?: boolean; activeTask?: boolean; recovery?: boolean; latePending?: boolean; controlsPending?: boolean; draft?: boolean; upload?: boolean; pinned?: boolean; active?: boolean; lastUserActivityAt?: number | null; lastTaskActivityAt?: number | null }
+export function evictionCandidates<T extends EvictionTab>(tabs: T[], options?: { now?: number; recentUserActivityMs?: number }): T[];

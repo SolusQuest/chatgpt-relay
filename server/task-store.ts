@@ -234,7 +234,8 @@ export class TaskStore {
     this.registry = new SessionRegistry(db);
     installTaskTrace(db);
     installControls(db);
-    db.exec(`CREATE TABLE IF NOT EXISTS session_dispatch_gate (
+    db.exec(`CREATE TABLE IF NOT EXISTS dispatch_sessions (session TEXT PRIMARY KEY, owner TEXT NOT NULL, generation TEXT NOT NULL, tab_id INTEGER NOT NULL, document_id TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS session_dispatch_gate (
       session TEXT PRIMARY KEY, suspended INTEGER NOT NULL DEFAULT 0);`);
     this.emitter.setMaxListeners(0);
   }
@@ -442,7 +443,8 @@ export class TaskStore {
   }
 
   // Atomically claim the next queued task unless the session already has one in progress.
-  claimNextTask(sessionId: string, now = Date.now()): Task | null {
+  claimNextTask(sessionId: string, now = Date.now(), dispatchTransaction = false): Task | null {
+    if (!dispatchTransaction && this.db.prepare("SELECT session FROM dispatch_sessions WHERE session=?").get(this.registry.resolve(sessionId))) return null;
     sessionId = this.registry.resolve(sessionId);
     if (this.isSuspended(sessionId) || this.getSession(sessionId)?.paused) return null;
     if (this.db.prepare(`SELECT id FROM session_controls WHERE session = ?
@@ -450,7 +452,7 @@ export class TaskStore {
     const ref = this.registry.get(sessionId);
     if (ref?.initial_task && !["attached", "finished"].includes(ref.command_state)) return null;
     // Use a transaction to preserve atomicity.
-    this.db.exec("BEGIN IMMEDIATE");
+    if (!dispatchTransaction) this.db.exec("BEGIN IMMEDIATE");
     try {
       const active = this.db
         .prepare(
@@ -459,7 +461,7 @@ export class TaskStore {
         )
         .get(sessionId) as { id: string } | undefined;
       if (active) {
-        this.db.exec("COMMIT");
+        if (!dispatchTransaction) this.db.exec("COMMIT");
         return null;
       }
       const next = this.db
@@ -472,11 +474,11 @@ export class TaskStore {
         )
         .get(sessionId, now) as TaskRowRaw | undefined;
       if (!next) {
-        this.db.exec("COMMIT");
+        if (!dispatchTransaction) this.db.exec("COMMIT");
         return null;
       }
       if (ref?.initial_task && !ref.conversation && next.id !== ref.initial_task) {
-        this.db.exec("COMMIT");
+        if (!dispatchTransaction) this.db.exec("COMMIT");
         return null;
       }
       this.db
@@ -488,12 +490,12 @@ export class TaskStore {
         .run(now, next.id);
       if (ref?.effort_policy) this.db.prepare("UPDATE tasks SET effort_policy=COALESCE(effort_policy, ?) WHERE id=?")
         .run(ref.effort_policy, next.id);
-      this.db.exec("COMMIT");
+      if (!dispatchTransaction) this.db.exec("COMMIT");
       const task = this.mustGetTask(next.id);
       this.emitTaskChange(task);
       return task;
     } catch (err) {
-      this.db.exec("ROLLBACK");
+      if (!dispatchTransaction) this.db.exec("ROLLBACK");
       throw err;
     }
   }
@@ -869,6 +871,7 @@ export class TaskStore {
       throw new TaskStoreError("Close must finish before dispatch can continue", "control_in_progress");
     this.db.prepare(`INSERT INTO session_dispatch_gate VALUES (?, ?)
       ON CONFLICT(session) DO UPDATE SET suspended=excluded.suspended`).run(id, suspended ? 1 : 0);
+    this.emitter.emit("change");
     this.emitter.emit(`session:${id}`);
     return { session: id, suspended };
   }
@@ -915,6 +918,7 @@ export class TaskStore {
         )
         .run(now, now, id);
     }
+    this.emitter.emit("change");
     return this.getSessionOrThrow(id);
   }
 
@@ -936,6 +940,7 @@ export class TaskStore {
   }
 
   private emitTaskChange(task: Task): void {
+    this.emitter.emit("change");
     this.emitter.emit(`task:${task.id}`, task);
     this.emitter.emit(`session:${task.session}`);
   }
@@ -946,12 +951,18 @@ export class TaskStore {
 
   private emitBulkChange(): void {
     // Notify every listener to query again.
+    this.emitter.emit("change");
     this.emitter.emit("bulk");
     for (const ev of this.emitter.eventNames()) {
       if (typeof ev === "string" && ev.startsWith("session:")) {
         this.emitter.emit(ev);
       }
     }
+  }
+
+  onDispatchChange(listener: () => void): () => void {
+    this.emitter.on("change", listener);
+    return () => this.emitter.off("change", listener);
   }
 
   onBulkChange(listener: () => void): () => void {

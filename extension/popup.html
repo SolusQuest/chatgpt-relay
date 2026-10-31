@@ -13,7 +13,7 @@
   <section>
     <h3>Sessions (ChatGPT tabs)</h3>
     <table id="sessions">
-      <thead><tr><th>Session</th><th>Page</th><th>Server view</th><th>Inflight</th></tr></thead>
+      <thead><tr><th>Session</th><th>Page</th><th>Server view</th><th>Inflight</th><th>Page policy</th></tr></thead>
       <tbody></tbody>
     </table>
   </section>
@@ -28,6 +28,12 @@
 
   <section>
     <h3>Config</h3>
+    <p id="dispatchStatus" role="status"></p>
+    <p id="capacityStatus"></p>
+    <label>Managed tab limit <input id="maxManagedTabs" type="number" min="1" max="100" value="6"></label>
+    <button id="saveCapacity">Save limit</button>
+    <p class="hint">Protected tabs stay open. Reclaimable tabs may close when idle to make room for queued work.</p>
+    <p id="actionError" role="alert" hidden></p>
     <label>Relay URL <input id="baseUrl" type="text" size="30"></label>
     <button id="saveUrl">Save</button>
     <div style="margin-top: 6px">

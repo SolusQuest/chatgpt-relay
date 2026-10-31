@@ -22,18 +22,21 @@ export interface SessionControlOperation {
 }
 export interface BrowserInstanceView {
   instanceId: string; generation: number; revision: number; observedAt: number; stale: boolean;
+  receivedAt?: number; dispatch?: {state: "connected" | "disconnected" | "connecting" | "legacy"; lastConnectedAt: number | null; lastError: string | null; waitingSessions?: string[]};
   version: string | null; controls: string[];
   tabs: { tabId: number; conversationId: string | null; projectId: string | null; loading: boolean | null; discarded: boolean | null }[];
 }
 export interface SessionInspection {
   effortPolicy?: EffortPolicy | null;
   session: string; sessionRef: string; conversationId: string | null; projectId: string | null;
-  pageStatus: "observed" | "ambiguous" | "unknown";
-  activeTaskId: string | null; queuedTasks: number;
+  pageStatus: "observed" | "ambiguous" | "unknown" | "page_snapshot_stale" | "page_probe_failed";
+  activeTaskId: string | null; activeTaskStatus: "in_progress" | "recovering" | null; queuedTasks: number;
+  controlsPending: boolean; latePending: boolean;
+  dispatch: {waitingReason: "waiting_for_capacity" | null; waitingInstances: string[]};
   server: { suspended: boolean; paused: boolean; pauseReason: string | null } | null;
-  page: { owner: string; tabId: number; ready: boolean | null; composerClean: boolean | null; generating: boolean | null; observedAt: number;
+  page: { owner: string; tabId: number; dispatchProtocol?: 2 | null; ready: boolean | null; composerClean: boolean | null; generating: boolean | null; observedAt: number;
     block?: { code: "conversation_blocked"; message: string | null } | null } | null;
-  browser: { status: "observed" | "loading" | "script_unreachable" | "tab_missing" | "ambiguous" | "instance_stale" | "unknown";
+  browser: { status: "observed" | "loading" | "script_unreachable" | "page_snapshot_unknown" | "page_snapshot_stale" | "page_probe_failed" | "tab_missing" | "ambiguous" | "instance_stale" | "unknown";
     tabs: (BrowserInstanceView["tabs"][number] & { instanceId: string; generation: number })[];
     instances: Omit<BrowserInstanceView, "tabs">[] };
 }

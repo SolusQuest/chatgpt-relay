@@ -1,6 +1,7 @@
 // server/app.ts
 // Assemble the Express application and maintenance loop.
 import express from "express";
+import { Dispatch, dispatchRouter } from "./dispatch.js";
 import type { Config } from "./config.js";
 import { openDatabase } from "./db.js";
 import { TaskStore, TaskStoreError } from "./task-store.js";
@@ -28,6 +29,7 @@ export function createApp(config: Config): AppHandle {
   const db = openDatabase(config.dbFile);
   const store = new TaskStore(db, config);
   const identity = serverIdentity(db);
+  const dispatch = new Dispatch(db, store);
 
   const app = express();
   app.use((req, res, next) => {
@@ -47,6 +49,11 @@ export function createApp(config: Config): AppHandle {
     next();
   });
   app.use(express.json({ limit: "2mb" }));
+  app.use((req, res, next) => {
+    if (req.method !== "GET" && !req.path.startsWith("/internal/dispatch/")) res.once("finish", () => { if (res.statusCode < 400) dispatch.notifyCommands(); });
+    next();
+  });
+  app.use(dispatchRouter(dispatch));
   const diagnostics = new SessionDiagnostics(db, store);
   app.use(diagnosticsRouter(diagnostics));
   app.use(controlsRouter(new SessionControls(db, store, diagnostics)));
@@ -56,9 +63,10 @@ export function createApp(config: Config): AppHandle {
   app.use("/v1", createV1SessionsRouter(store));
 
   // Extension-internal API.
-  app.use("/internal", createInternalRouter(store));
+  app.use("/internal", createInternalRouter(store, dispatch));
   app.use(createSessionCreationRouter(store, config));
   app.use(createProjectDiscoveryRouter(db, store.registry));
+  dispatch.notifyCommands();
   app.use((err: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
     if (err instanceof RegistryError) return res.status(err.status).json({ error: err.message });
     if (err instanceof TaskStoreError) return res.status(err.code === "task_too_large" ? 413 : 409)

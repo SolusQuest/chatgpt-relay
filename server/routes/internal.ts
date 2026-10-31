@@ -1,5 +1,6 @@
 // server/routes/internal.ts
 // Extension API for claiming tasks, submitting replies, heartbeat, and session status.
+import type { Dispatch } from "../dispatch.js";
 import { Router } from "express";
 import type { Request, Response } from "express";
 import type { TaskStore } from "../task-store.js";
@@ -8,8 +9,12 @@ import type { TaskObservationPhase, TaskProgressPhase } from "../task-store.js";
 import { longPollSession } from "../long-poll.js";
 import { asPositiveInt, isValidSessionId } from "../util.js";
 
-export function createInternalRouter(store: TaskStore): Router {
+export function createInternalRouter(store: TaskStore, dispatch?: Dispatch): Router {
   const router = Router();
+  router.use("/tasks/:id", (req, _res, next) => {
+    if (req.method === "POST") dispatch?.validate(String(req.params.id), req.body?.claimToken, req.body?.phase === "send_attempted");
+    next();
+  });
 
   // Claim the next task, with optional long polling via the wait query.
   router.get("/next_task", async (req: Request, res: Response) => {

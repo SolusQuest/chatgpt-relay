@@ -29,6 +29,8 @@ import {
   hasSendFence,
   isRecoverableLateReply,
 } from "./lib/recovery-policy.js";
+import { DispatchClient, RequestPool } from "./lib/dispatch-client.js";
+import { createPageManager } from "./lib/page-manager.js";
 
 // Development debugging: set DEBUG to true or window.__gptRelayDebug in the popup.
 const DEBUG = false;
@@ -44,6 +46,184 @@ const pendingCompletion = new Map();
 const stopRequests = new Map(); // Immediate intent while its storage write is pending.
 const pendingPolls = new Map(); // Alarm, fast sampler and Stop may overlap.
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+const requestPool = new RequestPool();
+let dispatchMode = null;
+let dispatchSetup = null;
+let dispatchClient = null;
+let dispatchState = { state: "connecting", lastConnectedAt: null, lastError: null };
+const dispatchPages = new Map();
+const dispatchWork = new Map();
+const registrationCache = new Map();
+const registrationPending = new Map();
+const registrationEpochs = new Map();
+const registrationResults = new WeakMap();
+const capacityWaiting = new Set();
+const reopenPending = new Map();
+let snapshotRevision = 0;
+let pageManager;
+let backendChanging = false;
+let backendIdentityRestore;
+const acknowledgedPages = new Map();
+const executingControls = new Map();
+
+function getPageManager() {
+  pageManager ??= createPageManager({
+    storageGet: key => getStorage(key, {}), storageSet: setStorage,
+    listTabs: () => chrome.tabs.query({}), getPageState,
+    inspectSession: async session => {
+      const view = await httpJson("GET", `/v1/sessions/${encodeURIComponent(session)}/inspect`, undefined, 5000);
+      return { safeIdle: view.page?.ready === true, queued: view.queuedTasks > 0,
+        activeTask: !!view.activeTaskId, recovery: view.activeTaskStatus === "recovering",
+        latePending: view.latePending, controlsPending: view.controlsPending };
+    },
+    listPending: async () => {
+      const [pending, inflight] = await Promise.all([listPendingReplies(), getStorage(STORAGE_KEYS.INFLIGHT, {})]);
+      return [...Object.values(pending), ...Object.entries(inflight).map(([session, entry]) => ({ ...entry, session }))];
+    },
+    closePage: async (record, state) => {
+      await reportSessionSnapshots();
+      await reportBrowserInventory();
+      const operationId = crypto.randomUUID();
+      await httpJson("POST", "/v1/session-controls", { operationId, session: record.session, kind: "close", automatic: true });
+      const { command } = await httpJson("POST", "/internal/session-controls/claim", { owner: await creationOwner(), operationId });
+      if (!command) throw new Error("automatic_close_unavailable");
+      command.expectedActivityRevision = state.activityRevision;
+      const outcome = await runControlOnce(command);
+      if (outcome.state !== "succeeded") throw new Error(outcome.error ?? "automatic_close_failed");
+    },
+  });
+  return pageManager;
+}
+async function maxManagedTabs() {
+  const value = (await getStorage("config", {})).maxManagedTabs;
+  return Number.isInteger(value) && value >= 1 && value <= 100 ? value : 6;
+}
+async function dispatchMembership() {
+  const tabs = await listChatGPTTabs();
+  const ids = new Set(tabs.map(tab => tab.id));
+  const grouped = new Map();
+  for (const page of dispatchPages.values()) {
+    if (!ids.has(page.tabId)) continue;
+    const matches = grouped.get(page.session) ?? [];
+    matches.push(page); grouped.set(page.session, matches);
+  }
+  // Multiple tabs of one conversation are deliberately not auto-selected.
+  const pages = [...grouped.values()].filter(matches => matches.length === 1).flat();
+  const parked = await getStorage("parked_sessions", {});
+  for (const record of Object.values(parked)) {
+    if (grouped.has(record.session) || record.status !== "closed") continue;
+    pages.push({ session: record.session, tabId: null, documentId: null });
+  }
+  return pages;
+}
+async function ensureDispatch() {
+  if (!await restoreBackendIdentities()) throw new Error("backend_identity_recovery_pending");
+  if (dispatchMode) return dispatchMode;
+  if (dispatchSetup) return dispatchSetup;
+  dispatchSetup = (async () => {
+    const info = await httpJson("GET", "/v1/server", undefined, 5000);
+    dispatchMode = info?.capabilities?.dispatchV2 === true ? "v2" : "legacy";
+    if (dispatchMode === "legacy") {
+      dispatchState = { state: "legacy", lastConnectedAt: Date.now(), lastError: null };
+      return dispatchMode;
+    }
+    dispatchClient = new DispatchClient({
+      membership: dispatchMembership,
+      watch: async (request, signal) => {
+        const result = await httpJson("POST", "/internal/dispatch/watch", { ...request,
+          owner: await creationOwner(), generation: String(await inventoryGeneration()) }, 26000, signal);
+        if (!signal.aborted) {
+          acknowledgedPages.clear();
+          const blocked = new Set((result.blockedSessions ?? []).map(entry => entry.session));
+          dispatchState = { ...dispatchState, blockedSessions: result.blockedSessions ?? [] };
+          for (const page of request.sessions) if (!blocked.has(page.session)) acknowledgedPages.set(page.session, page);
+        }
+        return result;
+      },
+      onState: state => { dispatchState = { ...dispatchState, ...state }; },
+      onSnapshot: async snapshot => {
+        dispatchWork.clear();
+        for (const work of snapshot.sessions ?? []) {
+          dispatchWork.set(work.session, work);
+          if (!work.activeTaskId && ((!work.queuedTasks && !work.paused) || work.suspended)) continue;
+          const page = acknowledgedPages.get(work.session);
+          if (page?.tabId != null) void startDispatchLoop(work.session, page.tabId).catch(error => dlog("dispatch", error));
+          else if (work.queuedTasks && !work.suspended && !work.paused) void reopenParkedSession(work.session);
+        }
+        if (snapshot.pendingCommands?.sessionCreation) void processSessionCreations();
+        if (snapshot.pendingCommands?.sessionControl) void processSessionControls();
+        if (snapshot.pendingCommands?.projectDiscovery) void processProjectDiscoveries();
+      },
+    });
+    void dispatchClient.start();
+    return dispatchMode;
+  })().catch(error => {
+    dispatchState = { ...dispatchState, state: "disconnected", lastError: error.message };
+    throw error;
+  }).finally(() => { dispatchSetup = null; });
+  return dispatchSetup;
+}
+async function reopenParkedSession(session) {
+  if (reopenPending.has(session)) return reopenPending.get(session);
+  const operation = (async () => {
+    const parked = (await getStorage("parked_sessions", {}))[session];
+    if (parked?.status !== "closed") return;
+    try {
+      const operations = await getStorage("reopen_operations", {});
+      let operationId = operations[session];
+      if (operationId) {
+        const prior = await httpJson("GET", `/v1/operations/${operationId}`);
+        if (["queued", "claimed", "executing", "unknown"].includes(prior.state)) return;
+        if (prior.state === "succeeded") { await mutateStorageMap("parked_sessions", map => { delete map[session]; }); return; }
+      }
+      operationId = crypto.randomUUID();
+      await mutateStorageMap("reopen_operations", map => { map[session] = operationId; });
+      await httpJson("POST", "/v1/session-controls", { operationId, session, kind: "open", instanceId: await creationOwner() });
+      void processSessionControls();
+    } catch (error) { dlog("reopen parked session", error.message); }
+  })().finally(() => reopenPending.delete(session));
+  reopenPending.set(session, operation);
+  return operation;
+}
+
+async function claimForPage(session, tabId, state, signal) {
+  if (dispatchMode !== "v2") return httpJson("GET", `/internal/next_task?session=${encodeURIComponent(session)}&wait=0`, undefined, 8000, signal);
+  const page = acknowledgedPages.get(session);
+  if (page?.tabId !== tabId || page.documentId !== state.documentId) { dispatchClient?.wake(); return { task: null }; }
+  const baseUrl = await getBaseUrl();
+  let intent = (await getStorage("dispatch_claim_intents", {}))[session];
+  if (intent && intent.baseUrl !== baseUrl) throw new Error("dispatch_backend_changed");
+  if (!intent) {
+    intent = { baseUrl, request: { owner: await creationOwner(), generation: String(await inventoryGeneration()),
+      session, tabId, documentId: state.documentId, requestId: crypto.randomUUID() } };
+    await mutateStorageMap("dispatch_claim_intents", map => { map[session] = intent; });
+  }
+  const generation = String(await inventoryGeneration());
+  const resume = intent.request.generation !== generation || intent.request.tabId !== tabId || intent.request.documentId !== state.documentId;
+  if (resume && (intent.resume?.generation !== generation || intent.resume?.tabId !== tabId || intent.resume?.documentId !== state.documentId)) {
+    intent.resume = { generation, tabId, documentId: state.documentId, requestId: crypto.randomUUID() };
+    await mutateStorageMap("dispatch_claim_intents", map => { map[session] = intent; });
+  }
+  const request = resume ? { ...intent.request, generation, originalGeneration: intent.request.generation,
+    tabId, documentId: state.documentId, resumeRequestId: intent.resume.requestId } : intent.request;
+  const claim = await httpJson("POST", resume ? "/internal/dispatch/resume" : "/internal/dispatch/claim", request, 8000, signal);
+  await mutateTaskStorage(async () => {
+    const intents = await getStorage("dispatch_claim_intents", {});
+    const tokens = await getStorage("dispatch_task_tokens", {});
+    if (claim.task) {
+      tokens[claim.task.taskId] = { baseUrl, claimToken: claim.task.claimToken, session, tabId, documentId: state.documentId,
+        expiresAt: claim.task.lateReplyDeadlineAt ?? claim.task.expiresAt };
+      intents[session] = { baseUrl, taskId: claim.task.taskId, request: { ...request } };
+      delete intents[session].request.originalGeneration;
+      delete intents[session].request.resumeRequestId;
+      if (resume) intents[session].request.requestId = request.resumeRequestId;
+      // Post-Send resume does not create a new claim request. Keep its original identity.
+      if (resume && claim.task.sendAttemptedAt != null) intents[session].request = intent.request;
+    } else delete intents[session];
+    await chrome.storage.local.set({ dispatch_claim_intents: intents, dispatch_task_tokens: tokens });
+  });
+  return claim;
+}
 
 async function getStorage(key, fallback) {
   const obj = await chrome.storage.local.get(key);
@@ -116,13 +296,24 @@ async function getBaseUrl() {
   return cfg.baseUrl || DEFAULT_BASE;
 }
 
-async function httpJson(method, url, body, timeoutMs = 30_000, signal) {
+async function httpJson(method, url, body, timeoutMs = 8000, signal) {
   const base = await getBaseUrl();
+  const taskId = method === "POST" && url.match(/^\/internal\/tasks\/([^/]+)\//)?.[1];
+  if (taskId) {
+    const token = (await getStorage("dispatch_task_tokens", {}))[taskId];
+    if (token?.baseUrl === base && !Object.hasOwn(body ?? {}, "claimToken")) body = { ...body, claimToken: token.claimToken };
+  }
+  const operation = () => fetchJson(base, method, url, body, timeoutMs, signal);
+  if (url === "/internal/dispatch/watch") return operation();
+  return requestPool.run(operation, { signal, background: /session-snapshots|browser-inventory/.test(url) });
+}
+async function fetchJson(base, method, url, body, timeoutMs, signal) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const abort = () => ctrl.abort();
   if (signal) {
     if (signal.aborted) ctrl.abort();
-    else signal.addEventListener("abort", () => ctrl.abort(), { once: true });
+    else signal.addEventListener("abort", abort, { once: true });
   }
   try {
     const res = await fetch(`${base}${url}`, {
@@ -142,6 +333,7 @@ async function httpJson(method, url, body, timeoutMs = 30_000, signal) {
     return json;
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener("abort", abort);
   }
 }
 
@@ -177,15 +369,13 @@ async function getTabSession(tabId, opts = {}) {
   if (cached && verifiedTabSessions.has(tabId) && !opts.forceFresh) return cached;
   // Cold path: query the content script.
   try {
-    const r = await Promise.race([
-      chrome.tabs.sendMessage(tabId, { type: "get-session-id" }),
-      new Promise((_, rej) => setTimeout(() => rej(new Error("sendMessage timeout")), 3000)),
-    ]);
+    const r = await sendTabMessage(tabId, { type: "get-session-id" }, 3000, "get-session-id");
     if (r?.session) {
       const page = await registerPageSession(tabId, r);
-      await rememberTabSession(tabId, page.session);
+      await rememberTabSession(tabId, page.session, registrationResults.get(page));
       return page.session;
     }
+    if (r?.session === null) await handleNullPage(tabId, r);
     return null;
   } catch {
     return null;
@@ -231,13 +421,17 @@ function tabRoute(tab) {
 let inventoryRevision = 0;
 let inventoryRunning = null;
 function reportBrowserInventory() {
+  if (backendChanging) return Promise.resolve();
   if (inventoryRunning) return inventoryRunning;
   inventoryRunning = (async () => {
     const owner = await creationOwner(), generation = await inventoryGeneration();
+    const lifecycle = await getStorage("page_lifecycle", {});
     const tabs = (await listChatGPTTabs()).filter(tab => tab.id != null).map(tab => ({
       tabId: tab.id, ...tabRoute(tab), loading: tab.status === "loading", discarded: tab.discarded ?? null,
+      lifecyclePolicy: lifecycle[tab.id]?.lifecyclePolicy ?? "protected",
     }));
     await httpJson("POST", "/internal/browser-inventory", { owner, generation, revision: ++inventoryRevision,
+      observedAt: Date.now(), dispatch: { ...dispatchState, waitingSessions: [...capacityWaiting] },
       version: chrome.runtime.getManifest?.().version ?? null, controls: ["open", "close"], tabs }, 5000);
   })().finally(() => { inventoryRunning = null; });
   return inventoryRunning;
@@ -250,7 +444,7 @@ async function creationAction(meta, action, extra = {}) {
   return httpJson("POST", `/internal/session-creations/${encodeURIComponent(meta.sessionRef)}/${action}`,
     { owner: await creationOwner(), token: meta.token, ...extra });
 }
-async function registerManagedPage(tabId, page) {
+async function registerManagedPage(tabId, page, assertCurrent = () => {}) {
   const m = page.managed;
   if (m.owner !== await creationOwner()) {
     throw new Error("creation page identity mismatch");
@@ -278,16 +472,84 @@ async function registerManagedPage(tabId, page) {
     }
     const bound = await creationAction(m, "bind", { tabId, conversationId: page.conversationId, projectId: page.projectId });
     const config = { ...m, boundConversation: bound.conversationId };
-    await mutateStorageMap("creation_tabs", map => { map[tabId] = config; });
-    try { await chrome.tabs.sendMessage(tabId, { type: "configure-session", managed: config }); }
+    assertCurrent();
+    await mutateStorageMap("creation_tabs", map => { assertCurrent(); map[tabId] = config; });
+    assertCurrent();
+    try { await sendTabMessage(tabId, { type: "configure-session", managed: config }, 5000, "configure-session"); }
     catch { /* The next page registration can restore this binding. */ }
     return bound;
   }
   return { status: "ok" };
 }
 async function registerPageSession(tabId, page) {
+  const signature = JSON.stringify([page.session, page.conversationId, page.projectId, page.managed, page.postSend, page.documentId]);
+  const pending = registrationPending.get(tabId);
+  if (pending?.signature === signature) return pending.promise;
+  const epoch = (registrationEpochs.get(tabId) ?? 0) + 1;
+  registrationEpochs.set(tabId, epoch);
+  const assertCurrent = () => {
+    if (registrationEpochs.get(tabId) !== epoch || backendChanging) throw new Error("registration_superseded");
+  };
+  const promise = (async () => {
+    if (backendChanging) throw new Error("backend_change_in_progress");
+    if (!await restoreBackendIdentities()) throw new Error("backend_identity_recovery_pending");
+    assertCurrent();
+    const saved = registrationCache.get(tabId);
+    if (saved?.signature === signature && Date.now() - saved.at < 60000) {
+      registrationResults.set(saved.page, epoch);
+      return saved.page;
+    }
+    const registered = await registerPageIdentity(tabId, page, assertCurrent);
+    assertCurrent();
+    // The response may belong to a document that navigated while HTTP binding
+    // was outstanding. Observe the document directly before applying authority.
+    if (page.documentId) {
+      const fresh = await sendTabMessage(tabId, { type: "get-session-id" }, 3000, "registration validation");
+      assertCurrent();
+      if (fresh?.documentId !== page.documentId || fresh.session !== page.session ||
+          fresh.conversationId !== page.conversationId) throw new Error("registration_superseded");
+    }
+    const previous = (await getStorage("page_lifecycle", {}))[tabId];
+    assertCurrent();
+    // A delayed pre-binding response cannot regress this same creation's binding.
+    if (previous?.session === registered.session && previous.conversationId && !registered.conversationId)
+      throw new Error("registration_superseded");
+    await getPageManager().remember(tabId, { session: registered.session,
+      conversationId: registered.conversationId ?? null, projectId: registered.projectId ?? null,
+      ...(previous?.conversationId && previous.conversationId !== registered.conversationId
+        ? { lifecyclePolicy: "protected", provenance: "manual", managementGranted: false } : {}) },
+      () => registrationEpochs.get(tabId) === epoch && !backendChanging);
+    assertCurrent();
+    registrationResults.set(registered, epoch);
+    registrationCache.set(tabId, { signature, page: registered, at: Date.now() });
+    return registered;
+  })().finally(() => { if (registrationPending.get(tabId)?.promise === promise) registrationPending.delete(tabId); });
+  registrationPending.set(tabId, { signature, promise });
+  return promise;
+}
+// Null is authoritative discovery only when a fresh observation agrees. A
+// token-matching, still-unbound creation retains its reserved capacity across
+// transient SPA routes, without becoming dispatchable on those routes.
+async function handleNullPage(tabId, page) {
+  const epoch = registrationEpochs.get(tabId) ?? 0;
+  const fresh = await sendTabMessage(tabId, { type: "get-session-id" }, 3000, "null identity validation");
+  if (page.documentId && fresh?.documentId !== page.documentId) return;
+  if (fresh?.session !== null) return;
+  const known = (await getStorage("creation_tabs", {}))[tabId];
+  const lifecycle = (await getStorage("page_lifecycle", {}))[tabId];
+  const managed = fresh?.managed;
+  if ((registrationEpochs.get(tabId) ?? 0) !== epoch) return;
+  if (known && !known.boundConversation && !lifecycle?.conversationId && managed &&
+      managed.sessionRef === known.sessionRef && managed.token === known.token &&
+      managed.owner === known.owner && lifecycle?.session === known.sessionRef) return;
+  const forgetting = forgetTabSession(tabId);
+  const forgettingEpoch = registrationEpochs.get(tabId);
+  await forgetting;
+  await getPageManager().forget(tabId, () => registrationEpochs.get(tabId) === forgettingEpoch);
+}
+async function registerPageIdentity(tabId, page, assertCurrent = () => {}) {
   if (page.managed) {
-    const registered = await registerManagedPage(tabId, page);
+    const registered = await registerManagedPage(tabId, page, assertCurrent);
     return { ...page, conversationId: registered.conversationId ?? page.conversationId };
   }
   if (!page.conversationId) return page;
@@ -337,14 +599,18 @@ async function processProjectDiscoveries() {
     await httpJson("POST", `/internal/project-discoveries/${command.discoveryId}/complete`, {
       owner, token: command.token, sources,
     });
+    dispatchClient?.wake();
   } catch (e) { dlog("project discovery deferred", e.message); }
   finally { discoveryPolling = false; }
 }
 async function processSessionCreations() {
+  if (backendChanging) return;
+  if (!await restoreBackendIdentities()) return;
   if (creationPolling) return;
   creationPolling = true;
+  let advanced = false;
   try {
-    void processProjectDiscoveries();
+    if (dispatchMode !== "v2") void processProjectDiscoveries();
     const owner = await creationOwner();
     const { command } = await httpJson("POST", "/internal/session-creations/claim", { owner });
     if (!command) return;
@@ -353,10 +619,21 @@ async function processSessionCreations() {
     const marker = `#relay-create=${encodeURIComponent(JSON.stringify(meta))}`;
     let tab;
     if (command.state === "claimed") {
-      // Persist the open fence first. A crash after this point cannot reopen blindly.
-      await creationAction(meta, "opening");
-      const url = meta.projectId ? `https://chatgpt.com/g/${meta.projectId}/project` : "https://chatgpt.com/";
-      tab = await chrome.tabs.create({ url: url + marker, active: false });
+      try {
+        tab = await getPageManager().withSlot(async () => {
+          // Capacity is reserved before the durable open fence.
+          await creationAction(meta, "opening");
+          const url = meta.projectId ? `https://chatgpt.com/g/${meta.projectId}/project` : "https://chatgpt.com/";
+          const created = await chrome.tabs.create({ url: url + marker, active: false });
+          await getPageManager().remember(created.id, { session: meta.sessionRef, conversationId: null,
+            projectId: meta.projectId, provenance: "relay", lifecyclePolicy: "reclaimable" });
+          return created;
+        }, await maxManagedTabs());
+        capacityWaiting.delete(meta.sessionRef);
+      } catch (error) {
+        if (error.message === "waiting_for_capacity") { capacityWaiting.add(meta.sessionRef); return; }
+        throw error;
+      }
     } else {
       const tabs = await listChatGPTTabs();
       tab = tabs.find(t => (t.url ?? "").endsWith(marker));
@@ -364,7 +641,7 @@ async function processSessionCreations() {
         // The page may have stripped its marker; ask existing content scripts.
         for (const candidate of tabs) {
           try {
-            const page = await chrome.tabs.sendMessage(candidate.id, { type: "get-session-id" });
+            const page = await sendTabMessage(candidate.id, { type: "get-session-id" }, 3000, "creation recovery");
             if (page.managed?.sessionRef === meta.sessionRef && page.managed?.token === meta.token) {
               tab = candidate; break;
             }
@@ -373,24 +650,28 @@ async function processSessionCreations() {
       }
       if (!tab) {
         await creationAction(meta, "fail", { error: "session_open_outcome_unknown", unknown: true });
+        advanced = true;
         return;
       }
     }
     await mutateStorageMap("creation_tabs", map => { map[tab.id] = meta; });
     await creationAction(meta, "attach", { tabId: tab.id });
-    try { await chrome.tabs.sendMessage(tab.id, { type: "configure-session", managed: meta }); }
+    advanced = true;
+    try { await sendTabMessage(tab.id, { type: "configure-session", managed: meta }, 5000, "configure-session"); }
     catch { /* The content script also requests its configuration on load. */ }
     void handleTab(tab.id);
   } catch (e) {
     console.warn("[relay sw] session creation observation failed", e.message);
   } finally {
     creationPolling = false;
-    setTimeout(() => void processSessionCreations(), 5000);
+    if (advanced) dispatchClient?.wake();
+    if (dispatchMode !== "v2") setTimeout(() => void processSessionCreations(), 5000);
   }
 }
 
-async function rememberTabSession(tabId, session) {
+async function rememberTabSession(tabId, session, expectedEpoch) {
   return mutateStorageMap("tab_session_map", saved => {
+  if (expectedEpoch !== undefined && registrationEpochs.get(tabId) !== expectedEpoch) throw new Error("registration_superseded");
   const previous = tabSessionCache.get(tabId) ?? saved[tabId];
   if (previous && previous !== session && dispatchLoops.get(previous)?.tabId === tabId) {
     stopDispatchLoop(previous);
@@ -407,7 +688,14 @@ async function loadTabSessionCache() {
   }
 }
 async function forgetTabSession(tabId) {
+  registrationEpochs.set(tabId, (registrationEpochs.get(tabId) ?? 0) + 1);
+  registrationPending.delete(tabId);
+  const forgettingEpoch = registrationEpochs.get(tabId);
+  registrationCache.delete(tabId);
+  dispatchPages.delete(tabId);
+  dispatchClient?.wake();
   return mutateStorageMap("tab_session_map", saved => {
+  if (registrationEpochs.get(tabId) !== forgettingEpoch) return;
   const session = tabSessionCache.get(tabId) ?? saved[tabId];
   tabSessionCache.delete(tabId);
   verifiedTabSessions.delete(tabId);
@@ -437,7 +725,8 @@ function mergeTaskEvidence(previous, incoming) {
   return merged;
 }
 async function markInflight(session, taskId, details = {}, epochs = null) {
-  return mutateStorageMap(STORAGE_KEYS.INFLIGHT, inflight => {
+  return mutateStorageMap(STORAGE_KEYS.INFLIGHT, async inflight => {
+  if (details.claimToken && (await getStorage("dispatch_task_tokens", {}))[taskId]?.claimToken !== details.claimToken) return false;
   if (epochs && (epochs.get(session) ?? 0) !== (taskEpochs.get(session) ?? 0)) return false;
   const acquiring = details.deliveryPhase === "preparing";
   if (!acquiring && (retiredTasks.has(taskId) || (inflight[session] && inflight[session].taskId !== taskId))) return false;
@@ -475,13 +764,13 @@ const offlineSessions = new Set();
 
 // Tell the content script to clear sessionStorage in-flight state and reset its
 // banner after completion, definitive failure, or late-reply-window expiry.
-async function notifyTabCleared(tabId, session, taskId) {
+async function notifyTabCleared(tabId, session, taskId, claimToken) {
   if (!tabId || !session || !taskId) return;
   // The clear-inflight handler also resets the banner to "Relay: <session>...".
   try {
     await sendTabMessage(
       tabId,
-      { type: "clear-inflight", expectedSession: session, taskId },
+      { type: "clear-inflight", expectedSession: session, taskId, claimToken },
       PAGE_STATE_SENDMSG_TIMEOUT_MS,
       "clear-inflight",
     );
@@ -512,11 +801,20 @@ async function getPageState(tabId) {
   if (
     !state ||
     state.error ||
-    typeof state.session !== "string" ||
+    (typeof state.session !== "string" && state.session !== null) ||
     typeof state.generating !== "boolean" ||
     typeof state.ready !== "boolean"
   ) {
     throw new Error(state?.error ?? "get-page-state invalid response");
+  }
+  if (dispatchMode === "v2" && state.session && state.dispatchProtocol !== 2) {
+    state.ready = false;
+    state.reason = "reload_extension_and_page";
+  }
+  if (state.session && state.documentId && tabSessionCache.get(tabId) === state.session) {
+    const previous = dispatchPages.get(tabId);
+    dispatchPages.set(tabId, { session: state.session, tabId, documentId: state.documentId });
+    if (previous?.session !== state.session || previous?.documentId !== state.documentId) dispatchClient?.wake();
   }
   return state;
 }
@@ -537,28 +835,38 @@ async function initialCreationForDispatch(state, session, tabId, taskId = null) 
 // Independent of task dispatch: a busy conversation must remain diagnosable.
 let snapshotsRunning = false;
 async function reportSessionSnapshots() {
+  if (backendChanging) return;
   if (snapshotsRunning) return;
   snapshotsRunning = true;
   try {
     const owner = await creationOwner();
     const tabs = await chrome.tabs.query({ url: "https://chatgpt.com/*" });
-    const reports = await Promise.allSettled(tabs.map(async tab => {
+    const generation = await inventoryGeneration();
+    const reports = await Promise.all(tabs.map(async tab => {
       if (tab.id == null) return;
-      const session = await getTabSession(tab.id, { forceFresh: true }).catch(() => null);
-      if (!session) return;
       const state = await getPageState(tab.id).catch(() => null);
+      // Diagnostics never wait for HTTP identity registration. Discovery is not
+      // a session; an unknown identity is registered independently by handleTab.
+      const session = state?.session ?? tabSessionCache.get(tab.id);
+      if (!session || state?.session === null) return;
       if (state && state.session !== session) return;
-      await httpJson("POST", "/internal/session-snapshots", {
-        owner, generation: await inventoryGeneration(), tabId: tab.id, session, protocol: state?.controlProtocol ?? null,
+      return {
+        owner, generation, tabId: tab.id, session, protocol: state?.controlProtocol ?? null,
+        dispatchProtocol: state?.dispatchProtocol ?? null,
+        observedAt: Date.now(), revision: ++snapshotRevision, documentId: state?.documentId ?? null,
+        probe: { ok: !!state, ...(!state ? { code: "page_probe_failed" } : {}) },
         conversationId: state ? tabRoute(tab)?.conversationId : null, projectId: state ? tabRoute(tab)?.projectId : null,
         version: chrome.runtime.getManifest?.().version ?? null,
         ready: state?.ready ?? null, generating: state?.generating ?? null,
         composerClean: state?.composerClean ?? null, reason: state ? state.reason ?? null : "page_unreachable",
         block: state?.block ?? null,
         capabilities: state?.capabilities,
-      }, 5000);
+      };
     }));
-    for (const report of reports) if (report.status === "rejected") dlog("page snapshot failed", report.reason);
+    const valid = reports.filter(Boolean);
+    if (dispatchMode === "v2") {
+      if (valid.length) await httpJson("POST", "/internal/session-snapshots/batch", { owner, generation, reports: valid }, 5000);
+    } else await Promise.allSettled(valid.map(report => httpJson("POST", "/internal/session-snapshots", report, 5000)));
   } catch (err) { dlog("session snapshots", err); }
   finally { snapshotsRunning = false; }
 }
@@ -609,19 +917,37 @@ async function executeOpenControl(command) {
   const matches = tabs.filter(tab => controlRouteMatches(tab, command.target));
   if (matches.length > 1) throw new Error("page_ambiguous");
   if (matches.length === 1) return verifyOpenPage(command, matches[0].id, false);
-  await reportBrowserInventory();
-  command.executionFenced = true;
-  const fence = await httpJson("POST", `/internal/session-controls/${encodeURIComponent(command.operationId)}/fence`,
-    { owner: command.owner, token: command.token, generation });
-  if (!fence.execute) throw new Error("open_outcome_unknown");
-  if (Date.now() >= command.expiresAt) throw new Error("open_outcome_unknown");
-  const project = command.target.projectId ? `/g/${encodeURIComponent(command.target.projectId)}` : "";
-  const tab = await chrome.tabs.create({ url: `https://chatgpt.com${project}/c/${command.target.conversationId}${marker}`, active: false });
+  const tab = await getPageManager().withSlot(async () => {
+    const currentMatches = (await listChatGPTTabs()).filter(candidate => controlRouteMatches(candidate, command.target));
+    if (currentMatches.length > 1) throw new Error("page_ambiguous");
+    if (currentMatches.length === 1) return { ...currentMatches[0], reused: true };
+    await reportBrowserInventory();
+    command.executionFenced = true;
+    const fence = await httpJson("POST", `/internal/session-controls/${encodeURIComponent(command.operationId)}/fence`,
+      { owner: command.owner, token: command.token, generation });
+    if (!fence.execute) throw new Error("open_outcome_unknown");
+    if (Date.now() >= command.expiresAt) throw new Error("open_outcome_unknown");
+    const project = command.target.projectId ? `/g/${encodeURIComponent(command.target.projectId)}` : "";
+    const created = await chrome.tabs.create({ url: `https://chatgpt.com${project}/c/${command.target.conversationId}${marker}`, active: false });
+    const parked = (await getStorage("parked_sessions", {}))[command.session];
+    await getPageManager().remember(created.id, { session: command.session, conversationId: command.target.conversationId,
+      projectId: command.target.projectId, provenance: parked?.provenance ?? "relay",
+      managementGranted: parked?.managementGranted ?? false, lifecyclePolicy: parked?.lifecyclePolicy ?? "protected" });
+    return created;
+  }, await maxManagedTabs());
+  capacityWaiting.delete(command.session);
+  if (tab.reused) {
+    await mutateStorageMap("parked_sessions", map => { delete map[command.session]; });
+    return verifyOpenPage(command, tab.id, false);
+  }
   if (tab.id == null) throw new Error("open_outcome_unknown");
   command.tabId = tab.id;
   await httpJson("POST", `/internal/session-controls/${encodeURIComponent(command.operationId)}/record-tab`,
     { owner: command.owner, token: command.token, tabId: tab.id });
-  return verifyOpenPage(command, tab.id, true);
+  const result = await verifyOpenPage(command, tab.id, true);
+  await mutateStorageMap("parked_sessions", map => { delete map[command.session]; });
+  dispatchClient?.wake();
+  return result;
 }
 async function executeCloseControl(command) {
   const generation = await inventoryGeneration();
@@ -641,6 +967,8 @@ async function executeCloseControl(command) {
   if (state.session !== command.session || !state.documentId) throw new Error("page_identity_unavailable");
   if (state.composerClean !== true) throw new Error("composer_not_clean");
   if (!state.ready || state.generating) throw new Error("page_not_idle");
+  if (command.target.automatic && (tab.pinned || tab.active ||
+      (command.expectedActivityRevision != null && command.expectedActivityRevision !== state.activityRevision))) throw new Error("page_in_use");
   await reportBrowserInventory();
   command.executionFenced = true;
   const fence = await httpJson("POST", `/internal/session-controls/${encodeURIComponent(command.operationId)}/fence`,
@@ -649,13 +977,18 @@ async function executeCloseControl(command) {
   tab = await chrome.tabs.get(command.tabId).catch(() => null);
   if (!tab || !controlRouteMatches(tab, command.target)) throw Object.assign(new Error("session_identity_changed"), { definitelyBlocked: true });
   const check = await sendTabMessage(command.tabId, { type: "check-close", expectedSession: command.session,
-    documentId: state.documentId }, PAGE_STATE_SENDMSG_TIMEOUT_MS, "check-close");
+    documentId: state.documentId, ...(command.target.automatic ? { automatic: true, expectedActivityRevision: state.activityRevision } : {}) }, PAGE_STATE_SENDMSG_TIMEOUT_MS, "check-close");
   if (check?.error || check?.closeAllowed !== true) throw Object.assign(new Error(check?.error ?? "page_identity_unavailable"), { definitelyBlocked: true });
   if (Date.now() >= command.expiresAt) throw new Error("close_outcome_unknown");
+  if (command.target.automatic) {
+    const latest = await chrome.tabs.get(command.tabId);
+    const policy = (await getStorage("page_lifecycle", {}))[command.tabId];
+    if (latest.active || latest.pinned || policy?.lifecyclePolicy !== "reclaimable") throw Object.assign(new Error("page_in_use"), { definitelyBlocked: true });
+  }
   await chrome.tabs.remove(command.tabId);
   if (await chrome.tabs.get(command.tabId).catch(() => null)) throw new Error("close_outcome_unknown");
   await reportBrowserInventory();
-  return { action: "page_closed", suspended: true, tabId: command.tabId };
+  return { action: "page_closed", suspended: command.target.automatic ? fence.suspended : true, tabId: command.tabId };
 }
 
 // Runs in the page's MAIN world. Credentials stay inside this function; only
@@ -883,34 +1216,54 @@ async function executeRefreshControl(command) {
   } finally { refreshingTabs.delete(tabId); }
 }
 let controlPollRunning = false;
-async function processSessionControls() {
-  if (controlPollRunning) return;
-  controlPollRunning = true;
-  try {
-    const owner = await creationOwner();
-    const { command } = await httpJson("POST", "/internal/session-controls/claim", { owner });
-    if (!command) return;
+function runControlOnce(command) {
+  if (executingControls.has(command.operationId)) return executingControls.get(command.operationId);
+  const execution = (async () => {
     let outcome;
     try { outcome = { state: "succeeded", result: await executeSessionControl(command) }; }
     catch (e) {
+      if (e.message === "waiting_for_capacity" && !command.executionFenced) {
+        capacityWaiting.add(command.session);
+        return { state: "waiting", error: e.message };
+      }
       const uncertain = !e.definitelyBlocked && (command.executionFenced || command.state === "executing");
       outcome = { state: uncertain || /^(refresh|open|close)_outcome_unknown$/.test(e.message) ? "unknown" : "blocked", error: e.message };
     }
     await httpJson("POST", `/internal/session-controls/${encodeURIComponent(command.operationId)}/finish`,
-      { owner, token: command.token, ...outcome });
+      { owner: command.owner, token: command.token, ...outcome });
+    capacityWaiting.delete(command.session);
+    return outcome;
+  })().finally(() => executingControls.delete(command.operationId));
+  executingControls.set(command.operationId, execution);
+  return execution;
+}
+async function processSessionControls() {
+  if (backendChanging) return;
+  if (!await restoreBackendIdentities()) return;
+  if (controlPollRunning) return;
+  controlPollRunning = true;
+  let advanced = false;
+  try {
+    const owner = await creationOwner();
+    const { command } = await httpJson("POST", "/internal/session-controls/claim", { owner });
+    if (!command) return;
+    const outcome = await runControlOnce(command);
+    advanced = outcome.state !== "waiting";
   } catch (err) { dlog("session controls", err); }
   finally {
     controlPollRunning = false;
+    if (advanced) dispatchClient?.wake();
   }
 }
 async function pollSessionControls() {
+  if (dispatchMode === "v2") return;
   await processSessionControls();
   setTimeout(() => void pollSessionControls(), 5000);
 }
 void pollSessionControls();
 
-async function reportTaskProgress(taskId, phase) {
-  return httpJson("POST", `/internal/tasks/${taskId}/progress`, { phase }).then(() => true).catch((e) => {
+async function reportTaskProgress(taskId, phase, claimToken) {
+  return httpJson("POST", `/internal/tasks/${taskId}/progress`, { phase, ...(claimToken ? { claimToken } : {}) }).then(() => true).catch((e) => {
     dlog("[relay sw] progress report failed", taskId.slice(0, 8), phase, e.message);
     return false;
   });
@@ -935,7 +1288,7 @@ async function reportTaskObservation(taskId, rec, observation, now = Date.now())
   if (lastReportedAt > 0 && now - lastReportedAt < interval) return;
 
   try {
-    await httpJson("POST", `/internal/tasks/${taskId}/observation`, normalized);
+    await httpJson("POST", `/internal/tasks/${taskId}/observation`, { ...normalized, claimToken: rec.claimToken });
     rec.lastObservationSignature = signature;
     rec.lastObservationReportedAt = now;
   } catch (e) {
@@ -951,7 +1304,7 @@ async function reportRecoveryObservation(taskId, rec, now = Date.now()) {
   ) {
     return;
   }
-  await reportTaskProgress(taskId, "recovery_observed");
+  await reportTaskProgress(taskId, "recovery_observed", rec.claimToken);
   rec.lastRecoveryProgressAt = now;
 }
 
@@ -978,6 +1331,7 @@ async function setClaimPendingReply(
     session,
     tabId,
     taskId,
+    claimToken: claim.task.claimToken,
     effortPolicy: claim.task.effortPolicy ?? null,
     expiresAt: claim.task.expiresAt,
     completionDeadlineAt: claim.task.completionDeadlineAt,
@@ -1142,6 +1496,12 @@ function stopDispatchLoop(session) {
 }
 
 async function startDispatchLoop(session, tabId) {
+  if (backendChanging) return;
+  await ensureDispatch();
+  if (dispatchMode === "v2" && acknowledgedPages.get(session)?.tabId !== tabId) {
+    await getPageState(tabId).catch(() => null);
+    return;
+  }
   const existing = dispatchLoops.get(session);
   if (existing) {
     if (existing.tabId === tabId) return; // This tab already has a loop.
@@ -1161,7 +1521,40 @@ async function startDispatchLoop(session, tabId) {
         continue;
       }
 
-      const durableInflight = await getInflight(session);
+      let resumedClaim = null;
+      const intent = dispatchMode === "v2" ? (await getStorage("dispatch_claim_intents", {}))[session] : null;
+      if (dispatchMode === "v2") {
+        const current = await getPageState(tabId).catch(() => null);
+        if (!current || current.session !== session) break;
+        if (current.dispatchProtocol !== 2) break;
+        if (intent) {
+          try {
+            resumedClaim = await claimForPage(session, tabId, current, controller.signal);
+            if (!resumedClaim.task) break;
+            const prior = await getInflight(session);
+            if (resumedClaim.task.status !== "in_progress" || resumedClaim.task.sendAttemptedAt != null || (prior && hasSendFence(prior))) {
+              const task = await httpJson("GET", `/v1/tasks/${resumedClaim.task.taskId}`);
+              if (["in_progress", "recovering"].includes(task.status) || isRecoverableLateReply(task)) {
+                await attachPendingFromTask(task, session, tabId, prior ?? {});
+                resumedClaim = null;
+                continue;
+              }
+              await clearRecoveredTask(task.taskId, session, tabId);
+              continue;
+            }
+          } catch (error) {
+            if (controller.signal.aborted) break;
+            dlog("claim recovery waiting", session, error.message);
+            await delay(DISPATCH_LOOP_RETRY_MS);
+            continue;
+          }
+        } else {
+          const work = dispatchWork.get(session);
+          const local = await getInflight(session);
+          if (!local && (!work || (!work.queuedTasks && !work.activeTaskId && !work.paused) || work.suspended)) break;
+        }
+      }
+      const durableInflight = resumedClaim?.task ? null : await getInflight(session);
       if (durableInflight?.taskId) {
         try {
           const recovered = await recoverInflightForTab(
@@ -1308,13 +1701,7 @@ async function startDispatchLoop(session, tabId) {
       const loopStart = Date.now();
       let claim;
       try {
-        claim = await httpJson(
-          "GET",
-          `/internal/next_task?session=${encodeURIComponent(session)}&wait=${NEXT_TASK_WAIT_MS}`,
-          undefined,
-          NEXT_TASK_WAIT_MS + 8000,
-          controller.signal,
-        );
+        claim = resumedClaim ?? await claimForPage(session, tabId, await getPageState(tabId), controller.signal);
       } catch (e) {
         if (controller.signal.aborted) {
           console.log("[relay sw] dispatch loop abort", session.slice(0, 8));
@@ -1326,11 +1713,14 @@ async function startDispatchLoop(session, tabId) {
       }
 
       if (!claim?.task) {
-        // Restart immediately after an empty long poll.
+        if (dispatchMode === "v2") break;
+        await delay(4000);
         continue;
       }
 
       const { taskId, text } = claim.task;
+      if (dispatchMode === "v2" && (claim.task.status !== "in_progress" || claim.task.sendAttemptedAt != null)) continue;
+      await getPageManager().noteActivity(session);
       const dispatchAt = Date.now();
       console.log(
         "[relay sw] dispatch task", taskId.slice(0, 8),
@@ -1338,18 +1728,20 @@ async function startDispatchLoop(session, tabId) {
         "dispatchAt", dispatchAt,
         "waitMs", dispatchAt - loopStart,
       );
+      const postTask = (action, body) => httpJson("POST", `/internal/tasks/${taskId}/${action}`, { ...body, claimToken: claim.task.claimToken });
       activeDispatchTasks.add(taskId);
       try {
-        await markInflight(session, taskId, {
+        const acquired = await markInflight(session, taskId, {
           tabId,
-          deliveryPhase: "preparing",
+          deliveryPhase: "preparing", claimToken: claim.task.claimToken,
         });
+        if (acquired === false) throw Object.assign(new Error("dispatch_claim_superseded"), { code: "dispatch_loop_interrupted" });
         let pageState;
         try {
           pageState = await getPageState(tabId);
         } catch (e) {
-          await httpJson("POST", `/internal/tasks/${taskId}/defer`, {}).catch(() => {});
-          await clearRecoveredTask(taskId, session, tabId);
+          await postTask("defer", {});
+          await clearRecoveredTask(taskId, session, tabId, claim.task.claimToken);
           await delay(DISPATCH_LOOP_RETRY_MS);
           continue;
         }
@@ -1357,8 +1749,8 @@ async function startDispatchLoop(session, tabId) {
           ? await initialCreationForDispatch(pageState, session, tabId, taskId) : null;
         if (pageState.session !== session || pageState.generating ||
             ((!pageState.ready || pageState.composerClean === false) && !initialize)) {
-          await httpJson("POST", `/internal/tasks/${taskId}/defer`, {}).catch(() => {});
-          await clearRecoveredTask(taskId, session, tabId);
+          await postTask("defer", {});
+          await clearRecoveredTask(taskId, session, tabId, claim.task.claimToken);
           await delay(DISPATCH_LOOP_RETRY_MS);
           continue;
         }
@@ -1371,19 +1763,21 @@ async function startDispatchLoop(session, tabId) {
         await markInflight(session, taskId, {
           tabId,
           baseline: pageState?.baseline,
-          deliveryPhase: "preparing",
+          deliveryPhase: "preparing", claimToken: claim.task.claimToken,
           expiresAt: claim.task.expiresAt,
           completionDeadlineAt: claim.task.completionDeadlineAt,
           recoveryDeadlineAt: claim.task.recoveryDeadlineAt,
           lateReplyDeadlineAt: claim.task.lateReplyDeadlineAt,
         });
-        await reportTaskProgress(taskId, "submit_started");
+        const started = await reportTaskProgress(taskId, "submit_started", claim.task.claimToken);
+        if (claim.task.claimToken && !started) throw Object.assign(new Error("dispatch_start_unconfirmed"), { code: "dispatch_loop_interrupted" });
 
         let runRes;
         try {
           runRes = await sendTabMessage(
             tabId,
             { type: "run-task", taskId, text, effortPolicy: claim.task.effortPolicy, baseline: pageState?.baseline, expectedSession: session,
+              expectedDocumentId: pageState.documentId, claimToken: claim.task.claimToken,
               ...(initialize ? { initializeComposer: { token: initialize.token, documentId: pageState.documentId } } : {}) },
             RUN_TASK_ACK_TIMEOUT_MS,
             "run-task acknowledgement",
@@ -1406,6 +1800,10 @@ async function startDispatchLoop(session, tabId) {
           catch (e) { console.warn("[relay sw] submission binding deferred", e.message); }
         }
         if (runRes?.error) {
+          if (runRes.errorCode === "page_busy" && runRes.submissionState === "not-submitted") {
+            await delay(DISPATCH_LOOP_RETRY_MS);
+            continue;
+          }
           if (
             runRes.errorCode === "attachment_upload_timeout" ||
             runRes.errorCode === "attachment_upload_failed" ||
@@ -1415,10 +1813,10 @@ async function startDispatchLoop(session, tabId) {
             if (runRes.attachmentCleanupConfirmed !== true) {
               await setAttachmentBlock(session, `${errorCode}: ${runRes.error}`);
             }
-            await httpJson("POST", `/internal/tasks/${taskId}/complete`, {
+            await postTask("complete", {
               error: errorCode,
             }).catch(() => {});
-            await clearRecoveredTask(taskId, session, tabId);
+            await clearRecoveredTask(taskId, session, tabId, claim.task.claimToken);
             await setStorage(STORAGE_KEYS.LAST_ERROR, {
               taskId,
               session,
@@ -1436,8 +1834,8 @@ async function startDispatchLoop(session, tabId) {
           }
           if (runRes.submissionState === "not-submitted" &&
               (runRes.errorCode === "composer_not_clean" || /waitForPageReady/.test(runRes.error))) {
-            await httpJson("POST", `/internal/tasks/${taskId}/defer`, {}).catch(() => {});
-            await clearRecoveredTask(taskId, session, tabId);
+            await postTask("defer", {});
+            await clearRecoveredTask(taskId, session, tabId, claim.task.claimToken);
             await delay(DISPATCH_LOOP_RETRY_MS);
             continue;
           }
@@ -1461,8 +1859,8 @@ async function startDispatchLoop(session, tabId) {
         if (runRes?.status !== "submitted") {
           // Compatibility with older content-script versions.
           if (typeof runRes?.reply === "string") {
-            await httpJson("POST", `/internal/tasks/${taskId}/complete`, { text: runRes.reply });
-            await clearRecoveredTask(taskId, session, tabId);
+            await postTask("complete", { text: runRes.reply });
+            await clearRecoveredTask(taskId, session, tabId, claim.task.claimToken);
             console.log("[relay sw] task completed inline", taskId.slice(0, 8), "completionAt", Date.now());
             continue;
           }
@@ -1470,9 +1868,9 @@ async function startDispatchLoop(session, tabId) {
         }
 
         const submitAcknowledgedProgressReported =
-          await reportTaskProgress(taskId, "submit_acknowledged");
+          await reportTaskProgress(taskId, "submit_acknowledged", claim.task.claimToken);
         await markInflight(session, taskId, {
-          deliveryPhase: "accepted",
+          deliveryPhase: "accepted", claimToken: claim.task.claimToken,
           submittedUserMessageId: runRes.submittedUserMessageId ?? null,
         });
         await setClaimPendingReply(
@@ -1496,8 +1894,8 @@ async function startDispatchLoop(session, tabId) {
         // Preserve pending state and the Send fence for the replacement loop.
         if (e.code === "dispatch_loop_interrupted") break;
         console.warn("[relay sw] task failed", taskId.slice(0, 8), e.message);
-        await httpJson("POST", `/internal/tasks/${taskId}/complete`, { error: e.message }).catch(() => {});
-        await clearRecoveredTask(taskId, session, tabId);
+        const terminal = await postTask("complete", { error: e.message }).catch(() => null);
+        if (terminal) await clearRecoveredTask(taskId, session, tabId, claim.task.claimToken);
       } finally {
         activeDispatchTasks.delete(taskId);
       }
@@ -1509,17 +1907,60 @@ async function startDispatchLoop(session, tabId) {
   }
 }
 
+function restoreBackendIdentities() {
+  if (backendIdentityRestore) return backendIdentityRestore;
+  backendIdentityRestore = (async () => {
+    const marker = await getStorage("backend_identity_reset_pending", null);
+    if (!marker?.pages?.length) return true;
+    const previousGate = backendChanging;
+    backendChanging = true;
+    try {
+      // The active maps and config are committed together. They choose the
+      // restoration namespace after interruption on either side of that commit.
+      const managedTabs = await getStorage("creation_tabs", {});
+      const remaining = [];
+      for (const page of marker.pages) {
+        try {
+          const tab = await chrome.tabs.get(page.tabId).catch(() => null);
+          if (!tab) continue;
+          const state = await getPageState(page.tabId);
+          if (state.documentId !== page.documentId) continue; // Original document is gone.
+          if ((state.conversationId ?? null) !== page.conversationId || (state.projectId ?? null) !== page.projectId) continue;
+          const local = await sendTabMessage(page.tabId, { type: "get-inflight" }, 5000, "backend identity recovery preflight");
+          if (state.generating || state.postSend || local?.inflight?.taskId) { remaining.push(page); continue; }
+          const reset = await sendTabMessage(page.tabId, { type: "reset-relay-identity", documentId: page.documentId }, 5000, "backend identity recovery reset");
+          if (!reset?.reset) { remaining.push(page); continue; }
+          const managed = managedTabs[page.tabId];
+          if (managed) {
+            const fresh = await getPageState(page.tabId);
+            if (fresh.documentId !== page.documentId || fresh.generating || fresh.postSend ||
+                (await sendTabMessage(page.tabId, {type:"get-inflight"}, 5000, "backend identity restore preflight"))?.inflight?.taskId) { remaining.push(page); continue; }
+            const restored = await sendTabMessage(page.tabId, { type: "configure-session", managed }, 5000, "backend identity restore");
+            if (restored?.error || restored?.session !== managed.sessionRef) { remaining.push(page); continue; }
+          }
+        } catch { remaining.push(page); }
+      }
+      await setStorage("backend_identity_reset_pending", remaining.length ? {pages: remaining} : null);
+      return remaining.length === 0;
+    } finally { backendChanging = previousGate; }
+  })().finally(() => { backendIdentityRestore = null; });
+  return backendIdentityRestore;
+}
+
 async function restoreDispatchLoops() {
+  if (!await restoreBackendIdentities()) return;
+  try { await ensureDispatch(); } catch { return; }
   const tabs = await listChatGPTTabs();
-  for (const tab of tabs) {
-    if (!tab.id) continue;
+  await Promise.allSettled(tabs.map(async tab => {
+    if (!tab.id) return;
     const session = await getTabSession(tab.id, { forceFresh: true });
-    if (!session) continue;
-    if (offlineSessions.has(session)) continue;
-    startDispatchLoop(session, tab.id).catch((e) =>
+    if (!session) return;
+    await getPageState(tab.id).catch(() => null);
+    if (offlineSessions.has(session)) return;
+    void startDispatchLoop(session, tab.id).catch((e) =>
       console.warn("[relay sw] restore loop failed", session.slice(0, 8), e),
     );
-  }
+  }));
 }
 
 async function waitForPendingReply(taskId, signal) {
@@ -1569,6 +2010,9 @@ async function listPendingReplies() {
 }
 async function setPendingReply(taskId, rec) {
   return mutateTaskStorage(async () => {
+    const token = (await getStorage("dispatch_task_tokens", {}))[taskId]?.claimToken;
+    if (rec.claimToken && token !== rec.claimToken) return false;
+    rec.claimToken ??= token;
     const inflight = await getStorage(STORAGE_KEYS.INFLIGHT, {});
     const owner = inflight[rec.session];
     if (retiredTasks.has(taskId) || (owner && owner.taskId !== taskId)) return false;
@@ -1784,7 +2228,7 @@ async function pollOnePendingSnapshot(taskId, rec) {
 
   if (rec.submissionAcknowledged && !rec.submitAcknowledgedProgressReported) {
     rec.submitAcknowledgedProgressReported =
-      await reportTaskProgress(taskId, "submit_acknowledged");
+      await reportTaskProgress(taskId, "submit_acknowledged", rec.claimToken);
   }
 
   if (snap.status === "reply-ready") {
@@ -1807,7 +2251,7 @@ async function pollOnePendingSnapshot(taskId, rec) {
     if (rec.stableSampleCount >= POLL_REPLY_STABLE_SAMPLES && text.length > 0) {
       console.log("[relay sw] pending complete", taskId, "len=", text.length);
       if (!rec.replyProgressReported) {
-        await reportTaskProgress(taskId, "reply_detected");
+        await reportTaskProgress(taskId, "reply_detected", rec.claimToken);
         rec.replyProgressReported = true;
       }
       try {
@@ -1821,7 +2265,7 @@ async function pollOnePendingSnapshot(taskId, rec) {
         if (observeStopRequest(taskId, rec, snap)) {
           await cancelPending(taskId, rec, "user stopped before reply"); return;
         }
-        const captured = await httpJson("POST", `/internal/tasks/${taskId}/capture`, { text, effortEvidence });
+        const captured = await httpJson("POST", `/internal/tasks/${taskId}/capture`, { text, effortEvidence, claimToken: rec.claimToken });
         console.log(
           "[relay sw] reply captured",
           taskId.slice(0, 8),
@@ -1832,7 +2276,7 @@ async function pollOnePendingSnapshot(taskId, rec) {
         await setPendingReply(taskId, rec);
         return;
       }
-      await clearRecoveredTask(taskId, rec.session, rec.tabId);
+      await clearRecoveredTask(taskId, rec.session, rec.tabId, rec.claimToken);
       return;
     }
     await setPendingReply(taskId, rec);
@@ -1854,7 +2298,7 @@ async function pollOnePendingSnapshot(taskId, rec) {
       rec.submittedUserMessageId ?? snap.submittedUserMessageId ?? null;
     if (!rec.generatingProgressReported) {
       rec.generatingProgressReported =
-        await reportTaskProgress(taskId, "generating_seen");
+        await reportTaskProgress(taskId, "generating_seen", rec.claimToken);
     }
     await reportTaskObservation(taskId, rec, {
       phase: (snap.outputChars ?? 0) > 0 ? "answer_streaming" : "generating",
@@ -1885,7 +2329,7 @@ async function pollOnePendingSnapshot(taskId, rec) {
       rec.submittedUserMessageId ?? snap.submittedUserMessageId ?? null;
     if (!rec.submitAcknowledgedProgressReported) {
       rec.submitAcknowledgedProgressReported =
-        await reportTaskProgress(taskId, "submit_acknowledged");
+        await reportTaskProgress(taskId, "submit_acknowledged", rec.claimToken);
     }
     await reportTaskObservation(taskId, rec, {
       phase: "accepted",
@@ -1965,7 +2409,7 @@ async function resetComposerBestEffort(tabId, session, taskId) {
 async function failPending(taskId, rec, reason, options = {}) {
   let terminalConfirmed = false;
   try {
-    await httpJson("POST", `/internal/tasks/${taskId}/complete`, { error: reason });
+    await httpJson("POST", `/internal/tasks/${taskId}/complete`, { error: reason, claimToken: rec.claimToken });
     terminalConfirmed = true;
   } catch (e) {
     console.warn("[relay sw] failPending POST failed", taskId, e.message);
@@ -1986,7 +2430,7 @@ async function failPending(taskId, rec, reason, options = {}) {
     await setPendingReply(taskId, rec);
     return false;
   }
-  await clearRecoveredTask(taskId, rec.session, rec.tabId);
+  await clearRecoveredTask(taskId, rec.session, rec.tabId, rec.claimToken);
   await setStorage(STORAGE_KEYS.LAST_ERROR, {
     taskId, session: rec.session, error: reason, at: Date.now(),
   });
@@ -1999,7 +2443,7 @@ async function failUnobservedPending(taskId, rec) {
 }
 
 async function abandonPending(taskId, rec, reason) {
-  await clearRecoveredTask(taskId, rec.session, rec.tabId);
+  await clearRecoveredTask(taskId, rec.session, rec.tabId, rec.claimToken);
   await setStorage(STORAGE_KEYS.LAST_ERROR, {
     taskId, session: rec.session, error: reason, at: Date.now(),
   });
@@ -2008,7 +2452,7 @@ async function abandonPending(taskId, rec, reason) {
 async function cancelPending(taskId, rec, reason) {
   let terminal;
   try {
-    terminal = await httpJson("POST", `/internal/tasks/${taskId}/user-stop`, { reason });
+    terminal = await httpJson("POST", `/internal/tasks/${taskId}/user-stop`, { reason, claimToken: rec.claimToken });
   } catch (e) {
     console.warn("[relay sw] cancelPending POST failed", taskId, e.message);
     terminal = await httpJson('GET', `/v1/tasks/${taskId}`).catch(() => null);
@@ -2017,7 +2461,7 @@ async function cancelPending(taskId, rec, reason) {
     await setPendingReply(taskId, rec);
     return false;
   }
-  await clearRecoveredTask(taskId, rec.session, rec.tabId);
+  await clearRecoveredTask(taskId, rec.session, rec.tabId, rec.claimToken);
   if (terminal.status === 'cancelled') {
     await setStorage(STORAGE_KEYS.LAST_ERROR, {
       taskId, session: rec.session, error: reason, at: Date.now(),
@@ -2061,6 +2505,7 @@ async function handleTab(tabId) {
 }
 
 async function heartbeatOnce() {
+  if (backendChanging) return;
   const tabs = await listChatGPTTabs();
   for (const tab of tabs) {
     if (!tab.id) continue;
@@ -2111,6 +2556,7 @@ async function reconcileInflight() {
         if (action === "reattach" && tabId) {
           await attachPendingFromTask(t, session, tabId, entry, epochs);
         } else if (action === "defer") {
+          if ((await getStorage("dispatch_claim_intents", {}))[session]) continue;
           await httpJson("POST", `/internal/tasks/${entry.taskId}/defer`, {}).catch(() => {});
           await clearRecoveredTask(entry.taskId, session, tabId);
         }
@@ -2178,12 +2624,29 @@ async function reconcileInflight() {
   }
 }
 
-async function clearRecoveredTask(taskId, session, tabId) {
-  await clearInflight(session, taskId);
-  await notifyTabCleared(tabId, session, taskId);
-  // Removing pending state wakes the successor. Finish all scoped cleanup first.
-  await deletePendingReply(taskId);
+async function clearRecoveredTask(taskId, session, tabId, expectedToken) {
+  const cleared = await mutateTaskStorage(async () => {
+    const current = (await getStorage("dispatch_task_tokens", {}))[taskId];
+    if (expectedToken && current?.claimToken !== expectedToken) return false;
+    const [inflight, pending, intents] = await Promise.all([
+      getStorage(STORAGE_KEYS.INFLIGHT, {}), listPendingReplies(), getStorage("dispatch_claim_intents", {}),
+    ]);
+    if (inflight[session]?.taskId === taskId) delete inflight[session];
+    if (intents[session]?.taskId === taskId) delete intents[session];
+    delete pending[taskId];
+    retiredTasks.add(taskId); bumpTaskEpoch(session);
+    await chrome.storage.local.set({ [STORAGE_KEYS.INFLIGHT]: inflight,
+      [STORAGE_KEYS.PENDING_REPLIES]: pending, dispatch_claim_intents: intents });
+    return true;
+  });
+  if (!cleared) return false;
+  await notifyTabCleared(tabId, session, taskId, expectedToken);
+  const deferred = pendingCompletion.get(taskId);
+  if (deferred) { deferred.resolve(); pendingCompletion.delete(taskId); }
   stopRequests.delete(taskId);
+  await getPageManager().noteActivity(session);
+  dispatchClient?.wake();
+  return true;
 }
 
 async function recoverInflightForTab(msg, tabId) {
@@ -2231,6 +2694,10 @@ async function recoverInflightForTab(msg, tabId) {
   }
 
   if (action === "defer") {
+    if ((await getStorage("dispatch_claim_intents", {}))[session]) {
+      void startDispatchLoop(session, tabId).catch(() => {});
+      return { action: "wait", status: task.status };
+    }
     if (task.status === "in_progress") {
       await httpJson("POST", `/internal/tasks/${task.taskId}/defer`, {});
     }
@@ -2311,7 +2778,11 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
-chrome.tabs.onRemoved.addListener((tabId) => { void forgetTabSession(tabId); });
+chrome.tabs.onRemoved.addListener((tabId) => {
+  void forgetTabSession(tabId);
+  void getPageManager().forget(tabId);
+  void processSessionCreations();
+});
 chrome.tabs.onUpdated.addListener((tabId, info) => {
   if (!info.url) return;
   // Managed creation keeps its stable ref across the first conversation navigation.
@@ -2340,11 +2811,14 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
 chrome.runtime.onInstalled.addListener(() => { void ensureAlarms(); });
 chrome.runtime.onStartup.addListener(() => { void ensureAlarms(); });
 void ensureAlarms();
-void loadTabSessionCache();
-void reconcileInflight();
-void pollPendingReplies();
-void restoreDispatchLoops();
-void processSessionCreations();
+void (async () => {
+  if (!await restoreBackendIdentities()) return;
+  await loadTabSessionCache();
+  void reconcileInflight();
+  void pollPendingReplies();
+  void restoreDispatchLoops();
+  void processSessionCreations();
+})().catch(error => console.warn("[relay sw] startup identity recovery failed", error));
 
 // Message bridge.
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -2357,10 +2831,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
  if (type === "session-hello") {
+   if (sender.tab?.id && msg.session === null) {
+     handleNullPage(sender.tab.id, msg)
+       .then(() => sendResponse({ status: "ok" })).catch(error => sendResponse({ error: error.message }));
+     return true;
+   }
    if (sender.tab?.id && msg.session) {
      (async () => {
        const registered = await registerPageSession(sender.tab.id, msg);
-       await rememberTabSession(sender.tab.id, registered.session);
+       await rememberTabSession(sender.tab.id, registered.session, registrationResults.get(registered));
         void startDispatchLoop(registered.session, sender.tab.id).catch((e) =>
           console.warn("[relay sw] hello dispatch loop failed", e),
         );
@@ -2437,6 +2916,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return;
         }
         const beforeRead = await captureTaskEpochs();
+        const dispatchToken = (await getStorage("dispatch_task_tokens", {}))[msg.taskId];
+        if (dispatchToken && (dispatchToken.baseUrl !== await getBaseUrl() || dispatchToken.tabId !== sender.tab.id ||
+            dispatchToken.documentId !== msg.documentId || dispatchToken.claimToken !== msg.claimToken)) throw new Error("dispatch_page_obsolete");
         const task = await httpJson("GET", `/v1/tasks/${msg.taskId}`);
         if (task.session !== sid || task.status !== "in_progress") {
           sendResponse({
@@ -2452,12 +2934,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           tabId: sender.tab.id,
           baseline: msg.baseline,
           deliveryPhase: "send-attempted",
+          claimToken: dispatchToken?.claimToken,
         }, beforeRead);
         if (!marked) throw new Error("send_fence_superseded");
         const epochs = await captureTaskEpochs();
-        await httpJson("POST", `/internal/tasks/${msg.taskId}/progress`, {
-          phase: "send_attempted", effortSelection: msg.effortSelection,
+        const permit = await httpJson("POST", `/internal/tasks/${msg.taskId}/progress`, {
+          phase: "send_attempted", effortSelection: msg.effortSelection, ...(dispatchToken ? { claimToken: msg.claimToken } : {}),
         });
+        if (dispatchToken && permit?.status !== "in_progress") throw new Error("send_fence_superseded");
         const fencedTask = await httpJson("GET", `/v1/tasks/${msg.taskId}`);
         const attached = await attachPendingFromTask(fencedTask, sid, sender.tab.id, {
           baseline: msg.baseline,
@@ -2600,13 +3084,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         listAttachmentBlocks(),
       ]);
       const tabs = await listChatGPTTabs();
+      const lifecycle = await getStorage("page_lifecycle", {});
       const tabsInfo = await Promise.all(tabs.map(async (t) => {
         if (!t.id) return null;
-        const freshSid = await getTabSession(t.id, { forceFresh: true });
-        const sid = freshSid ?? tabSessionCache.get(t.id) ?? null;
-        const page = freshSid ? await getPageState(t.id).catch(() => null) : null;
+        const page = await getPageState(t.id).catch(() => null);
+        const sid = page ? page.session : tabSessionCache.get(t.id) ?? null;
         return {
           tabId: t.id, url: t.url, title: t.title, session: sid,
+          pageKind: page?.pageKind ?? (tabRoute(t)?.conversationId ? "conversation" : "discovery"),
+          lifecyclePolicy: lifecycle[t.id]?.lifecyclePolicy ?? "protected",
           page: page ? {
             session: page.session,
             ready: page.ready,
@@ -2625,18 +3111,83 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         baseUrl: cfg.baseUrl || DEFAULT_BASE,
         offlineSessionCount: offlineSessions.size,
         pendingReplyCount: Object.keys(pendingReplies).length,
+        dispatch: dispatchState,
+        capacity: { ...await getPageManager().capacity(await maxManagedTabs()), waiting: [...capacityWaiting] },
       });
     })();
+    return true;
+  }
+
+  if (type === "popup-set-capacity" || type === "popup-set-page-policy") {
+    (async () => {
+      if (type === "popup-set-capacity") {
+        if (!Number.isInteger(msg.maxManagedTabs) || msg.maxManagedTabs < 1 || msg.maxManagedTabs > 100) throw new Error("invalid_capacity");
+        await setStorage("config", { ...await getStorage("config", {}), maxManagedTabs: msg.maxManagedTabs });
+      } else {
+        const tab = await chrome.tabs.get(msg.tabId);
+        const session = await getTabSession(tab.id, { forceFresh: true });
+        if (!session) throw new Error("session_unavailable");
+        await getPageManager().setPolicy(tab.id, msg.lifecyclePolicy);
+      }
+      dispatchClient?.wake();
+      void reportBrowserInventory().catch(() => {});
+      sendResponse({ ok: true });
+    })().catch(error => sendResponse({ error: error.message }));
     return true;
   }
 
   if (type === "popup-set-base-url") {
     (async () => {
       const cfg = await getStorage("config", {});
-      cfg.baseUrl = msg.baseUrl;
-      await setStorage("config", cfg);
-      sendResponse({ status: "ok" });
-    })();
+      const url = new URL(msg.baseUrl);
+      if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || url.pathname !== "/" || url.search || url.hash) throw new Error("invalid_backend_url");
+      const nextBase = url.origin;
+      const oldBase = await getBaseUrl();
+      if (nextBase === oldBase) { sendResponse({ status: "ok" }); return; }
+      if (backendChanging || controlPollRunning || creationPolling || executingControls.size) throw new Error("backend_change_blocked_by_active_work");
+      backendChanging = true;
+      try {
+        for (const session of dispatchLoops.keys()) stopDispatchLoop(session);
+        await Promise.allSettled([...registrationPending.values()].map(value => value.promise));
+        const [inflight, pending, intents] = await Promise.all([getStorage(STORAGE_KEYS.INFLIGHT, {}), listPendingReplies(), getStorage("dispatch_claim_intents", {})]);
+        if (Object.keys(inflight).length || Object.keys(pending).length || Object.keys(intents).length || activeDispatchTasks.size) throw new Error("backend_change_blocked_by_active_work");
+        const pages = await Promise.all((await listChatGPTTabs()).map(async tab => {
+          const state = await getPageState(tab.id);
+          const local = await sendTabMessage(tab.id, { type: "get-inflight" }, 5000, "backend change preflight");
+          if (!state.documentId || local?.inflight?.taskId || state.generating) throw new Error("backend_change_blocked_by_active_work");
+          return { tab, state };
+        }));
+        dispatchClient?.stop();
+        // Isolate idle identity and reclamation records by backend. Task evidence
+        // cannot be switched away from; the checks above require it to be empty.
+        const keys = ["tab_session_map", "creation_tabs", "page_lifecycle", "parked_sessions", "reopen_operations", "dispatch_task_tokens",
+          STORAGE_KEYS.PAUSE, STORAGE_KEYS.LAST_ERROR, STORAGE_KEYS.ATTACHMENT_BLOCKS];
+        const namespaces = await getStorage("backend_state", {});
+        namespaces[oldBase] = Object.fromEntries(await Promise.all(keys.map(async key => [key, await getStorage(key, {})])));
+        const next = namespaces[nextBase] ?? {};
+        const restored = Object.fromEntries(keys.map(key => [key, next[key] ?? {}]));
+        if (await getStorage("backend_identity_reset_pending", null) && !await restoreBackendIdentities()) throw new Error("backend_identity_recovery_pending");
+        await setStorage("backend_identity_reset_pending", {pages: pages.map(({tab,state}) => ({tabId:tab.id,documentId:state.documentId,
+          conversationId:state.conversationId ?? null,projectId:state.projectId ?? null}))});
+        for (const { tab, state } of pages) {
+          const reset = await sendTabMessage(tab.id, { type: "reset-relay-identity", documentId: state.documentId }, 5000, "backend identity reset");
+          if (!reset?.reset) throw new Error(reset?.error ?? "backend_identity_reset_failed");
+        }
+        await chrome.storage.local.set({ ...restored, backend_state: namespaces, config: { ...cfg, baseUrl: nextBase } });
+        dispatchClient = null; dispatchMode = null; dispatchSetup = null; pageManager = null;
+        dispatchWork.clear(); acknowledgedPages.clear(); registrationCache.clear(); registrationPending.clear();
+        dispatchPages.clear(); tabSessionCache.clear(); verifiedTabSessions.clear(); capacityWaiting.clear(); offlineSessions.clear();
+        if (!await restoreBackendIdentities()) throw new Error("backend_identity_recovery_pending");
+        sendResponse({ status: "ok" });
+      } catch (error) {
+        await restoreBackendIdentities().catch(() => false);
+        throw error;
+      } finally {
+        backendChanging = false;
+        if (dispatchClient?.stopped) { dispatchClient = null; dispatchMode = null; }
+        void restoreDispatchLoops();
+      }
+    })().catch(error => sendResponse({ error: error.message }));
     return true;
   }
 

@@ -21,7 +21,11 @@ const cjkDataFiles = new Set([
   "test/e2e-fake-extension.test.ts",
   "test/encoding-fix.test.ts",
   "test/effort.test.ts",
+  "test/error-info.test.ts",
+  "test/extension-page-readiness.test.ts",
+  "test/extension-session-creation.test.ts",
   "test/recovery.test.ts",
+  "test/session-diagnostics.test.ts",
   "test/v1-api.test.ts",
 ]);
 

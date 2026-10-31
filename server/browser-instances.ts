@@ -8,9 +8,12 @@ const PROJECT_ID = /^g-[A-Za-z0-9-]{1,160}$/;
 export interface BrowserTab {
   tabId: number; conversationId: string | null; projectId: string | null;
   loading: boolean | null; discarded: boolean | null;
+  lifecyclePolicy?: "protected" | "reclaimable" | null;
+  lifecycle?: "protected" | "reclaimable" | null; waitingReason?: string | null;
 }
 export interface BrowserInstance {
   instanceId: string; generation: number; revision: number; observedAt: number; stale: boolean;
+  receivedAt?: number; dispatch?: {state: "connected" | "disconnected" | "connecting" | "legacy"; lastConnectedAt: number | null; lastError: string | null; waitingSessions?: string[]};
   version: string | null; controls: string[]; tabs: BrowserTab[];
 }
 export class BrowserInstances {
@@ -24,6 +27,9 @@ export class BrowserInstances {
         !Number.isSafeInteger(body.generation) || body.generation < 1 ||
         !Number.isSafeInteger(body.revision) || body.revision < 1 ||
         !Array.isArray(body.tabs) || body.tabs.length > 2000) throw new Error("invalid_inventory");
+    const receivedAt = Date.now();
+    if (body.observedAt != null && (!Number.isSafeInteger(body.observedAt) || body.observedAt < 0)) throw new Error("invalid_inventory");
+    const observedAt = Math.min(body.observedAt ?? receivedAt, receivedAt);
     const seen = new Set<number>();
     const boolean = (x: unknown) => typeof x === "boolean" ? x : null;
     const tabs: BrowserTab[] = body.tabs.map((tab: any) => {
@@ -32,18 +38,26 @@ export class BrowserInstances {
           (tab.projectId != null && (typeof tab.projectId !== "string" || !PROJECT_ID.test(tab.projectId)))) throw new Error("invalid_inventory");
       seen.add(tab.tabId);
       return { tabId: tab.tabId, conversationId: tab.conversationId ?? null,
-        projectId: tab.projectId ?? null, loading: boolean(tab.loading), discarded: boolean(tab.discarded) };
+        projectId: tab.projectId ?? null, loading: boolean(tab.loading), discarded: boolean(tab.discarded),
+        lifecyclePolicy: ["protected", "reclaimable"].includes(tab.lifecyclePolicy ?? tab.lifecycle) ? (tab.lifecyclePolicy ?? tab.lifecycle) : null,
+        lifecycle: ["protected", "reclaimable"].includes(tab.lifecyclePolicy ?? tab.lifecycle) ? (tab.lifecyclePolicy ?? tab.lifecycle) : null,
+        waitingReason: ["loading", "dispatch_disconnected", "page_snapshot_stale", "page_probe_failed", "busy", "protected"].includes(tab.waitingReason) ? tab.waitingReason : null };
     });
     const controls = ["open", "close"].filter(kind => body.controls?.includes?.(kind));
-    const payload = JSON.stringify({ version: typeof body.version === "string" ? body.version.slice(0, 80) : null, controls, tabs });
+    const dispatch = { state: ["connected", "disconnected", "connecting", "legacy"].includes(body.dispatch?.state) ? body.dispatch.state : "legacy",
+      lastConnectedAt: Number.isSafeInteger(body.dispatch?.lastConnectedAt) && body.dispatch.lastConnectedAt >= 0 ? Math.min(body.dispatch.lastConnectedAt, receivedAt) : null,
+      waitingSessions: Array.isArray(body.dispatch?.waitingSessions) ? [...new Set<string>(body.dispatch.waitingSessions.slice(0, 500).filter((id: unknown): id is string => typeof id === "string" && /^[a-zA-Z0-9_-]{1,128}$/.test(id)))] : [],
+      lastError: typeof body.dispatch?.lastError === "string" && /^[a-z_]{1,100}$/.test(body.dispatch.lastError) ? body.dispatch.lastError : null };
+    const payload = JSON.stringify({ receivedAt, dispatch, version: typeof body.version === "string" ? body.version.slice(0, 80) : null, controls, tabs });
     // Every report replaces the entire inventory, including an empty list. Older
     // requests cannot resurrect closed tabs or a previous worker's numeric IDs.
     this.db.prepare(`INSERT INTO browser_instances VALUES (?, ?, ?, ?, ?)
       ON CONFLICT(owner) DO UPDATE SET generation=excluded.generation, revision=excluded.revision,
       observed_at=excluded.observed_at, payload=excluded.payload
       WHERE excluded.generation > browser_instances.generation OR
-        (excluded.generation = browser_instances.generation AND excluded.revision > browser_instances.revision)`)
-      .run(body.owner, body.generation, body.revision, Date.now(), payload);
+        (excluded.generation = browser_instances.generation AND excluded.revision > browser_instances.revision
+          AND excluded.observed_at >= browser_instances.observed_at)`)
+      .run(body.owner, body.generation, body.revision, observedAt, payload);
   }
   list(now = Date.now()): BrowserInstance[] {
     const rows = this.db.prepare("SELECT * FROM browser_instances ORDER BY owner").all() as unknown as

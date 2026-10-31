@@ -19,7 +19,7 @@ Project discovery uses visible DOM entries in open ChatGPT tabs, including class
 
 1. Open `edge://extensions/` in Edge or `chrome://extensions/` in Chrome.
 2. Find gpt-relay and select **Reload**.
-3. Refresh every `chatgpt.com` tab that should run the updated content script.
+3. During an idle window, refresh every `chatgpt.com` tab that should run the updated content script. Unified dispatch requires `dispatchProtocol: 2`; a new worker blocks claims on older pages with `reload_extension_and_page`.
 
 ## Browser window guidance
 
@@ -38,14 +38,15 @@ Drag the button to move it, or focus it and use the arrow keys (Shift for larger
 
 ## Popup
 
-- Health indicator: green when the relay is reachable, red otherwise.
+- Health indicator: green when the relay is reachable, red otherwise. Dispatch connection state, last connection time and errors are shown separately.
 - Sessions: each connected ChatGPT tab, its server-side status, queued count,
   active task status (including `recovering`), and page readiness reason with
-  user/assistant DOM counts. `script unavailable` means the content script did
-  not respond; `conversation-hydrating (u0/a0)` means the existing chat's
+  user/assistant DOM counts. Home and other unregistered pages appear as discovery pages; an unavailable registered snapshot is missing page evidence. `conversation-hydrating (u0/a0)` means the existing chat's
   message history has not been detected, so dispatch remains safely queued.
   An attached payload is shown as `attachment · Send enabled` or `uploading ·
   Send disabled` without displaying its filename or content.
+- Managed tab limit: default 6, integer range 1–100. At capacity, eligible idle reclaimable pages can be parked and later reopened; otherwise work waits.
+- Page policy: manual pages are protected until the user explicitly selects **Reclaimable**. Running a review does not change this policy. Automatic close preserves user suspension; explicit Close still suspends dispatch.
 - Recent tasks: status and duration for the latest eight tasks.
 - Relay URL: defaults to `http://127.0.0.1:8765`.
 - **Poll now**: requests an immediate poll instead of waiting for the next
@@ -57,7 +58,7 @@ Drag the button to move it, or focus it and use the arrow keys (Shift for larger
 
 - `storage`: stores the relay URL, in-flight task map, pending replies, tab to
   session mapping, attachment-cleanup blocks, and recent errors.
-- `alarms`: wakes the MV3 service worker for background polling.
+- `alarms`: wakes the MV3 service worker for dispatch and recovery.
 - `tabs` and `scripting`: communicates with content scripts in ChatGPT tabs.
 - `notifications`: reserved for future use.
 - `host_permissions`: limited to `chatgpt.com` and the local relay.
@@ -67,7 +68,7 @@ Drag the button to move it, or focus it and use the arrow keys (Shift for larger
 ```text
 Agent -> POST /v1/tasks -> Relay server (Express + SQLite)
                                  ^
-                            HTTP long poll
+                       Unified bounded watch
                                  v
                        Extension service worker
                                  |
@@ -88,7 +89,7 @@ Agent -> POST /v1/tasks -> Relay server (Express + SQLite)
 - The **service worker** drives the lifecycle:
   - waits for the document, conversation history, composer, and message baseline
     to stabilize before claiming work;
-  - long-polls `/internal/next_task`;
+  - uses one `/internal/dispatch/watch` (up to 20 seconds) per backend and extension instance when `capabilities.dispatchV2: true`, then durably claims work; legacy servers use the older polling path;
   - persists a send-attempt fence in browser storage and SQLite before allowing the content script to select Send;
   - keeps the normal Send-ready wait at 15 seconds, but allows up to 90 seconds
     when a large paste becomes a ChatGPT attachment;
@@ -168,3 +169,5 @@ To exercise recovery, submit a review and refresh the ChatGPT page while it is g
 The adapter verifies the selected model family, slider value, raw effort and Pro marker, rechecks after prompt injection, and checks the trigger again immediately before Send. It never opens the model-family selector.
 
 The worker verifies completed effort-enabled replies through a bounded `chrome.scripting.executeScript` call in the MAIN world. Its read-only history requests match the exact submitted user UUID and final assistant UUID. Transient failures retry up to three times with 15 seconds per attempt; bounded diagnostic codes and turn IDs accompany model and thinking-effort identifiers. Unknown results retain a usable completed reply with a warning; mismatches fail. The `reverify-effort` control rechecks the saved exact turn on an already observable conversation without modifying the page. Older tasks without saved turn IDs cannot be automatically rechecked. Credentials stay in the page; no network interception or additional host permissions are required. Public verification errors and reply retention are defined in [the effort API contract](../api.md#effort-selection); the existing durable Send fence and at-most-once recovery remain in force.
+
+See [unified dispatch](../docs/dispatch.md) for generation fences, durable claim recovery, capacity policy and activation during an idle window. Source changes do not activate a running service or extension.

@@ -3,10 +3,16 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 import { webcrypto } from "node:crypto";
+import { Dispatch } from "../server/dispatch.js";
+import { createProjectDiscoveryRouter } from "../server/project-discovery.js";
+import { openDatabase } from "../server/db.js";
+import { TaskStore } from "../server/task-store.js";
+import { loadConfig } from "../server/config.js";
 
-async function worker(commandState = "claimed", existing = false, discovery = false) {
-  const storage: Record<string, any> = { creation_owner: "browser" };
+async function worker(commandState = "claimed", existing = false, discovery = false, persisted: Record<string, any> = {}) {
+  const storage: Record<string, any> = { ...structuredClone(persisted), creation_owner: "browser" };
   const operations: string[] = [];
+  const warnings: unknown[][] = [];
   const meta = { sessionRef: "sr_new", projectId: null, token: "token", owner: "browser", initialTaskId: "task" };
   const marker = `#relay-create=${encodeURIComponent(JSON.stringify(meta))}`;
   const tabs: any[] = existing ? [{ id: 7, url: "https://chatgpt.com/" + marker }] : [];
@@ -32,7 +38,7 @@ async function worker(commandState = "claimed", existing = false, discovery = fa
     runtime: { onInstalled: event(), onStartup: event(), onMessage: {addListener(fn:any){bridge=fn;}} },
   };
   const context = vm.createContext({ chrome, crypto: webcrypto, AbortController, URL,
-    console: { log() {}, warn() {} },
+    console: { log() {}, warn(...args: unknown[]) {warnings.push(args);} },
     setTimeout: (fn: () => void, ms: number) => { timers.push({ fn, ms }); return timers.length; },
     clearTimeout() {},
     fetch: async (url: string, options: any) => {
@@ -52,14 +58,15 @@ async function worker(commandState = "claimed", existing = false, discovery = fa
       return { ok: true, status: 200, text: async () => JSON.stringify(response) };
     },
   });
-  for (const file of ["lib/config.js", "lib/recovery-policy.js", "service-worker.js"]) {
+  for (const file of ["lib/config.js", "lib/recovery-policy.js", "lib/dispatch-client.js", "lib/page-policy.js", "lib/page-manager.js", "service-worker.js"]) {
     const source = fs.readFileSync(new URL(`../extension/${file}`, import.meta.url), "utf8")
       .replace(/^import[\s\S]*?from\s+["'][^"']+["'];?\s*/gm, "")
       .replace(/\bexport /g, "");
     vm.runInContext(source, context, { filename: file });
   }
   for (let i = 0; i < 15; i++) await new Promise<void>(resolve => setImmediate(resolve));
-  return { operations, tabs, context, timers, storage,
+  assert.deepEqual(warnings, [], "worker startup must not silently fail a background process");
+  return { operations, tabs, context, timers, storage, warnings,
     message:(msg:any,tabId=7)=>new Promise<any>(resolve=>bridge(msg,{tab:{id:tabId}},resolve)) };
 }
 
@@ -151,13 +158,14 @@ for (const mode of ["idle", "draft", "generating", "draft-after-fence", "navigat
   });
 }
 
-test("snapshot reason distinguishes ready pages from unreachable pages", async () => {
+for (const mode of ["legacy", "v2"]) test(`snapshot reason distinguishes ready pages from unreachable pages: ${mode}`, async () => {
   const w = await worker();
   const reports = await vm.runInContext(`(async()=>{
     const reports=[];
     chrome.tabs.query=async()=>[{id:7}];
-    getTabSession=async()=> 'session';
-    httpJson=async(method,url,body)=>{reports.push(body);return {};};
+    dispatchMode=${JSON.stringify(mode)};
+    tabSessionCache.set(7,'session');
+    httpJson=async(method,url,body)=>{reports.push({url,body});return {};};
     getPageState=async()=>({session:'session',ready:true,generating:false,composerClean:true,reason:null});
     await reportSessionSnapshots();
     getPageState=async()=>({session:'session',ready:false,reason:'conversation_blocked',
@@ -167,13 +175,18 @@ test("snapshot reason distinguishes ready pages from unreachable pages", async (
     await reportSessionSnapshots();
     return reports;
   })()`, w.context);
-  assert.equal(reports[0].ready, true);
-  assert.equal(reports[0].reason, null);
-  assert.equal(reports[1].block.code, "conversation_blocked");
-  assert.equal(reports[1].block.text, "会話の上限");
-  assert.equal(reports[2].ready, null);
-  assert.equal(reports[2].reason, "page_unreachable");
-  assert.equal(reports[2].block, null);
+  const samples = reports.map((report: any) => {
+    assert.equal(report.url, mode === "v2" ? "/internal/session-snapshots/batch" : "/internal/session-snapshots");
+    return mode === "v2" ? report.body.reports[0] : report.body;
+  });
+  assert.equal(samples[0].ready, true);
+  assert.equal(samples[0].reason, null);
+  assert.equal(samples[1].block.code, "conversation_blocked");
+  assert.equal(samples[1].block.text, "会話の上限");
+  assert.equal(samples[2].ready, null);
+  assert.equal(samples[2].reason, "page_unreachable");
+  assert.equal(samples[2].block, null);
+  assert.equal(samples[2].probe.ok, false);
 });
 
 test("a conversation error pauses dispatch before claiming or sending another task", async () => {
@@ -608,13 +621,13 @@ for (const timing of ["preclaim", "postclaim", "run-task"]) {
     const w = await worker("opening", true);
     w.context.draftTiming = timing;
     const calls = await vm.runInContext(`(async () => {
-      const calls=[]; let pages=0;
+      const calls=[]; let pages=0, claimed=false;
       tabSessionCache.set(7,'session');
       getPageState=async()=>({session:'session',ready:true,generating:false,baseline:{},
-        composerClean: ++pages !== (draftTiming==='preclaim'?1:draftTiming==='postclaim'?2:0)});
+        composerClean: draftTiming==='preclaim' ? false : !(draftTiming==='postclaim' && claimed)});
       httpJson=async(method,path)=>{
         calls.push(path);
-        return path.startsWith('/internal/next_task')?{task:{taskId:'task',text:'prompt'}}:{};
+        if(path.startsWith('/internal/next_task')) {claimed=true;return {task:{taskId:'task',text:'prompt'}};} return {};
       };
       sendTabMessage=async(tab,msg)=>{
         calls.push(msg.type);
@@ -975,7 +988,7 @@ test('task cleanup finishes on the page before releasing the next dispatch', asy
   vm.runInContext("pendingCompletion.get('old-task').promise.then(()=>{woken=true;}); const clearing=clearRecoveredTask('old-task','session',7);",w.context);
   for(let i=0;i<10;i++) await new Promise<void>(r=>setImmediate(r));
   assert.equal(vm.runInContext('woken',w.context),false);
-  assert.ok(w.storage.pending_replies['old-task']);
+  assert.equal(w.storage.pending_replies['old-task'],undefined,'ownership cleanup is atomic before awaiting page acknowledgement');
   await vm.runInContext('releasePage({}); clearing;',w.context);
   assert.equal(vm.runInContext('woken',w.context),true);
   assert.equal(w.storage.pending_replies['old-task'],undefined);
@@ -1101,3 +1114,532 @@ for(const status of ['in_progress','done']) {
     assert.equal(w.context.events.includes('/internal/tasks/task/capture'),false);
   });
 }
+
+test("home hello clears session ownership and remains discovery metadata without queue work", async () => {
+  const w=await worker();
+  await vm.runInContext(`(async()=>{
+    await rememberTabSession(7,'old-session');
+    await getPageManager().remember(7,{session:'old-session',conversationId:'previous-conversation',provenance:'relay',lifecyclePolicy:'reclaimable'});
+    chrome.tabs.query=async()=>[{id:7,url:'https://chatgpt.com/'}];
+    getPageState=async()=>({session:null,pageKind:'discovery',ready:true,generating:false});
+  })()`,w.context);
+  w.operations.length=0;
+  assert.equal((await w.message({type:"session-hello",session:null,pageKind:"discovery"})).status,"ok");
+  const popup=await w.message({type:"popup-get-state"});
+  assert.equal(popup.tabs[0].session,null);
+  assert.equal(popup.tabs[0].pageKind,"discovery");
+  assert.equal(popup.tabs[0].lifecyclePolicy,"protected");
+  assert.equal(w.storage.tab_session_map[7],undefined);
+  assert.equal(w.storage.page_lifecycle[7],undefined,"navigating to discovery must release the previous managed-page slot");
+  assert.ok(!w.operations.some(path=>path.includes("next_task")||path.includes("dispatch/claim")||path.includes("/inspect")));
+});
+
+for (const count of [2,12,30]) test(`one unified watch carries ${count} sessions against the actual dispatch backend`, async () => {
+  const db=openDatabase(":memory:");
+  const store=new TaskStore(db,loadConfig());
+  createProjectDiscoveryRouter(db,store.registry);
+  const backend=new Dispatch(db,store);
+  const w=await worker();
+  const calls: string[]=[];
+  const sessions=Array.from({length:count},(_,index)=>`session-${index}`);
+  for(const session of sessions) store.createTask({session,text:"prompt"});
+  w.context.testSessions=sessions;
+  w.context.backendHttp=async(method:string,path:string,body:any,_timeout:number,signal:AbortSignal)=>{
+    calls.push(path);
+    if(path==="/v1/server") return {capabilities:{dispatchV2:true}};
+    if(path==="/internal/dispatch/watch") return backend.watch(body,signal);
+    throw new Error(`unexpected route ${path}`);
+  };
+  try {
+    await vm.runInContext(`(async()=>{
+      dispatchMode=null;
+      chrome.tabs.query=async()=>testSessions.map((session,index)=>({id:index+7,url:'https://chatgpt.com/c/'+session}));
+      testSessions.forEach((session,index)=>dispatchPages.set(index+7,{session,tabId:index+7,documentId:session+'-doc'}));
+      globalThis.woken=[];
+      startDispatchLoop=async(session)=>{woken.push(session);};
+      httpJson=backendHttp;
+      await Promise.all([ensureDispatch(),ensureDispatch()]);
+    })()`,w.context);
+    for(let i=0;i<10;i++) await new Promise<void>(resolve=>setImmediate(resolve));
+    assert.deepEqual(Array.from(vm.runInContext("woken",w.context)),sessions,JSON.stringify({calls,state:vm.runInContext("dispatchState",w.context)}));
+    assert.equal(calls.filter(path=>path==="/v1/server").length,1);
+    assert.equal(calls.filter(path=>path==="/internal/dispatch/watch").length,2,"initial snapshot then one shared waiting watch");
+    assert.ok(!calls.some(path=>path.includes("next_task")));
+    await vm.runInContext("dispatchClient.stop(); dispatchClient.running",w.context);
+    assert.equal(vm.runInContext("dispatchState.state",w.context),"connected");
+  } finally {vm.runInContext("dispatchClient?.stop()",w.context); db.close();}
+});
+
+test("lost claim response survives worker reboot with the original request ID", async () => {
+  const first=await worker();
+  let original:any;
+  first.context.claimHttp=async(_method:string,path:string,body:any)=>{
+    assert.equal(path,"/internal/dispatch/claim"); original=structuredClone(body);
+    throw new Error("lost response after acceptance");
+  };
+  await assert.rejects(vm.runInContext(`(async()=>{
+    dispatchMode='v2'; acknowledgedPages.set('session',{tabId:7,documentId:'doc'});
+    httpJson=claimHttp;
+    await claimForPage('session',7,{documentId:'doc'});
+  })()`,first.context),/lost response/);
+  assert.equal(first.storage.dispatch_claim_intents.session.request.requestId,original.requestId);
+  const reboot=await worker("claimed",false,false,first.storage);
+  let resumed:any;
+  reboot.context.claimHttp=async(_method:string,path:string,body:any)=>{
+    assert.equal(path,"/internal/dispatch/resume"); resumed=structuredClone(body);
+    return {task:{taskId:"original-task",claimToken:"resumed-token",status:"in_progress",sendAttemptedAt:null,expiresAt:Date.now()+10000}};
+  };
+  const response=await vm.runInContext(`(async()=>{
+    dispatchMode='v2'; acknowledgedPages.set('session',{tabId:7,documentId:'doc'});
+    httpJson=claimHttp;
+    return claimForPage('session',7,{documentId:'doc'});
+  })()`,reboot.context);
+  assert.equal(resumed.requestId,original.requestId);
+  assert.equal(resumed.originalGeneration,original.generation);
+  assert.notEqual(resumed.generation,original.generation);
+  assert.equal(response.task.taskId,"original-task");
+  assert.equal(reboot.storage.dispatch_task_tokens["original-task"].claimToken,"resumed-token");
+});
+
+test("capacity settings preserve manual protection until explicit grant and reject invalid settings",async()=>{
+  const w=await worker();
+  await vm.runInContext(`(async()=>{
+    chrome.tabs.get=async()=>({id:7,url:'https://chatgpt.com/c/manual'});
+    getTabSession=async()=> 'manual';
+    await getPageManager().remember(7,{session:'manual',conversationId:'manual',provenance:'manual'});
+  })()`,w.context);
+  assert.equal((await w.message({type:"popup-set-capacity",maxManagedTabs:8})).ok,true);
+  assert.equal(w.storage.config.maxManagedTabs,8);
+  assert.equal(w.storage.page_lifecycle[7].lifecyclePolicy,"protected");
+  for(const invalid of [0,101,1.5,"6"]) assert.equal((await w.message({type:"popup-set-capacity",maxManagedTabs:invalid})).error,"invalid_capacity");
+  assert.equal((await w.message({type:"popup-set-page-policy",tabId:7,lifecyclePolicy:"invalid"})).error,"invalid_lifecycle_policy");
+  assert.equal(w.storage.page_lifecycle[7].lifecyclePolicy,"protected");
+  assert.equal((await w.message({type:"popup-set-page-policy",tabId:7,lifecyclePolicy:"reclaimable"})).ok,true);
+  assert.equal(w.storage.page_lifecycle[7].managementGranted,true);
+  assert.equal(w.storage.page_lifecycle[7].lifecyclePolicy,"reclaimable");
+});
+
+test("explicit task tokens stay bound to their original executor after token rotation",async()=>{
+  const w=await worker();
+  const result=await vm.runInContext(`(async()=>{
+    const baseUrl=await getBaseUrl(), sent=[];
+    await setStorage('dispatch_task_tokens',{task:{baseUrl,claimToken:'new-token'}});
+    fetch=async(url,options)=>{sent.push(JSON.parse(options.body));return {ok:true,text:async()=> '{}'};};
+    await httpJson('POST','/internal/tasks/task/complete',{error:'old executor',claimToken:'old-token'});
+    await httpJson('POST','/internal/tasks/task/progress',{phase:'submit_started',claimToken:undefined});
+    await httpJson('POST','/internal/tasks/task/progress',{phase:'generating'});
+    return sent;
+  })()`,w.context);
+  assert.equal(result[0].claimToken,"old-token");
+  assert.equal(result[1].claimToken,undefined,"an explicit missing token must not borrow a successor's authority");
+  assert.equal(result[2].claimToken,"new-token","ordinary current-owner progress retains token enrichment");
+});
+
+test("old asynchronous dispatch completion cannot use a rotated token or erase new ownership",async()=>{
+  const w=await worker();
+  const result=await vm.runInContext(`(async()=>{
+    const sent=[],baseUrl=await getBaseUrl();
+    dispatchMode='legacy'; tabSessionCache.set(7,'session'); chrome.tabs.get=async()=>({id:7});
+    getPageState=async()=>({session:'session',documentId:'doc',ready:true,composerClean:true,generating:false,baseline:{}});
+    await setStorage('dispatch_task_tokens',{task:{baseUrl,claimToken:'old-token'}});
+    sendTabMessage=async(tab,message)=>{
+      if(message.type!=='run-task') return {};
+      await setStorage('dispatch_task_tokens',{task:{baseUrl,claimToken:'new-token'}});
+      await setStorage('inflight',{session:{taskId:'task',claimToken:'new-token',deliveryPhase:'preparing'}});
+      await setStorage('pending_replies',{task:{taskId:'task',session:'session',claimToken:'new-token'}});
+      await setStorage('dispatch_claim_intents',{session:{taskId:'task',request:{requestId:'new-intent'}}});
+      return {reply:'old reply'};
+    };
+    fetch=async(url,options)=>{
+      const path=new URL(url).pathname;
+      if(path==='/internal/next_task') return {ok:true,text:async()=>JSON.stringify({task:{taskId:'task',text:'prompt',claimToken:'old-token'}})};
+      const body=JSON.parse(options.body??'{}');sent.push({path,body});
+      if(path.endsWith('/complete')) stopDispatchLoop('session');
+      return {ok:true,text:async()=> '{}'};
+    };
+    await startDispatchLoop('session',7);
+    return {sent,inflight:await getInflight('session'),pending:await getPendingReply('task'),intents:await getStorage('dispatch_claim_intents',{})};
+  })()`,w.context);
+  assert.ok(result.sent.some((x:any)=>x.path.endsWith("/complete")),JSON.stringify({result,warnings:w.warnings}));
+  assert.equal(result.sent.find((x:any)=>x.path.endsWith("/complete")).body.claimToken,"old-token");
+  assert.equal(result.inflight.claimToken,"new-token");
+  assert.equal(result.pending.claimToken,"new-token");
+  assert.equal(result.intents.session.request.requestId,"new-intent");
+});
+
+test("stale same-task cleanup and evidence writes cannot overwrite a resumed owner",async()=>{
+  const w=await worker();
+  const result=await vm.runInContext(`(async()=>{
+    await setStorage('dispatch_task_tokens',{task:{claimToken:'new-token'}});
+    await markInflight('session','task',{claimToken:'new-token',deliveryPhase:'preparing'});
+    await setPendingReply('task',{session:'session',claimToken:'new-token',tabId:7});
+    await setStorage('dispatch_claim_intents',{session:{taskId:'task',request:{requestId:'new-request'}}});
+    const before={inflight:await getInflight('session'),pending:await getPendingReply('task'),intents:await getStorage('dispatch_claim_intents',{})};
+    const marked=await markInflight('session','task',{claimToken:'old-token',deliveryPhase:'accepted'});
+    const pending=await setPendingReply('task',{session:'session',claimToken:'old-token',tabId:7});
+    const cleared=await clearRecoveredTask('task','session',7,'old-token');
+    return {before,marked,pending,cleared,after:{inflight:await getInflight('session'),pending:await getPendingReply('task'),intents:await getStorage('dispatch_claim_intents',{})}};
+  })()`,w.context);
+  assert.equal(result.marked,false); assert.equal(result.pending,false); assert.equal(result.cleared,false);
+  assert.deepEqual(result.after,result.before);
+});
+
+for(const postSend of [false,true]) test(`same-generation document resume persists destination request identity: postSend=${postSend}`,async()=>{
+  const w=await worker();
+  w.context.postSend=postSend;
+  const result=await vm.runInContext(`(async()=>{
+    dispatchMode='v2';
+    const generation=String(await inventoryGeneration()),baseUrl=await getBaseUrl(),requests=[];
+    await setStorage('dispatch_claim_intents',{session:{baseUrl,request:{owner:'browser',generation,session:'session',tabId:7,documentId:'old-doc',requestId:'original-request'}}});
+    acknowledgedPages.set('session',{tabId:7,documentId:'new-doc'});
+    let attempt=0;
+    httpJson=async(method,path,body)=>{
+      requests.push({path,...body});
+      if(++attempt===1) throw new Error('lost resume response');
+      return {task:{taskId:'task',claimToken:'token',status:'in_progress',sendAttemptedAt:postSend?1:null}};
+    };
+    try {await claimForPage('session',7,{documentId:'new-doc'});} catch(error) {if(error.message!=='lost resume response')throw error;}
+    const persisted=await getStorage('dispatch_claim_intents',{});
+    await claimForPage('session',7,{documentId:'new-doc'});
+    return {requests,persisted,final:await getStorage('dispatch_claim_intents',{})};
+  })()`,w.context);
+  assert.equal(result.requests[0].path,"/internal/dispatch/resume");
+  assert.equal(result.requests[0].generation,result.requests[0].originalGeneration);
+  assert.equal(result.requests[0].resumeRequestId,result.requests[1].resumeRequestId);
+  assert.equal(result.persisted.session.resume.requestId,result.requests[0].resumeRequestId);
+  assert.equal(result.final.session.request.requestId,postSend?"original-request":result.requests[0].resumeRequestId);
+  assert.equal(result.final.session.request.documentId,postSend?"old-doc":"new-doc");
+});
+
+test("a resumed unsent claim with no prior local inflight executes instead of attaching phantom Send evidence",async()=>{
+  const w=await worker();
+  const result=await vm.runInContext(`(async()=>{
+    const calls=[];
+    dispatchMode='v2'; acknowledgedPages.set('session',{tabId:7,documentId:'doc'});
+    chrome.tabs.get=async()=>({id:7}); tabSessionCache.set(7,'session');
+    getPageState=async()=>({session:'session',documentId:'doc',dispatchProtocol:2,controlProtocol:1,ready:true,composerClean:true,generating:false,baseline:{}});
+    await setStorage('dispatch_claim_intents',{session:{request:{requestId:'lost-request'}}});
+    claimForPage=async()=>({task:{taskId:'task',text:'prompt',status:'in_progress',sendAttemptedAt:null,claimToken:'token'}});
+    await setStorage('dispatch_task_tokens',{task:{claimToken:'token'}});
+    httpJson=async(method,path,body)=>{
+      calls.push(path);
+      if(path==='/v1/tasks/task') throw new Error('unsent claim must not attach recovery observer');
+      if(path.endsWith('/complete')) stopDispatchLoop('session');
+      return {};
+    };
+    sendTabMessage=async(tab,message)=>{calls.push(message.type); return message.type==='run-task'?{reply:'reply'}:{};};
+    await startDispatchLoop('session',7);
+    return calls;
+  })()`,w.context);
+  assert.ok(result.includes("run-task"));
+  assert.ok(!result.includes("/v1/tasks/task"));
+  assert.ok(result.includes("/internal/tasks/task/complete"));
+});
+
+test("backend switch isolates parked subscriptions and restores their original namespace on return",async()=>{
+  const w=await worker();
+  await vm.runInContext(`(async()=>{
+    globalThis.identityMessages=[];
+    restoreDispatchLoops=async()=>{};
+    chrome.tabs.query=async()=>[{id:7,url:'https://chatgpt.com/c/manual'}];
+    getPageState=async()=>({session:'old-session',documentId:'doc',ready:true,generating:false});
+    sendTabMessage=async(tab,message)=>{
+      identityMessages.push(message.type);
+      if(message.type==='get-inflight')return {inflight:null};
+      if(message.type==='reset-relay-identity')return {reset:true};
+      return {};
+    };
+    await setStorage('parked_sessions',{'old-session':{session:'old-session',status:'closed'}});
+    await setStorage('reopen_operations',{'old-session':'old-open'});
+    await setStorage('page_lifecycle',{7:{session:'old-session',lifecyclePolicy:'protected'}});
+    await setStorage('tab_session_map',{7:'old-session'});
+  })()`,w.context);
+  assert.equal((await w.message({type:"popup-set-base-url",baseUrl:"http://new-relay:8765"})).status,"ok");
+  assert.equal(w.storage.config.baseUrl,"http://new-relay:8765");
+  assert.deepEqual(structuredClone(w.storage.parked_sessions),{});
+  assert.deepEqual(Array.from(await vm.runInContext("dispatchMembership()",w.context)),[]);
+  const old=w.storage.backend_state["http://127.0.0.1:8765"];
+  assert.equal(old.parked_sessions["old-session"].status,"closed");
+  await vm.runInContext("setStorage('parked_sessions',{'new-session':{session:'new-session',status:'closed'}})",w.context);
+  assert.equal((await w.message({type:"popup-set-base-url",baseUrl:"http://127.0.0.1:8765"})).status,"ok");
+  assert.equal(w.storage.parked_sessions["old-session"].status,"closed");
+  assert.equal(w.storage.parked_sessions["new-session"],undefined);
+  assert.equal(w.storage.page_lifecycle[7].lifecyclePolicy,"protected");
+  assert.deepEqual(Array.from(await vm.runInContext("dispatchMembership()",w.context)).map((page:any)=>page.session),["old-session"]);
+  assert.equal(w.storage.backend_state["http://new-relay:8765"].parked_sessions["new-session"].status,"closed");
+  assert.equal(Array.from(vm.runInContext("identityMessages",w.context)).filter(type=>type==="reset-relay-identity").length,2);
+});
+
+for(const busy of ["inflight","pending","intent","page"]) test(`backend switch refuses ${busy} work before identity reset`,async()=>{
+  const w=await worker();
+  w.context.busyKind=busy;
+  await vm.runInContext(`(async()=>{
+    globalThis.resets=0;
+    restoreDispatchLoops=async()=>{};
+    chrome.tabs.query=async()=>[{id:7}];
+    getPageState=async()=>({session:'session',documentId:'doc',ready:true,generating:busyKind==='page'});
+    sendTabMessage=async(tab,message)=>{if(message.type==='reset-relay-identity')resets++;return {inflight:null,reset:true};};
+    if(busyKind==='inflight')await setStorage('inflight',{session:{taskId:'task'}});
+    if(busyKind==='pending')await setStorage('pending_replies',{task:{session:'session'}});
+    if(busyKind==='intent')await setStorage('dispatch_claim_intents',{session:{request:{requestId:'request'}}});
+  })()`,w.context);
+  const before=structuredClone(w.storage);
+  assert.equal((await w.message({type:"popup-set-base-url",baseUrl:"http://new-relay:8765"})).error,"backend_change_blocked_by_active_work");
+  assert.equal(vm.runInContext("resets",w.context),0);
+  assert.deepEqual(structuredClone(w.storage),before);
+});
+
+test("same-tab old execution lease cannot fence with a successor's token or document",async()=>{
+  const w=await worker();
+  await vm.runInContext(`(async()=>{
+    getTabSession=async()=> 'session';
+    await setStorage('dispatch_task_tokens',{task:{baseUrl:await getBaseUrl(),tabId:7,documentId:'new-doc',claimToken:'new-token'}});
+    globalThis.fenceCalls=[];
+    httpJson=async(method,path,body)=>{fenceCalls.push({method,path,body});return {taskId:'task',session:'session',status:'in_progress',sendAttemptedAt:1};};
+  })()`,w.context);
+  for(const [claimToken,documentId] of [["old-token","new-doc"],["new-token","old-doc"],["old-token","old-doc"]]) {
+    const response=await w.message({type:"send-attempted",taskId:"task",claimToken,documentId,baseline:{}});
+    assert.equal(response.error,"dispatch_page_obsolete");
+  }
+  assert.equal(vm.runInContext("fenceCalls.length",w.context),0);
+  assert.equal(w.storage.inflight?.session,undefined);
+  const current=await w.message({type:"send-attempted",taskId:"task",claimToken:"new-token",documentId:"new-doc",baseline:{}});
+  assert.equal(current.status,"fenced");
+  const progress=vm.runInContext("fenceCalls.find(call=>call.path.endsWith('/progress'))",w.context);
+  assert.equal(progress.body.claimToken,"new-token");
+});
+
+test("unified dispatch blocks old page protocol before claim and fresh upgraded evidence clears the reason",async()=>{
+  const w=await worker();
+  const result=await vm.runInContext(`(async()=>{
+    dispatchMode='v2';
+    acknowledgedPages.set('session',{tabId:7,documentId:'doc'});
+    dispatchWork.set('session',{queuedTasks:1});
+    tabSessionCache.set(7,'session'); chrome.tabs.get=async()=>({id:7});
+    let protocol=1,claims=0,runs=0;
+    sendTabMessage=async(tab,message)=>{
+      if(message.type==='run-task') {runs++;throw new Error('must not send');}
+      if(message.type==='check-safety') return {};
+      return {session:'session',documentId:'doc',ready:true,generating:false,composerClean:true,dispatchProtocol:protocol,reason:null};
+    };
+    claimForPage=async()=>{claims++;return {task:null};};
+    const old=await getPageState(7);
+    await startDispatchLoop('session',7);
+    const oldClaims=claims;
+    protocol=2;
+    const upgraded=await getPageState(7);
+    await startDispatchLoop('session',7);
+    return {old,upgraded,oldClaims,claims,runs};
+  })()`,w.context);
+  assert.equal(result.old.ready,false);
+  assert.equal(result.old.reason,"reload_extension_and_page");
+  assert.equal(result.oldClaims,0);
+  assert.equal(result.upgraded.ready,true);
+  assert.equal(result.upgraded.reason,null);
+  assert.equal(result.claims,1);
+  assert.equal(result.runs,0);
+});
+
+test("second-page backend reset failure restores managed identities under the unchanged backend",async()=>{
+  const w=await worker();
+  await vm.runInContext(`(async()=>{
+    restoreDispatchLoops=async()=>{};
+    const managed={sessionRef:'sr_old',owner:'browser',token:'old-token',projectId:null};
+    await setStorage('creation_tabs',{7:managed});
+    await setStorage('config',{baseUrl:'http://old-relay:8765'});
+    globalThis.physical={7:managed,8:null};globalThis.resetCount=0;
+    chrome.tabs.query=async()=>[{id:7},{id:8}];chrome.tabs.get=async id=>({id});
+    getPageState=async id=>({session:physical[id]?.sessionRef??null,documentId:'doc-'+id,conversationId:null,projectId:null,generating:false});
+    sendTabMessage=async(id,message)=>{
+      if(message.type==='get-inflight')return {inflight:null};
+      if(message.type==='reset-relay-identity') {
+        resetCount++;
+        if(id===8) return {error:'second_page_failed'};
+        physical[id]=null;return {reset:true};
+      }
+      if(message.type==='configure-session') {physical[id]=message.managed;return {session:message.managed.sessionRef};}
+      throw new Error('unexpected message');
+    };
+  })()`,w.context);
+  const response=await w.message({type:"popup-set-base-url",baseUrl:"http://new-relay:8765"});
+  assert.equal(response.error,"second_page_failed");
+  assert.equal(w.storage.config.baseUrl,"http://old-relay:8765");
+  assert.equal(vm.runInContext("physical[7].sessionRef",w.context),"sr_old");
+  assert.equal(w.storage.backend_identity_reset_pending.pages[0].tabId,8,"failed pages retain durable recovery evidence");
+});
+
+test("durable identity recovery selects active backend maps after reboot and retains busy pages",async()=>{
+  const persisted={config:{baseUrl:"http://current-relay:8765"},creation_tabs:{7:{sessionRef:"sr_current",owner:"browser",token:"current-token"}},
+    backend_state:{"http://other-relay:8765":{creation_tabs:{7:{sessionRef:"sr_wrong",owner:"browser",token:"wrong-token"}}}},
+    backend_identity_reset_pending:{pages:[{tabId:7,documentId:"doc",conversationId:null,projectId:null}]}};
+  const w=await worker("opening",true,false,persisted);
+  assert.ok(w.storage.backend_identity_reset_pending);
+  await vm.runInContext(`
+    globalThis.busy=true;globalThis.configured=[];globalThis.resets=0;
+    chrome.tabs.get=async()=>({id:7});
+    getPageState=async()=>({documentId:'doc',conversationId:null,projectId:null,generating:busy});
+    sendTabMessage=async(id,message)=>{
+      if(message.type==='get-inflight')return {inflight:null};
+      if(message.type==='reset-relay-identity'){resets++;return {reset:true};}
+      if(message.type==='configure-session'){configured.push(message.managed.sessionRef);return {session:message.managed.sessionRef};}
+    };
+  `,w.context);
+  assert.equal(await vm.runInContext("restoreBackendIdentities()",w.context),false);
+  assert.equal(vm.runInContext("resets",w.context),0);
+  assert.ok(w.storage.backend_identity_reset_pending.pages.length);
+  await vm.runInContext("busy=false",w.context);
+  assert.equal(await vm.runInContext("restoreBackendIdentities()",w.context),true);
+  assert.deepEqual(Array.from(vm.runInContext("configured",w.context)),["sr_current"]);
+  assert.equal(w.storage.backend_identity_reset_pending,null);
+});
+
+test("retained busy identity recovery blocks independent registration and claims while diagnostics remain available",async()=>{
+  const w=await worker();
+  const result=await vm.runInContext(`(async()=>{
+    const calls=[];
+    await setStorage('backend_identity_reset_pending',{pages:[{tabId:7,documentId:'doc',conversationId:null,projectId:null}]});
+    chrome.tabs.get=async()=>({id:7}); chrome.tabs.query=async()=>[{id:7,url:'https://chatgpt.com/'}];
+    getPageState=async()=>({session:'session',documentId:'doc',conversationId:null,projectId:null,generating:true,ready:false});
+    sendTabMessage=async()=>({inflight:null});
+    httpJson=async(method,path,body)=>{calls.push(path);return {};};
+    let registrationError,dispatchError;
+    try {await registerPageSession(7,{session:'session'});} catch(error){registrationError=error.message;}
+    await processSessionCreations(); await processSessionControls();
+    try {await ensureDispatch();} catch(error){dispatchError=error.message;}
+    await reportSessionSnapshots(); await reportBrowserInventory();
+    return {calls,registrationError,dispatchError,marker:await getStorage('backend_identity_reset_pending',null)};
+  })()`,w.context);
+  assert.equal(result.registrationError,"backend_identity_recovery_pending");
+  assert.equal(result.dispatchError,"backend_identity_recovery_pending");
+  assert.ok(result.marker.pages.length);
+  assert.ok(result.calls.includes("/internal/session-snapshots"));
+  assert.ok(result.calls.includes("/internal/browser-inventory"));
+  assert.ok(!result.calls.some((path:string)=>path.includes("/claim")||path.includes("/dispatch/watch")||path.includes("/inspect")));
+});
+
+test("watch excludes blocked ownership from acknowledgements while retaining unrelated pages",async()=>{
+  const w=await worker();
+  await vm.runInContext(`(async()=>{
+    dispatchMode=null;globalThis.watchCount=0;
+    chrome.tabs.query=async()=>[{id:7},{id:8}];
+    dispatchPages.set(7,{session:'blocked',tabId:7,documentId:'doc7'});
+    dispatchPages.set(8,{session:'allowed',tabId:8,documentId:'doc8'});
+    httpJson=async(method,path,body,timeout,signal)=>{
+      if(path==='/v1/server')return {capabilities:{dispatchV2:true}};
+      if(path!=='/internal/dispatch/watch')throw new Error('unexpected '+path);
+      watchCount++;
+      if(watchCount===1)return {cursor:'cursor',sessions:[],blockedSessions:[{session:'blocked',reason:'dispatch_owner_conflict'}]};
+      return new Promise(resolve=>signal.addEventListener('abort',()=>resolve({}),{once:true}));
+    };
+    await ensureDispatch();
+  })()`,w.context);
+  for(let i=0;i<10;i++)await new Promise<void>(resolve=>setImmediate(resolve));
+  assert.equal(vm.runInContext("acknowledgedPages.has('blocked')",w.context),false);
+  assert.equal(vm.runInContext("acknowledgedPages.get('allowed').tabId",w.context),8);
+  assert.equal(vm.runInContext("dispatchState.blockedSessions[0].reason",w.context),"dispatch_owner_conflict");
+  await vm.runInContext("dispatchClient.stop();dispatchClient.running",w.context);
+});
+
+test('late unbound registration cannot replace the completed binding or management policy',async()=>{
+  const w=await worker('opening',true);
+  const result=await vm.runInContext(`(async()=>{
+    await getPageManager().remember(7,{session:'sr_new',conversationId:null,provenance:'relay',lifecyclePolicy:'reclaimable'});
+    let release;const gate=new Promise(r=>release=r);
+    registerPageIdentity=async(_tab,page)=>{if(!page.conversationId)await gate;return page;};
+    const older=registerPageSession(7,{session:'sr_new',conversationId:null}).catch(e=>e.message);
+    for(let i=0;i<10;i++)await Promise.resolve();
+    const newer=await registerPageSession(7,{session:'sr_new',conversationId:'abc-123'});
+    await rememberTabSession(7,newer.session,registrationResults.get(newer));
+    release();const oldResult=await older;
+    return {oldResult, cached:registrationCache.get(7).page.conversationId};
+  })()`,w.context);
+  assert.equal(result.oldResult,'registration_superseded');assert.equal(result.cached,'abc-123');
+  assert.equal(w.storage.page_lifecycle[7].conversationId,'abc-123');
+  assert.equal(w.storage.page_lifecycle[7].lifecyclePolicy,'reclaimable');
+  assert.equal(w.storage.page_lifecycle[7].provenance,'relay');
+});
+test('token-validated unbound creation retains capacity during a null SPA route observation',async()=>{
+  const w=await worker('opening',true);
+  await vm.runInContext(`(async()=>{
+    await getPageManager().remember(7,{session:'sr_new',conversationId:null,provenance:'relay',lifecyclePolicy:'reclaimable'});
+    await rememberTabSession(7,'sr_new');
+    await setStorage('creation_tabs',{7:{sessionRef:'sr_new',token:'token',owner:'browser',projectId:null}});
+    chrome.tabs.sendMessage=async()=>({session:null,pageKind:'discovery',managed:{sessionRef:'sr_new',token:'token',owner:'browser'}});
+  })()`,w.context);
+  await w.message({type:'session-hello',session:null,pageKind:'discovery'});
+  assert.equal(w.storage.page_lifecycle[7].lifecyclePolicy,'reclaimable');
+  assert.equal(w.storage.tab_session_map[7],'sr_new');
+});
+test('document replaced during registration cannot apply stale lifecycle or cache',async()=>{
+  const w=await worker();
+  const result=await vm.runInContext(`(async()=>{
+    registerPageIdentity=async(_tab,page)=>page;
+    chrome.tabs.sendMessage=async()=>({session:'new-session',conversationId:'new-conversation',documentId:'new-document'});
+    try{await registerPageSession(7,{session:'old-session',conversationId:'old-conversation',documentId:'old-document'});}catch(e){return e.message;}
+  })()`,w.context);
+  assert.equal(result,'registration_superseded');assert.equal(w.storage.page_lifecycle?.[7],undefined);
+});
+
+test('null identity carrying a different creation token cannot retain management authority',async()=>{
+  const w=await worker('opening',true);
+  await vm.runInContext(`(async()=>{
+    await getPageManager().remember(7,{session:'sr_new',conversationId:null,provenance:'relay',lifecyclePolicy:'reclaimable'});
+    await setStorage('creation_tabs',{7:{sessionRef:'sr_new',token:'token',owner:'browser'}});
+    chrome.tabs.sendMessage=async()=>({session:null,managed:{sessionRef:'sr_new',token:'wrong-token',owner:'browser'}});
+  })()`,w.context);
+  await w.message({type:'session-hello',session:null});
+  assert.equal(w.storage.page_lifecycle[7],undefined);
+});
+test('a slow null probe cannot forget a newer valid registration',async()=>{
+  const w=await worker();
+  await vm.runInContext(`(async()=>{
+    let release;const gate=new Promise(r=>release=r);
+    chrome.tabs.sendMessage=async()=>gate;
+    const obsolete=handleNullPage(7,{session:null});
+    registerPageIdentity=async(_tab,page)=>page;
+    const newer=await registerPageSession(7,{session:'new-session',conversationId:'new-conversation'});
+    await rememberTabSession(7,newer.session,registrationResults.get(newer));
+    release({session:null});await obsolete;
+  })()`,w.context);
+  assert.equal(w.storage.page_lifecycle[7].session,'new-session');
+  assert.equal(w.storage.tab_session_map[7],'new-session');
+});
+
+test('null cleanup cannot delete lifecycle registered while cache forgetting awaited',async()=>{
+  const w=await worker();
+  await vm.runInContext(`(async()=>{
+    chrome.tabs.sendMessage=async()=>({session:null});
+    registerPageIdentity=async(_tab,page)=>page;
+    const original=forgetTabSession;
+    forgetTabSession=async tab=>{
+      await original(tab);
+      const newer=await registerPageSession(tab,{session:'new-session',conversationId:'new-conversation'});
+      await rememberTabSession(tab,newer.session,registrationResults.get(newer));
+    };
+    await handleNullPage(7,{session:null});
+  })()`,w.context);
+  assert.equal(w.storage.page_lifecycle[7].session,'new-session');
+  assert.equal(w.storage.tab_session_map[7],'new-session');
+});
+test('superseded managed bind cannot publish creation configuration',async()=>{
+  const w=await worker();
+  const result=await vm.runInContext(`(async()=>{
+    let release;const gate=new Promise(r=>release=r);let binding=false,configured=0;
+    creationAction=async(_meta,action)=>{
+      if(action==='bind'){binding=true;await gate;return {conversationId:'old-conversation'};}
+      return {creationStatus:'created'};
+    };
+    chrome.tabs.sendMessage=async()=>{configured++;return {};};
+    const original=registerPageIdentity;
+    registerPageIdentity=async(tab,page,current)=>page.managed?original(tab,page,current):page;
+    const older=registerPageSession(7,{session:'sr_old',conversationId:'old-conversation',projectId:null,
+      managed:{sessionRef:'sr_old',owner:'browser',token:'old-token',projectId:null}}).catch(e=>e.message);
+    for(let i=0;i<30&&!binding;i++)await Promise.resolve();
+    if(!binding)throw new Error('bind did not start');
+    await registerPageSession(7,{session:'manual-new',conversationId:'new-conversation'});
+    release();return {oldResult:await older,configured};
+  })()`,w.context);
+  assert.equal(result.oldResult,'registration_superseded');assert.equal(result.configured,0);
+  assert.equal(w.storage.creation_tabs?.[7],undefined);
+  assert.equal(w.storage.page_lifecycle[7].session,'manual-new');
+});

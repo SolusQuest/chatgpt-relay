@@ -29,3 +29,12 @@ test("conversation errors retain a language-independent code through session pau
     assert.equal(info.safeToResubmit, null);
   }
 });
+
+test("diagnostic reason codes guide inspection without authorizing resend", () => {
+  for (const code of ["dispatch_disconnected", "page_snapshot_stale", "page_snapshot_unknown", "page_probe_failed"]) {
+    const result = errorInfo(code);
+    assert.equal(result.code, code);
+    assert.equal(result.nextAction, "run_doctor");
+    assert.equal(result.safeToResubmit, null);
+  }
+});

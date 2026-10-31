@@ -13,7 +13,7 @@ export function errorInfo(message: string, task?: Task) {
     code === "effort_verification_unknown" ? "inspect_warning_or_reverify_effort_do_not_resend" : code === "effort_mismatch" ? "inspect_captured_reply_and_effort_do_not_resend" :
     code === "effort_unavailable" || code === "effort_dom_unsupported" || code === "effort_model_unsupported" ? "inspect_page_effort_options" :
     code === "composer_changed" || code === "composer_not_clean" ? "inspect_session_and_preserve_draft" :
-    code === "page_identity_unavailable" || code === "reload_extension_and_page" ? "run_doctor" :
+    code === "dispatch_disconnected" || code === "page_snapshot_stale" || code === "page_snapshot_unknown" || code === "page_probe_failed" || code === "page_identity_unavailable" || code === "reload_extension_and_page" ? "run_doctor" :
     code === "control_timeout" || /^(refresh|open|close)_outcome_unknown$/.test(code) ? "inspect_session_and_operation_do_not_repeat" :
     code === "instance_ambiguous" ? "inspect_browser_instances_and_select_instance" :
     code === "instance_unavailable" || code === "instance_generation_changed" || code === "control_unsupported" ? "run_doctor" :

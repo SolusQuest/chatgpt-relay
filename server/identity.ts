@@ -9,5 +9,5 @@ export function serverIdentity(db: Db): ServerInfo {
   db.prepare("INSERT OR IGNORE INTO server_metadata(key,value) VALUES ('server_id',?)").run(randomUUID());
   const row = db.prepare("SELECT value FROM server_metadata WHERE key='server_id'").get() as { value: string };
   return { product: RELAY_PRODUCT, serverId: row.value, name: process.env.GPT_RELAY_NAME ?? os.hostname(),
-    version: createRequire(import.meta.url)("../package.json").version, apiVersion: BACKEND_API_VERSION };
+    version: createRequire(import.meta.url)("../package.json").version, capabilities: { dispatchV2: true }, apiVersion: BACKEND_API_VERSION };
 }

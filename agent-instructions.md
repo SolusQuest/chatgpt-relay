@@ -101,7 +101,7 @@ Default client wait is 10 minutes; normal task lifetime is 30. `--wait-timeout` 
 
 ## Diagnose and control an existing session
 
-Use exact task identity with `sessions inspect`, `doctor --session-ref <ref>`, and `tasks trace <task-id>`. Missing/stale/page-DOM observations are unknown evidence. Session controls accept either `--session-ref <ref>` or `--session <conversation-id>`.
+Use exact task identity with `sessions inspect`, `doctor --session-ref <ref>`, and `tasks trace <task-id>`. Missing/stale/page-DOM observations are unknown evidence. Distinguish `dispatch_disconnected`, `page_snapshot_stale`, `page_snapshot_unknown` and recent explicit `page_probe_failed` using doctor and inspection; none authorizes replay. Unified dispatch uses a single bounded watch and durable claims, with generation recovery against the original task. Manual tabs remain protected unless the user explicitly grants reclamation in the popup; running reviews grants no such permission. The managed limit defaults to 6; safe reclaimable pages may park/reopen, while unavailable capacity leaves work queued. `waiting_for_capacity` in doctor or inspection means retain the original queued task and wait for a safe slot. Do not bypass capacity by duplicating a session or task. See [dispatch and capacity](docs/dispatch.md). Session controls accept either `--session-ref <ref>` or `--session <conversation-id>`.
 
 | Control | Boundary |
 |---|---|
