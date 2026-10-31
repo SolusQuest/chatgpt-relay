@@ -10,6 +10,22 @@ gpt-relay connects an agent to the user's signed-in ChatGPT through a SQLite que
 - Mode changes checkpoints, never budget/rigor. Exhaustion is not approval; do not ask Relay separately whether `auto` may continue.
 - Pause, captcha, or explicit rate limiting stops submission without automatic retry. Complete independent safe work, then use the active mode's consolidated checkpoint/blocked outcome.
 
+## Client state and sandbox permissions
+
+Choose the client mode before the first Relay command, using the current harness's declared filesystem permissions. An agent restricted to workspace writes must automatically use `--stateless` when the CLI's configured client-state paths are outside its writable roots. If permission to write client state is unknown, prefer `--stateless`. Do not wait for a pending write failure, test permissions by writing outside the workspace, or request broader filesystem access solely for pending records. Ordinary mode remains available when client-state writes are permitted.
+
+Apply `--stateless` consistently to preflight, review, observation and control commands, including `health`, `sessions`, `doctor`, `projects`, `tasks`, `operations`, `show`, `wait` and `cancel`. The examples elsewhere in this guide omit this mode flag; add it when selected. Use the established readable binding or an explicit verified backend, preserving the original server identity. Stateless mode skips pending reads/writes, automatic binding and probe log files; it does not support `bind`, `detect` or local `resume`. If support is uncertain, inspect `gpt-relay --help`; an older CLI requires an update, not a fallback that writes outside the allowed roots.
+
+Before each new logical review, generate and retain a unique `--cri` in the task context or an existing workspace execution record. Add it to every stateless `review`, including `--new-session`. Retain the session selector and backend identity, then capture the emitted recovery metadata and task ID. Retries of the same request keep the original key/ref and effective payload; a new key belongs only to a new logical message. Carry these identifiers through the existing handoff, and recheck filesystem permissions when changing executor or machine. An explicit `--output` must target an allowed writable location.
+
+```bash
+gpt-relay health --stateless
+gpt-relay review --stateless --session-ref <ref> --cri <stable-key> --file <prompt-file> --no-wait --json
+gpt-relay wait --stateless --session-ref <ref> --cri <stable-key> --server <original-server> --server-id <server-uuid> --json
+```
+
+After a timeout, lost response or client-state write failure, observe the original request with `show`/`wait` by task ID, or `tasks`/`wait` with the original session selector and `--cri`. In stateless mode, pass the original `--server` and `--server-id` from recovery output; never use local `resume`. A write failure alone does not prove submission failed, and a missing lookup does not authorize a fresh key/ref or resubmission. See [stateless client recovery](./README.md#stateless-clients-and-workspace-only-agents) for output and lookup semantics.
+
 ## Preflight and context
 
 ```bash
@@ -42,7 +58,7 @@ Retain the first task ID and notify the user of requested ref/Project. Report cr
 
 Same-ref creation retries with unchanged effective parameters return the original first task; changed parameters conflict. Fresh refs require confirmed creation failure. `created` survives first-task failure and does not prove page readiness. `pending`/`unknown`, missing IDs, and wait timeouts authorize no second page or replay; observe recovery. Composition/fallback/resume keep the established ref.
 
-CLI/client persists `clientRequestId` before each message. After a lost response, `resume` observes accepted work and retains unmatched records without resubmission. Repeating a command generates a new key/message unless `--cri` is explicitly reused. Request idempotency and the browser Send fence are separate protections.
+In ordinary mode, the CLI/client persists `clientRequestId` before each message. After a lost response, `resume` observes accepted work and retains unmatched records without resubmission. Repeating an ordinary-mode command generates a new key/message unless `--cri` is explicitly reused. Stateless agents supply and retain their own key and use the server queries under [client state and sandbox permissions](#client-state-and-sandbox-permissions). Request idempotency and the browser Send fence are separate protections.
 
 **Catalog maintenance — only when needed:** `projects set --project-id <id> --name <name> [--description <text>]` and `projects remove --project-id <id>` change local metadata only. Omitted descriptions persist; empty text clears them. Names aid selection, but creation uses IDs. Catalog entries neither guarantee access nor form an allowlist; valid supplied IDs work with page verification. `projects discover [--save] [--no-wait]` reads visible links in open tabs without messages, navigation, or tab switching. Results include sources and `complete: false`; collapsed/unloaded Projects may be absent. Save merges names by ID, preserving descriptions/unseen entries and skipping conflicting observed names. Async discovery returns an ID for API polling.
 
@@ -99,7 +115,7 @@ Use `--stdin` instead of a file, or omit `--no-wait` to wait. Async acceptance r
 
 Default client wait is 10 minutes; normal task lifetime is 30. `--wait-timeout` changes only the current wait, `--task-timeout` server lifetime. Post-Send lifetime plus active grace enters bounded `recovering`, renewed by strong page evidence. Pending records in `~/.gpt-relay/pending/` support `resume`; reuse `--cri <stable-key>` for retriable same-session calls. Distinct task sessions may run concurrently; one session has at most one active task.
 
-For a workspace-only sandbox, use `--stateless` with an explicit backend or an existing readable binding. This skips pending reads/writes, automatic binding and probe log files. Supply and retain a stable `--cri` before review, together with the session selector and recovery backend identity. Recovery JSON lines are emitted on stderr before submission and when the task ID arrives; JSON results/errors include the known recovery identity. Use `tasks --session-ref REF --cri KEY --stateless` or `wait --session-ref REF --cri KEY --stateless` (or `wait TASK_ID --stateless`) to observe the original request, passing the original `--server` and `--server-id` from recovery output. `wait` never submits or cancels. A timeout, missing lookup or lost response never authorizes a new key/ref. `resume` has no stateless mode; explicit `--output` remains a caller-selected file write. See [stateless clients](./README.md#stateless-clients-and-workspace-only-agents).
+Apply the mode chosen under [client state and sandbox permissions](#client-state-and-sandbox-permissions) throughout this lifecycle. Stateless agents use server-side lookup and `wait` in place of the `resume` example above.
 
 ## Diagnose and control an existing session
 
@@ -125,14 +141,14 @@ Controls return operation IDs immediately, also printed before submission on std
 | Health fails | Ask user to start `gpt-relay start` |
 | Supplied session absent | Ask user to open that conversation/confirm Relay status button |
 | Paused/captcha/rate limited | Report `pauseReason`; stop submission, no automatic retry |
-| Client wait timeout | Preserve task ID; `show`/`resume`, no resubmission |
+| Client wait timeout | Preserve task ID; `show`/`wait`, or ordinary-mode `resume`; no resubmission |
 | `recovering` | Original request may complete; observe same task |
 | `submissionState: verifying` | Observe through verification deadline; no replay |
 | `acknowledged` | Submission observed; continue reply waiting |
 | `submission_not_observed` | Concrete send failure; explicit new-task decision, never auto-retry |
-| `submission_outcome_unknown` | Ambiguous delivery; inspect `show`/`resume` before explicit retry decision |
+| `submission_outcome_unknown` | Ambiguous delivery; inspect the original task with `show`/`wait` or ordinary-mode `resume` before explicit retry decision |
 | Attachment upload failure/timeout | Bounded cleanup, no auto-retry; inspect composer if later dispatch misbehaves |
-| Failed/cancelled/expired | Report `error`; use `resume` only within eligible late-reply window |
+| Failed/cancelled/expired | Report `error`; inspect `show`, or ordinary-mode `resume` only within eligible late-reply window |
 | Inaccessible artifact | Supply complete authorized material or request access repair |
 | Off-topic reply | Add missing context/confirm session; no substantive round consumed |
 
@@ -142,4 +158,4 @@ Non-terminal `queued`/`in_progress`/`recovering` long-poll results are not failu
 
 ## Safety and anti-patterns
 
-Prompts/replies persist in `~/.gpt-relay/gpt-relay.db`; pending records in `~/.gpt-relay/pending/`; content goes to the user's ChatGPT session. Never submit unauthorized secrets/sensitive content. Avoid keyword-only approval, concurrent work in one session, summary-only draft review, reading Relay before persisting independent conclusions, discussion after convergence, and dense shell quoting for large/sensitive input.
+Prompts/replies persist on the server in `~/.gpt-relay/gpt-relay.db`; ordinary-mode client pending records default to `~/.gpt-relay/pending/`; content goes to the user's ChatGPT session. Never submit unauthorized secrets/sensitive content. Avoid keyword-only approval, concurrent work in one session, summary-only draft review, reading Relay before persisting independent conclusions, discussion after convergence, and dense shell quoting for large/sensitive input.
